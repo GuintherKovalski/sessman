@@ -11,9 +11,9 @@ there. Each change is specified first with Spec Kit (see [How the project is bui
 
 ```
 ┌──────────────────┬──────────────────────────────────────┬─────────────────────┐
-│ [+ New session ] │ ┌──────────────────────────────────┐ │ Changes │ Info      │
-│ Sessions ⟳       │ │ You  (pinned prompt)             │ │ src/app.rs          │
-│ All │ A │ B │ +  │ └──────────────────────────────────┘ │ - old line          │
+│ Sessions ⟳       │ ┌──────────────────────────────────┐ │ Changes │ Info      │
+│ All │ A │ B │ +  │ │ You  (pinned prompt)             │ │ src/app.rs          │
+│ [+ New session ] │ └──────────────────────────────────┘ │ - old line          │
 │▌Session title    │ You                                  │ + new line          │
 │▌project folder   │ ...                                  │                     │
 │ Session title    │ Claude                               │ src/main.rs         │
@@ -25,7 +25,7 @@ there. Each change is specified first with Spec Kit (see [How the project is bui
 ```
 
 ### Left: sessions and workspaces
-- **+ New session** (top): pick the folder Claude should work in (macOS folder picker,
+- **+ New session** (below the tabs, above the list): pick the folder Claude should work in (macOS folder picker,
   starting at the current session's folder). The main area shows an empty new session; your
   first prompt creates it, and it then appears at the top of the list, selected. If a
   workspace tab is open, the new session joins that workspace.
@@ -68,10 +68,6 @@ there. Each change is specified first with Spec Kit (see [How the project is bui
     button asks Claude Haiku (a little of your usage) for the goal plus a **checklist of 3–7
     subgoals**, ticked where the conversation shows they're done, with "N of M done". You can
     tick and untick items yourself; that is saved.
-  - **Ask about this goal**: a field under the checklist. Enter sends the question, together
-    with the goal and checklist, to the session's own model with its full context, like
-    Claude Code's `/btw`: nothing is added to the session. The answer shows below the field
-    until you click Dismiss.
   - **Model** of the latest reply.
   - **Context**: tokens in context vs the window size (e.g. 204k / 1.0M).
   - **Usage limits**: your 5-hour and weekly limits with time until reset. Claude Code only
@@ -79,6 +75,10 @@ there. Each change is specified first with Spec Kit (see [How the project is bui
     Code's status line (`statusLine` in `~/.claude/settings.json`). Limits then appear after
     your next reply in an interactive Claude Code session (Pro/Max plans). If you already
     have a status line, sessman leaves it alone.
+  - **Ask about this goal**: the last item, pinned to the bottom of the panel. Enter sends the question, together
+    with the goal and checklist, to the session's own model with its full context, like
+    Claude Code's `/btw`: nothing is added to the session. The answer shows just above the field
+    until you click Dismiss.
 
 ## How it works
 

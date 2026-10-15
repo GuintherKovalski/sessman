@@ -23,6 +23,11 @@ prompts again (no `/btw`).
 3. **Given** an answer is showing, **When** the user clicks Dismiss or opens another session, **Then** it goes away.
 4. **Given** the main input, **When** the user types `/btw …`, **Then** it is sent as a normal prompt (the feature moved).
 
+### Amendment (2026-10-15)
+
+- The question field is the last item of the Info tab, pinned to the bottom of the panel; the answer shows just above it.
+- The "New session" button sits below the workspace tabs, right above the session list.
+
 ## Requirements *(mandatory)*
 
 - **FR-001**: Goal MUST be the first Info section.

@@ -263,12 +263,6 @@ impl App {
 
     fn sidebar(&mut self, ui: &mut egui::Ui) {
         let mut actions = Vec::new();
-        let new_button = egui::Button::new(RichText::new("+  New session").strong()).min_size(egui::vec2(ui.available_width(), 28.0));
-        if ui.add_enabled(self.picker.is_none(), new_button).clicked() {
-            let start = self.open.as_ref().and_then(|s| s.cwd.clone());
-            self.picker = Some(runner::pick_folder(ui.ctx().clone(), start));
-        }
-        ui.add_space(4.0);
         ui.horizontal(|ui| {
             ui.heading("Sessions");
             if ui.button("⟳").on_hover_text("Refresh").clicked() {
@@ -276,6 +270,12 @@ impl App {
             }
         });
         self.tabs(ui, &mut actions);
+        ui.add_space(4.0);
+        let new_button = egui::Button::new(RichText::new("+  New session").strong()).min_size(egui::vec2(ui.available_width(), 28.0));
+        if ui.add_enabled(self.picker.is_none(), new_button).clicked() {
+            let start = self.open.as_ref().and_then(|s| s.cwd.clone());
+            self.picker = Some(runner::pick_folder(ui.ctx().clone(), start));
+        }
         ui.separator();
 
         let visible: Vec<usize> = match self.tab.and_then(|w| self.workspaces.list.get(w)) {
@@ -516,6 +516,55 @@ impl App {
         let mut start_summary = false;
         let mut toggled = None;
         let (mut ask, mut dismiss) = (false, false);
+        // Questions about the goal sit at the very bottom, answered with the session's context
+        // but not added to it; the answer shows just above the field.
+        if id.is_some() && !s.messages.is_empty() {
+            egui::Panel::bottom("goal-question")
+                .frame(egui::Frame::new().inner_margin(egui::Margin::symmetric(0, 6)))
+                .show_separator_line(false)
+                .resizable(false)
+                .show(ui, |ui| {
+                    if let Some(b) = &self.btw {
+                        egui::Frame::new()
+                            .fill(ui.visuals().faint_bg_color)
+                            .stroke(Stroke::new(1.0, Color32::from_rgb(200, 170, 90)))
+                            .inner_margin(8.0)
+                            .corner_radius(4.0)
+                            .show(ui, |ui| {
+                                ui.set_width(ui.available_width());
+                                ui.horizontal(|ui| {
+                                    ui.label(RichText::new(&b.question).italics());
+                                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Min), |ui| {
+                                        dismiss = ui.small_button("Dismiss").clicked();
+                                    });
+                                });
+                                egui::ScrollArea::vertical().id_salt("goal-answer").max_height(260.0).show(ui, |ui| match &b.answer {
+                                    None => {
+                                        ui.horizontal(|ui| {
+                                            ui.spinner();
+                                            ui.label("Thinking (not added to the session)…");
+                                        });
+                                    }
+                                    Some(Ok(a)) => {
+                                        ui.label(a);
+                                    }
+                                    Some(Err(e)) => {
+                                        ui.colored_label(Color32::LIGHT_RED, e);
+                                    }
+                                });
+                            });
+                        ui.add_space(4.0);
+                    }
+                    let asking = self.btw.as_ref().is_some_and(|b| b.answer.is_none());
+                    let field = egui::TextEdit::singleline(&mut self.goal_question)
+                        .hint_text("Ask about this goal, Enter to send")
+                        .desired_width(f32::INFINITY);
+                    let resp = ui.add_enabled(!asking, field);
+                    if resp.lost_focus() && ui.input(|i| i.key_pressed(Key::Enter)) && !self.goal_question.trim().is_empty() {
+                        ask = true;
+                    }
+                });
+        }
         egui::ScrollArea::vertical().auto_shrink(false).show(ui, |ui| {
             section(ui, "Goal");
             let goal = id.as_deref().and_then(|id| self.goals.get(id));
@@ -553,50 +602,6 @@ impl App {
                     let label = if goal.is_some() { "Summarize again" } else { "Summarize goal" };
                     let btn = ui.button(label).on_hover_text("Asks Claude Haiku for the goal and a checklist of subgoals (uses a little of your usage)");
                     start_summary = btn.clicked();
-                }
-            }
-
-            // Questions about the goal, answered with the session's context but not added to it.
-            if id.is_some() && !s.messages.is_empty() {
-                ui.add_space(8.0);
-                let asking = self.btw.as_ref().is_some_and(|b| b.answer.is_none());
-                let field = egui::TextEdit::singleline(&mut self.goal_question)
-                    .hint_text("Ask about this goal, Enter to send")
-                    .desired_width(f32::INFINITY);
-                let resp = ui.add_enabled(!asking, field);
-                if resp.lost_focus() && ui.input(|i| i.key_pressed(Key::Enter)) && !self.goal_question.trim().is_empty() {
-                    ask = true;
-                }
-                if let Some(b) = &self.btw {
-                    ui.add_space(4.0);
-                    egui::Frame::new()
-                        .fill(ui.visuals().faint_bg_color)
-                        .stroke(Stroke::new(1.0, Color32::from_rgb(200, 170, 90)))
-                        .inner_margin(8.0)
-                        .corner_radius(4.0)
-                        .show(ui, |ui| {
-                            ui.set_width(ui.available_width());
-                            ui.horizontal(|ui| {
-                                ui.label(RichText::new(&b.question).italics());
-                                ui.with_layout(egui::Layout::right_to_left(egui::Align::Min), |ui| {
-                                    dismiss = ui.small_button("Dismiss").clicked();
-                                });
-                            });
-                            match &b.answer {
-                                None => {
-                                    ui.horizontal(|ui| {
-                                        ui.spinner();
-                                        ui.label("Thinking (not added to the session)…");
-                                    });
-                                }
-                                Some(Ok(a)) => {
-                                    ui.label(a);
-                                }
-                                Some(Err(e)) => {
-                                    ui.colored_label(Color32::LIGHT_RED, e);
-                                }
-                            }
-                        });
                 }
             }
 
