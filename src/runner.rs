@@ -1,13 +1,21 @@
+use std::io::Read;
 use std::path::PathBuf;
 use std::process::Command;
 use std::sync::mpsc::{Receiver, channel};
 
-/// Runs `claude -p --resume <id> <prompt>` on a thread. The receiver yields Ok(stdout) or Err(message).
-pub fn send(ctx: eframe::egui::Context, id: String, cwd: Option<PathBuf>, prompt: String) -> Receiver<Result<String, String>> {
+/// Runs `claude -p` on a thread: `--resume <id>` for an existing session, `--session-id <id>`
+/// to start a new one. The receiver yields Ok(stdout) or Err(message).
+pub fn send(
+    ctx: eframe::egui::Context,
+    id: String,
+    cwd: Option<PathBuf>,
+    prompt: String,
+    new: bool,
+) -> Receiver<Result<String, String>> {
     let (tx, rx) = channel();
     std::thread::spawn(move || {
         let mut cmd = Command::new("claude");
-        cmd.args(["-p", "--resume", &id, &prompt]);
+        cmd.args(["-p", if new { "--session-id" } else { "--resume" }, &id, &prompt]);
         if let Some(dir) = cwd {
             cmd.current_dir(dir);
         }
@@ -20,4 +28,54 @@ pub fn send(ctx: eframe::egui::Context, id: String, cwd: Option<PathBuf>, prompt
         ctx.request_repaint();
     });
     rx
+}
+
+/// Opens the macOS folder picker on a thread. Yields None if the user cancels.
+pub fn pick_folder(ctx: eframe::egui::Context, start: Option<PathBuf>) -> Receiver<Option<PathBuf>> {
+    let (tx, rx) = channel();
+    std::thread::spawn(move || {
+        let mut script = String::from("POSIX path of (choose folder with prompt \"Folder for the new Claude session\"");
+        if let Some(dir) = start.filter(|d| d.is_dir()) {
+            let dir = dir.to_string_lossy().replace('\\', "\\\\").replace('"', "\\\"");
+            script.push_str(&format!(" default location POSIX file \"{dir}\""));
+        }
+        script.push(')');
+        let out = Command::new("osascript").args(["-e", "tell me to activate", "-e", &script]).output();
+        let dir = out
+            .ok()
+            .filter(|o| o.status.success())
+            .map(|o| PathBuf::from(String::from_utf8_lossy(&o.stdout).trim()));
+        let _ = tx.send(dir);
+        ctx.request_repaint();
+    });
+    rx
+}
+
+/// Random UUID v4, as `claude --session-id` requires.
+pub fn new_session_id() -> String {
+    let mut b = [0u8; 16];
+    if std::fs::File::open("/dev/urandom").and_then(|mut f| f.read_exact(&mut b)).is_err() {
+        // Fallback: time-based bytes; uniqueness is all we need.
+        let t = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_nanos();
+        b = t.to_le_bytes();
+    }
+    b[6] = (b[6] & 0x0f) | 0x40;
+    b[8] = (b[8] & 0x3f) | 0x80;
+    let h: String = b.iter().map(|x| format!("{x:02x}")).collect();
+    format!("{}-{}-{}-{}-{}", &h[0..8], &h[8..12], &h[12..16], &h[16..20], &h[20..32])
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn session_ids_are_uuid_v4_and_distinct() {
+        let a = new_session_id();
+        assert_eq!(a.len(), 36);
+        assert_eq!(a.chars().filter(|&c| c == '-').count(), 4);
+        assert_eq!(&a[14..15], "4");
+        assert!(matches!(&a[19..20], "8" | "9" | "a" | "b"));
+        assert_ne!(a, new_session_id());
+    }
 }

@@ -6,6 +6,7 @@ use crate::workspaces::Workspaces;
 use eframe::egui::text::{CCursor, CCursorRange};
 use eframe::egui::{self, Align2, Color32, Id, Key, LayerId, Modifiers, Order, RichText, Sense, Stroke, StrokeKind};
 use similar::{ChangeTag, TextDiff};
+use std::path::PathBuf;
 use std::sync::mpsc::Receiver;
 
 const MAX_DIFF_LINES: usize = 200;
@@ -46,6 +47,13 @@ pub struct App {
     pinned: Option<usize>,
     names: Names,
     renaming: Option<Renaming>,
+    /// Folder of a new session that has no prompt yet (nothing exists on disk until then).
+    new_session: Option<PathBuf>,
+    /// Id of a session being created by the running `claude`, to select once it exists.
+    creating: Option<String>,
+    picker: Option<Receiver<Option<PathBuf>>>,
+    /// Set to move keyboard focus to the prompt input on the next frame.
+    focus_prompt: bool,
 }
 
 impl App {
@@ -64,6 +72,10 @@ impl App {
             pinned: None,
             names: Names::load(&Names::path()),
             renaming: None,
+            new_session: None,
+            creating: None,
+            picker: None,
+            focus_prompt: false,
         };
         // Persist colors assigned on load to workspaces saved before colors existed.
         if !app.workspaces.list.is_empty() {
@@ -108,7 +120,30 @@ impl App {
 
     fn select(&mut self, i: usize) {
         self.selected = Some(i);
+        self.new_session = None;
+        self.focus_prompt = true;
         self.reload();
+    }
+
+    /// Empty session in `dir`; the first prompt creates it.
+    fn start_new_session(&mut self, dir: PathBuf) {
+        self.selected = None;
+        self.open = Some(Session { cwd: Some(dir.clone()), ..Default::default() });
+        self.new_session = Some(dir);
+        self.history = History::default();
+        self.pinned = None;
+        self.error = None;
+        self.focus_prompt = true;
+    }
+
+    fn poll_picker(&mut self) {
+        let Some(rx) = &self.picker else { return };
+        if let Ok(dir) = rx.try_recv() {
+            self.picker = None;
+            if let Some(dir) = dir {
+                self.start_new_session(dir);
+            }
+        }
     }
 
     fn reload(&mut self) {
@@ -132,18 +167,38 @@ impl App {
     }
 
     fn send(&mut self, ctx: &egui::Context) {
-        let (Some(i), Some(s)) = (self.selected, &self.open) else { return };
+        let Some(cwd) = self.open.as_ref().map(|s| s.cwd.clone()) else { return };
+        let (id, new) = match (&self.new_session, self.selected) {
+            (Some(_), _) => (runner::new_session_id(), true),
+            (None, Some(i)) => (self.sessions[i].id.clone(), false),
+            _ => return,
+        };
         let prompt = std::mem::take(&mut self.input);
         if prompt.trim().is_empty() {
             return;
         }
-        self.running = Some(runner::send(ctx.clone(), self.sessions[i].id.clone(), s.cwd.clone(), prompt));
+        if new {
+            self.creating = Some(id.clone());
+            if let Some(w) = self.tab {
+                self.workspaces.move_to(&id, w);
+                self.save_workspaces();
+            }
+        }
+        self.running = Some(runner::send(ctx.clone(), id, cwd, prompt, new));
     }
 
     fn poll_runner(&mut self) {
         let Some(rx) = &self.running else { return };
         if let Ok(result) = rx.try_recv() {
             self.running = None;
+            if let Some(id) = self.creating.take() {
+                self.sessions = session::list(&session::projects_dir());
+                // If claude failed before creating it, stay on the empty session to retry.
+                if let Some(i) = self.sessions.iter().position(|s| s.id == id) {
+                    self.selected = Some(i);
+                    self.new_session = None;
+                }
+            }
             self.reload();
             if let Err(e) = result {
                 self.error = Some(e);
@@ -153,6 +208,12 @@ impl App {
 
     fn sidebar(&mut self, ui: &mut egui::Ui) {
         let mut actions = Vec::new();
+        let new_button = egui::Button::new(RichText::new("+  New session").strong()).min_size(egui::vec2(ui.available_width(), 28.0));
+        if ui.add_enabled(self.picker.is_none(), new_button).clicked() {
+            let start = self.open.as_ref().and_then(|s| s.cwd.clone());
+            self.picker = Some(runner::pick_folder(ui.ctx().clone(), start));
+        }
+        ui.add_space(4.0);
         ui.horizontal(|ui| {
             ui.heading("Sessions");
             if ui.button("⟳").on_hover_text("Refresh").clicked() {
@@ -318,6 +379,10 @@ impl App {
                         .hint_text(RichText::new(hint).monospace())
                         .desired_width(ui.available_width() - 24.0);
                     let resp = ui.add_enabled(enabled, edit);
+                    if self.focus_prompt && enabled {
+                        resp.request_focus();
+                    }
+                    self.focus_prompt = false;
                     if enabled && resp.lost_focus() && ui.input(|i| i.key_pressed(Key::Enter)) {
                         self.send(ui.ctx());
                         resp.request_focus();
@@ -334,6 +399,13 @@ impl App {
             ui.centered_and_justified(|ui| ui.label("Select a session on the left"));
             return;
         };
+        if let Some(dir) = self.new_session.as_ref().filter(|_| s.messages.is_empty()) {
+            ui.centered_and_justified(|ui| {
+                let status = if self.running.is_some() { "Starting…" } else { "Type your first prompt below." };
+                ui.label(format!("New session in {}\n\n{status}", dir.display()));
+            });
+            return;
+        }
         // Pinned "You": the prompt of the turn at the top of the viewport (computed last frame).
         let pinned = self.pinned.or_else(|| s.messages.iter().position(|m| m.role == Role::User));
         if let Some(m) = pinned.and_then(|i| s.messages.get(i)) {
@@ -442,6 +514,7 @@ fn short_project(p: &str) -> String {
 impl eframe::App for App {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         self.poll_runner();
+        self.poll_picker();
         egui::Panel::left("sessions").default_size(260.0).resizable(true).show(ui, |ui| self.sidebar(ui));
         egui::Panel::right("diffs").default_size(420.0).resizable(true).show(ui, |ui| self.diffs(ui));
         egui::CentralPanel::default().show(ui, |ui| {
@@ -451,6 +524,12 @@ impl eframe::App for App {
                 .resizable(false)
                 .show(ui, |ui| self.prompt_bar(ui));
             self.conversation(ui);
+            // A plain click anywhere in the main area goes to the input, like a terminal.
+            let area = ui.max_rect();
+            if ui.input(|i| i.pointer.primary_clicked() && i.pointer.interact_pos().is_some_and(|p| area.contains(p))) {
+                self.focus_prompt = true;
+                ui.ctx().request_repaint();
+            }
         });
     }
 }

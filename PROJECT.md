@@ -11,9 +11,9 @@ there. Each change is specified first with Spec Kit (see [How the project is bui
 
 ```
 ┌──────────────────┬──────────────────────────────────────┬─────────────────────┐
-│ Sessions ⟳       │ ┌──────────────────────────────────┐ │ Changes             │
-│ All │ A │ B │ +  │ │ You  (pinned prompt)             │ │ src/app.rs          │
-│──────────────────│ └──────────────────────────────────┘ │ - old line          │
+│ [+ New session ] │ ┌──────────────────────────────────┐ │ Changes             │
+│ Sessions ⟳       │ │ You  (pinned prompt)             │ │ src/app.rs          │
+│ All │ A │ B │ +  │ └──────────────────────────────────┘ │ - old line          │
 │▌Session title    │ You                                  │ + new line          │
 │▌project folder   │ ...                                  │                     │
 │ Session title    │ Claude                               │ src/main.rs         │
@@ -25,6 +25,10 @@ there. Each change is specified first with Spec Kit (see [How the project is bui
 ```
 
 ### Left: sessions and workspaces
+- **+ New session** (top): pick the folder Claude should work in (macOS folder picker,
+  starting at the current session's folder). The main area shows an empty new session; your
+  first prompt creates it, and it then appears at the top of the list, selected. If a
+  workspace tab is open, the new session joins that workspace.
 - Lists every Claude Code session, newest first. Each row shows the session title (Claude's
   generated title, or your first prompt) and its project folder. ⟳ reloads the list.
 - Click a session to open it in the middle.
@@ -42,6 +46,8 @@ there. Each change is specified first with Spec Kit (see [How the project is bui
     "All sessions" each session in a workspace gets a colored stripe and tint (the ▌ above).
 
 ### Middle: conversation
+- **Click anywhere** in the main area to put the cursor in the prompt input, like a terminal.
+  Opening a session also focuses it.
 - **Prompt input** at the bottom, styled like a terminal line (`>` prompt, monospace, dark
   background, no buttons). With it focused:
   - **Up / Down** step through the prompts you sent earlier in this session (like shell
@@ -66,6 +72,7 @@ file path and removed (red `-`) / added (green `+`) lines. Long diffs are cut at
 | Prompt history | The prompts you typed in that session (tool results and slash-command wrappers are skipped). |
 | Diffs | The `Edit` / `MultiEdit` / `Write` tool calls recorded in the session, diffed line by line. |
 | Sending a prompt | Runs `claude -p --resume <session-id> "<prompt>"` in the session's folder, in the background. |
+| New session | Runs `claude -p --session-id <new uuid> "<first prompt>"` in the chosen folder. |
 | Workspaces and their colors | sessman's own file: `~/.config/sessman/workspaces.json`. |
 | Custom session names | sessman's own file: `~/.config/sessman/names.json`. |
 
@@ -74,7 +81,7 @@ sessman never writes to Claude's files. Everything it adds (workspaces, custom n
 ### Current limitations
 - Replies appear when complete, not word by word.
 - `claude -p` is non-interactive, so tools that need your approval are refused.
-- You can't start a new session from the app, or rename or reorder workspaces (sessions can be renamed).
+- You can't rename or reorder workspaces (sessions can be renamed).
 - The list does not refresh on its own; use ⟳.
 
 ## Code layout
@@ -110,6 +117,7 @@ spec → plan → tasks → implementation, and the documents stay in the repo:
 | `specs/002-workspaces-pinned-prompt/` | Workspace tabs, drag-and-drop, Move to, pinned prompt |
 | `specs/003-rename-sessions/` | Double-click to rename a session |
 | `specs/004-workspace-colors-terminal-input/` | Workspace colors, terminal-style input at the bottom |
+| `specs/005-new-session-click-focus/` | New session button, click anywhere to focus the input |
 
 Each feature folder has `spec.md` (what and why), `plan.md` (how), and `tasks.md` (the
 checklist that was implemented). `specs/001-session-manager-ui/research.md` lists open
