@@ -1,5 +1,6 @@
 mod app;
 mod history;
+mod names;
 mod runner;
 mod session;
 mod workspaces;

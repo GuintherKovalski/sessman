@@ -1,7 +1,9 @@
 use crate::history::History;
+use crate::names::Names;
 use crate::runner;
 use crate::session::{self, Change, Role, Session, SessionMeta};
 use crate::workspaces::Workspaces;
+use eframe::egui::text::{CCursor, CCursorRange};
 use eframe::egui::{self, Align2, Color32, Id, Key, LayerId, Modifiers, Order, RichText, Sense, Stroke, StrokeKind};
 use similar::{ChangeTag, TextDiff};
 use std::sync::mpsc::Receiver;
@@ -16,6 +18,15 @@ enum Action {
     MoveTo(String, usize),
     Remove(String),
     DeleteWorkspace(usize),
+    Rename(String, String),
+    CancelRename,
+}
+
+/// Inline rename in progress: which session, the edited text, and whether it was just opened.
+struct Renaming {
+    id: String,
+    text: String,
+    fresh: bool,
 }
 
 pub struct App {
@@ -33,6 +44,8 @@ pub struct App {
     new_workspace: Option<String>,
     /// Index into the open session's messages of the "You" prompt pinned above the conversation.
     pinned: Option<usize>,
+    names: Names,
+    renaming: Option<Renaming>,
 }
 
 impl App {
@@ -49,6 +62,8 @@ impl App {
             tab: None,
             new_workspace: None,
             pinned: None,
+            names: Names::load(&Names::path()),
+            renaming: None,
         }
     }
 
@@ -70,6 +85,14 @@ impl App {
                 self.workspaces.remove(&id);
                 self.save_workspaces();
             }
+            Action::Rename(id, name) => {
+                self.renaming = None;
+                self.names.set(&id, &name);
+                if let Err(e) = self.names.save(&Names::path()) {
+                    self.error = Some(format!("could not save names: {e}"));
+                }
+            }
+            Action::CancelRename => self.renaming = None,
             Action::DeleteWorkspace(w) => {
                 self.workspaces.delete(w);
                 self.tab = None;
@@ -148,7 +171,12 @@ impl App {
         egui::ScrollArea::vertical().show(ui, |ui| {
             for i in visible {
                 let s = &self.sessions[i];
-                let label = format!("{}\n{}", s.title, short_project(&s.project));
+                let title = self.names.get(&s.id).unwrap_or(&s.title);
+                if let Some(r) = self.renaming.as_mut().filter(|r| r.id == s.id) {
+                    rename_field(ui, r, &s.project, &mut actions);
+                    continue;
+                }
+                let label = format!("{title}\n{}", short_project(&s.project));
                 // One widget that senses both: a separate drag-source wrapper would swallow the click.
                 let row = ui.selectable_label(self.selected == Some(i), label).interact(Sense::click_and_drag());
                 row.dnd_set_drag_payload(s.id.clone());
@@ -156,11 +184,14 @@ impl App {
                     if let Some(pos) = ui.ctx().pointer_interact_pos() {
                         let painter = ui.ctx().layer_painter(LayerId::new(Order::Tooltip, Id::new("drag-ghost")));
                         let font = egui::FontId::proportional(14.0);
-                        painter.text(pos + egui::vec2(14.0, 0.0), Align2::LEFT_CENTER, &s.title, font, USER_COLOR);
+                        painter.text(pos + egui::vec2(14.0, 0.0), Align2::LEFT_CENTER, title, font, USER_COLOR);
                     }
                 }
                 if row.clicked() {
                     actions.push(Action::Select(i));
+                }
+                if row.double_clicked() {
+                    self.renaming = Some(Renaming { id: s.id.clone(), text: title.to_owned(), fresh: true });
                 }
                 row.context_menu(|ui| {
                     ui.menu_button("Move to", |ui| {
@@ -317,6 +348,28 @@ impl App {
                 ui.add_space(10.0);
             }
         });
+    }
+}
+
+/// Editable name in place of a session row. Enter or clicking away saves; Escape cancels.
+fn rename_field(ui: &mut egui::Ui, r: &mut Renaming, project: &str, actions: &mut Vec<Action>) {
+    let id = Id::new("rename");
+    let mut out = egui::TextEdit::singleline(&mut r.text).id(id).desired_width(f32::INFINITY).show(ui);
+    if r.fresh {
+        // Like renaming a folder: focused, with the whole name selected.
+        r.fresh = false;
+        out.response.request_focus();
+        let all = CCursorRange::two(CCursor::new(0), CCursor::new(r.text.chars().count()));
+        out.state.cursor.set_char_range(Some(all));
+        out.state.store(ui.ctx(), id);
+    }
+    ui.label(RichText::new(short_project(project)).weak());
+    if out.response.lost_focus() {
+        if ui.input(|i| i.key_pressed(Key::Escape)) {
+            actions.push(Action::CancelRename);
+        } else {
+            actions.push(Action::Rename(r.id.clone(), r.text.clone()));
+        }
     }
 }
 

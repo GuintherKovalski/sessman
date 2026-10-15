@@ -26,6 +26,9 @@ there. Each change is specified first with Spec Kit (see [How the project is bui
 - Lists every Claude Code session, newest first. Each row shows the session title (Claude's
   generated title, or your first prompt) and its project folder. ⟳ reloads the list.
 - Click a session to open it in the middle.
+- **Double-click** a session name to rename it, like a folder: the name is selected, type the
+  new one, **Enter** (or click elsewhere) saves, **Escape** cancels. Saving an empty name
+  brings back the original one. Names are sessman's own; Claude Code keeps its own title.
 - **Tabs** at the top: "All sessions", one tab per workspace, and **+**.
   - **+** asks for a name and creates a workspace tab.
   - Drag a session onto a workspace tab to put it there (the tab is outlined while you hover).
@@ -59,13 +62,14 @@ file path and removed (red `-`) / added (green `+`) lines. Long diffs are cut at
 | Diffs | The `Edit` / `MultiEdit` / `Write` tool calls recorded in the session, diffed line by line. |
 | Sending a prompt | Runs `claude -p --resume <session-id> "<prompt>"` in the session's folder, in the background. |
 | Workspaces | sessman's own file: `~/.config/sessman/workspaces.json`. |
+| Custom session names | sessman's own file: `~/.config/sessman/names.json`. |
 
-sessman never writes to Claude's files. Everything it adds (workspaces) lives in its own config file.
+sessman never writes to Claude's files. Everything it adds (workspaces, custom names) lives in its own config files.
 
 ### Current limitations
 - Replies appear when complete, not word by word.
 - `claude -p` is non-interactive, so tools that need your approval are refused.
-- You can't start a new session from the app, or rename or reorder workspaces.
+- You can't start a new session from the app, or rename or reorder workspaces (sessions can be renamed).
 - The list does not refresh on its own; use ⟳.
 
 ## Code layout
@@ -76,6 +80,7 @@ src/
 ├── app.rs         the three panels, tabs, drag-and-drop, context menus, pinned prompt
 ├── session.rs     finds and parses Claude Code session files
 ├── history.rs     Up/Down prompt history
+├── names.rs       custom session names
 ├── runner.rs      runs `claude -p --resume` on a background thread
 └── workspaces.rs  workspaces: create, move, remove, delete, load/save
 ```
@@ -98,6 +103,7 @@ spec → plan → tasks → implementation, and the documents stay in the repo:
 | `.specify/memory/constitution.md` | Ground rules: build the minimum, never write Claude's files, one binary, learn by using |
 | `specs/001-session-manager-ui/` | Session list, prompt bar with history, diff panel |
 | `specs/002-workspaces-pinned-prompt/` | Workspace tabs, drag-and-drop, Move to, pinned prompt |
+| `specs/003-rename-sessions/` | Double-click to rename a session |
 
 Each feature folder has `spec.md` (what and why), `plan.md` (how), and `tasks.md` (the
 checklist that was implemented). `specs/001-session-manager-ui/research.md` lists open
