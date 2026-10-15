@@ -5,6 +5,7 @@ edition = "2024"
 
 [dependencies]
 eframe = "0.36"
+egui_extras = { version = "0.36", features = ["syntect"] }
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = { version = "1.0.154", features = ["preserve_order"] }
 similar = "3.2.0"

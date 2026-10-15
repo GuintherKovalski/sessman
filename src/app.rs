@@ -1,18 +1,17 @@
+use crate::diffview::{self, CardEvent};
 use crate::goal;
 use crate::history::History;
 use crate::names::Names;
 use crate::runner;
 use crate::status;
-use crate::session::{self, Change, Role, Session, SessionMeta};
+use crate::session::{self, Role, Session, SessionMeta};
 use crate::workspaces::Workspaces;
 use eframe::egui::text::{CCursor, CCursorRange};
 use eframe::egui::{self, Align2, Color32, Id, Key, LayerId, Modifiers, Order, RichText, Sense, Stroke, StrokeKind};
-use similar::{ChangeTag, TextDiff};
 use std::path::PathBuf;
 use std::time::{SystemTime, UNIX_EPOCH};
 use std::sync::mpsc::Receiver;
 
-const MAX_DIFF_LINES: usize = 200;
 const USER_COLOR: Color32 = Color32::from_rgb(120, 170, 255);
 
 /// Sidebar interactions, collected while drawing and applied afterwards.
@@ -71,6 +70,12 @@ pub struct App {
     btw: Option<Btw>,
     /// Text in the Info tab's "ask about this goal" field.
     goal_question: String,
+    /// Changes tab shows only this file, when set.
+    changes_filter: Option<String>,
+    /// Files open read-only in the main area, with their contents.
+    file_tabs: Vec<(String, Result<String, String>)>,
+    /// Active main tab: None = the conversation ("Main"), Some(i) = file_tabs[i].
+    main_tab: Option<usize>,
 }
 
 /// A side question about the session (like Claude Code's /btw): asked with its context, not added to it.
@@ -105,6 +110,9 @@ impl App {
             summarizing: None,
             btw: None,
             goal_question: String::new(),
+            changes_filter: None,
+            file_tabs: Vec::new(),
+            main_tab: None,
         };
         // Persist colors assigned on load to workspaces saved before colors existed.
         if !app.workspaces.list.is_empty() {
@@ -150,6 +158,8 @@ impl App {
     fn select(&mut self, i: usize) {
         self.selected = Some(i);
         self.btw = None;
+        self.changes_filter = None;
+        self.main_tab = None;
         self.new_session = None;
         self.focus_prompt = true;
         self.reload();
@@ -202,6 +212,9 @@ impl App {
     }
 
     fn reload(&mut self) {
+        for (path, contents) in &mut self.file_tabs {
+            *contents = diffview::read(path);
+        }
         let Some(meta) = self.selected.and_then(|i| self.sessions.get(i)) else { return };
         match session::load(&meta.path) {
             Ok(s) => {
@@ -654,18 +667,104 @@ impl App {
         }
     }
 
-    fn diffs(&self, ui: &mut egui::Ui) {
+    fn open_file(&mut self, path: &str) {
+        let i = match self.file_tabs.iter().position(|(p, _)| p == path) {
+            Some(i) => i,
+            None => {
+                self.file_tabs.push((path.to_owned(), diffview::read(path)));
+                self.file_tabs.len() - 1
+            }
+        };
+        self.main_tab = Some(i);
+    }
+
+    fn close_file(&mut self, i: usize) {
+        drop(self.file_tabs.remove(i));
+        self.main_tab = match self.main_tab {
+            Some(t) if t == i => None,
+            Some(t) if t > i => Some(t - 1),
+            t => t,
+        };
+    }
+
+    fn diffs(&mut self, ui: &mut egui::Ui) {
         let Some(s) = &self.open else { return };
         if s.changes.is_empty() {
             ui.label("No code changes in this session");
             return;
         }
+        let files = diffview::group(&s.changes);
+        let (mut toggle, mut open) = (None, None);
+        // File list at the bottom: click filters the cards above, double-click opens the file.
+        egui::Panel::bottom("changed-files").resizable(true).default_size(170.0).show(ui, |ui| {
+            ui.horizontal(|ui| {
+                ui.label(RichText::new(format!("Files ({})", files.len())).strong());
+                if self.changes_filter.is_some() && ui.small_button("Show all").clicked() {
+                    toggle = self.changes_filter.clone();
+                }
+            });
+            egui::ScrollArea::vertical().auto_shrink(false).show(ui, |ui| {
+                for f in &files {
+                    let (name, dir) = diffview::split_path(&f.file);
+                    let selected = self.changes_filter.as_deref() == Some(f.file.as_str());
+                    let row = ui
+                        .horizontal(|ui| {
+                            let r = ui.selectable_label(selected, RichText::new(name).monospace());
+                            ui.label(RichText::new(format!("+{} -{}", f.added, f.removed)).weak().small());
+                            r
+                        })
+                        .inner
+                        .on_hover_text(format!("{dir}\nClick: show its changes · Double-click: open it"));
+                    if row.double_clicked() {
+                        open = Some(f.file.clone());
+                    } else if row.clicked() {
+                        toggle = Some(f.file.clone());
+                    }
+                }
+            });
+        });
+        // Both directions: long unwrapped diff lines scroll instead of widening the panel.
         egui::ScrollArea::both().auto_shrink(false).show(ui, |ui| {
-            for c in &s.changes {
-                diff_block(ui, c);
-                ui.add_space(10.0);
+            for f in files.iter().filter(|f| self.changes_filter.as_ref().is_none_or(|x| *x == f.file)) {
+                match diffview::file_card(ui, f, &s.changes) {
+                    CardEvent::DoubleClicked => open = Some(f.file.clone()),
+                    CardEvent::Clicked => toggle = Some(f.file.clone()),
+                    CardEvent::None => {}
+                }
+                ui.add_space(8.0);
             }
         });
+        if let Some(file) = toggle {
+            self.changes_filter = if self.changes_filter.as_ref() == Some(&file) { None } else { Some(file) };
+        }
+        if let Some(file) = open {
+            self.changes_filter = Some(file.clone());
+            self.open_file(&file);
+        }
+    }
+
+    /// "Main" plus one tab per open file, above the main area.
+    fn main_tabs(&mut self, ui: &mut egui::Ui) {
+        let mut close = None;
+        ui.horizontal_wrapped(|ui| {
+            if ui.selectable_label(self.main_tab.is_none(), RichText::new("Main").strong()).clicked() {
+                self.main_tab = None;
+            }
+            for (i, (path, _)) in self.file_tabs.iter().enumerate() {
+                let (name, _) = diffview::split_path(path);
+                let tab = ui.selectable_label(self.main_tab == Some(i), RichText::new(name).monospace()).on_hover_text(path);
+                if tab.clicked() {
+                    self.main_tab = Some(i);
+                }
+                if ui.small_button("x").on_hover_text("Close").clicked() {
+                    close = Some(i);
+                }
+                ui.add_space(6.0);
+            }
+        });
+        if let Some(i) = close {
+            self.close_file(i);
+        }
     }
 }
 
@@ -691,23 +790,6 @@ fn rename_field(ui: &mut egui::Ui, r: &mut Renaming, project: &str, actions: &mu
     }
 }
 
-fn diff_block(ui: &mut egui::Ui, c: &Change) {
-    ui.label(RichText::new(&c.file).strong().monospace());
-    let diff = TextDiff::from_lines(&c.old, &c.new);
-    let changes: Vec<_> = diff.iter_all_changes().collect();
-    for ch in changes.iter().take(MAX_DIFF_LINES) {
-        let (sign, color) = match ch.tag() {
-            ChangeTag::Delete => ("-", Color32::from_rgb(240, 110, 110)),
-            ChangeTag::Insert => ("+", Color32::from_rgb(110, 210, 120)),
-            ChangeTag::Equal => (" ", Color32::GRAY),
-        };
-        let line = format!("{sign} {}", ch.value().trim_end_matches('\n'));
-        ui.label(RichText::new(line).monospace().color(color));
-    }
-    if changes.len() > MAX_DIFF_LINES {
-        ui.label(format!("… {} more lines", changes.len() - MAX_DIFF_LINES));
-    }
-}
 
 /// Account usage limits from the latest status-line payload. Returns true if "Enable" was clicked.
 fn limits_ui(ui: &mut egui::Ui) -> bool {
@@ -809,12 +891,18 @@ impl eframe::App for App {
         egui::Panel::left("sessions").default_size(260.0).resizable(true).show(ui, |ui| self.sidebar(ui));
         egui::Panel::right("diffs").default_size(420.0).resizable(true).show(ui, |ui| self.right_panel(ui));
         egui::CentralPanel::default().show(ui, |ui| {
+            if !self.file_tabs.is_empty() {
+                egui::Panel::top("main-tabs").show_separator_line(true).resizable(false).show(ui, |ui| self.main_tabs(ui));
+            }
             egui::Panel::bottom("prompt")
                 .frame(egui::Frame::new().inner_margin(egui::Margin::symmetric(0, 6)))
                 .show_separator_line(false)
                 .resizable(false)
                 .show(ui, |ui| self.prompt_bar(ui));
-            self.conversation(ui);
+            match self.main_tab.and_then(|i| self.file_tabs.get(i)) {
+                Some((path, contents)) => diffview::file_view(ui, path, contents),
+                None => self.conversation(ui),
+            }
             // A plain click anywhere in the main area goes to the input, like a terminal.
             let area = ui.max_rect();
             if ui.input(|i| i.pointer.primary_clicked() && i.pointer.interact_pos().is_some_and(|p| area.contains(p))) {

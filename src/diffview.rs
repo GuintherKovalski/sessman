@@ -1,0 +1,240 @@
+//! Changes grouped by file, rendered as diff cards; and a read-only file viewer.
+use crate::session::Change;
+use eframe::egui::text::{LayoutJob, TextFormat};
+use eframe::egui::{self, Color32, FontId, RichText, Stroke, TextWrapMode};
+use egui_extras::syntax_highlighting::{CodeTheme, highlight};
+use similar::{ChangeTag, TextDiff};
+use std::path::Path;
+
+const CONTEXT_LINES: usize = 3;
+const MAX_LINES_PER_EDIT: usize = 300;
+const MAX_VIEW_BYTES: usize = 2_000_000;
+
+pub struct FileChanges {
+    pub file: String,
+    /// Indices into the session's changes, in order.
+    pub edits: Vec<usize>,
+    pub added: usize,
+    pub removed: usize,
+}
+
+#[derive(Debug, PartialEq)]
+pub enum Line {
+    Context(String),
+    Added(String),
+    Removed(String),
+    /// Unchanged lines left out between hunks.
+    Gap,
+}
+
+/// Changes grouped by file, files in order of their first change.
+pub fn group(changes: &[Change]) -> Vec<FileChanges> {
+    let mut files: Vec<FileChanges> = Vec::new();
+    for (i, c) in changes.iter().enumerate() {
+        let (added, removed) = counts(c);
+        match files.iter_mut().find(|f| f.file == c.file) {
+            Some(f) => {
+                f.edits.push(i);
+                f.added += added;
+                f.removed += removed;
+            }
+            None => files.push(FileChanges { file: c.file.clone(), edits: vec![i], added, removed }),
+        }
+    }
+    files
+}
+
+fn counts(c: &Change) -> (usize, usize) {
+    let diff = TextDiff::from_lines(&c.old, &c.new);
+    diff.iter_all_changes().fold((0, 0), |(a, r), ch| match ch.tag() {
+        ChangeTag::Insert => (a + 1, r),
+        ChangeTag::Delete => (a, r + 1),
+        ChangeTag::Equal => (a, r),
+    })
+}
+
+/// The edit as hunks with a few lines of context, unchanged stretches collapsed to `Gap`.
+pub fn lines(c: &Change) -> Vec<Line> {
+    let diff = TextDiff::from_lines(&c.old, &c.new);
+    let mut out = Vec::new();
+    for (i, group) in diff.grouped_ops(CONTEXT_LINES).iter().enumerate() {
+        if i > 0 {
+            out.push(Line::Gap);
+        }
+        for op in group {
+            for ch in diff.iter_changes(op) {
+                let text = ch.value().trim_end_matches(['\n', '\r']).to_owned();
+                out.push(match ch.tag() {
+                    ChangeTag::Insert => Line::Added(text),
+                    ChangeTag::Delete => Line::Removed(text),
+                    ChangeTag::Equal => Line::Context(text),
+                });
+            }
+        }
+    }
+    out
+}
+
+/// (file name, parent folder) for display.
+pub fn split_path(file: &str) -> (&str, &str) {
+    match file.rfind('/') {
+        Some(i) => (&file[i + 1..], &file[..i]),
+        None => (file, ""),
+    }
+}
+
+fn language(file: &str) -> &str {
+    Path::new(file).extension().and_then(|e| e.to_str()).unwrap_or("txt")
+}
+
+const ADD_FG: Color32 = Color32::from_rgb(110, 210, 120);
+const DEL_FG: Color32 = Color32::from_rgb(240, 110, 110);
+const ADD_BG: Color32 = Color32::from_rgb(28, 48, 32);
+const DEL_BG: Color32 = Color32::from_rgb(56, 28, 30);
+
+pub enum CardEvent {
+    None,
+    Clicked,
+    DoubleClicked,
+}
+
+/// One file's changes as a card: header with name, folder and counts, then every edit's hunks.
+pub fn file_card(ui: &mut egui::Ui, f: &FileChanges, changes: &[Change]) -> CardEvent {
+    let mut event = CardEvent::None;
+    egui::Frame::new()
+        .stroke(Stroke::new(1.0, Color32::from_gray(60)))
+        .corner_radius(6.0)
+        .inner_margin(8.0)
+        .show(ui, |ui| {
+            ui.set_width(ui.available_width());
+            let (name, dir) = split_path(&f.file);
+            let header = ui
+                .horizontal(|ui| {
+                    ui.label(RichText::new(name).strong().monospace());
+                    ui.label(RichText::new(format!("+{}", f.added)).color(ADD_FG).monospace());
+                    ui.label(RichText::new(format!("-{}", f.removed)).color(DEL_FG).monospace());
+                })
+                .response
+                .interact(egui::Sense::click())
+                .on_hover_text("Click to show only this file, double-click to open it");
+            if header.double_clicked() {
+                event = CardEvent::DoubleClicked;
+            } else if header.clicked() {
+                event = CardEvent::Clicked;
+            }
+            if !dir.is_empty() {
+                ui.label(RichText::new(dir).weak().small());
+            }
+            let lang = language(&f.file);
+            for (n, &i) in f.edits.iter().enumerate() {
+                ui.add_space(4.0);
+                if n > 0 {
+                    ui.separator();
+                }
+                ui.spacing_mut().item_spacing.y = 0.0;
+                let all = lines(&changes[i]);
+                for line in all.iter().take(MAX_LINES_PER_EDIT) {
+                    diff_line(ui, line, lang);
+                }
+                if all.len() > MAX_LINES_PER_EDIT {
+                    ui.label(RichText::new(format!("… {} more lines", all.len() - MAX_LINES_PER_EDIT)).weak());
+                }
+            }
+        });
+    event
+}
+
+fn diff_line(ui: &mut egui::Ui, line: &Line, lang: &str) {
+    let (sign, text, bg, sign_color, dim) = match line {
+        Line::Added(t) => ("+", t.as_str(), Some(ADD_BG), ADD_FG, false),
+        Line::Removed(t) => ("-", t.as_str(), Some(DEL_BG), DEL_FG, false),
+        Line::Context(t) => (" ", t.as_str(), None, Color32::GRAY, true),
+        Line::Gap => {
+            ui.label(RichText::new("  ⋮").weak().monospace());
+            return;
+        }
+    };
+    let font = FontId::monospace(12.0);
+    let mut job = LayoutJob::default();
+    job.append(&format!("{sign} "), 0.0, TextFormat::simple(font.clone(), sign_color));
+    let theme = CodeTheme::from_memory(ui.ctx(), ui.style()).with_font_id(font);
+    let code = highlight(ui.ctx(), ui.style(), &theme, text, lang);
+    let offset = job.text.len();
+    job.text.push_str(&code.text);
+    for mut section in code.sections {
+        section.byte_range = section.byte_range.start + offset..section.byte_range.end + offset;
+        if dim {
+            section.format.color = section.format.color.gamma_multiply(0.55);
+        }
+        job.sections.push(section);
+    }
+    // Background spans the full card width, painted behind the text.
+    let slot = ui.painter().add(egui::Shape::Noop);
+    let resp = ui.add(egui::Label::new(job).wrap_mode(TextWrapMode::Extend));
+    if let Some(bg) = bg {
+        let rect = egui::Rect::from_x_y_ranges(ui.max_rect().x_range(), resp.rect.y_range());
+        ui.painter().set(slot, egui::Shape::rect_filled(rect, 0.0, bg));
+    }
+}
+
+/// Read-only file contents with line numbers and syntax highlighting.
+pub fn file_view(ui: &mut egui::Ui, path: &str, contents: &Result<String, String>) {
+    ui.label(RichText::new(path).weak().monospace());
+    ui.add_space(4.0);
+    let text = match contents {
+        Ok(t) => t,
+        Err(e) => {
+            ui.colored_label(Color32::LIGHT_RED, e);
+            return;
+        }
+    };
+    let font = FontId::monospace(12.5);
+    let theme = CodeTheme::from_memory(ui.ctx(), ui.style()).with_font_id(font.clone());
+    let job = highlight(ui.ctx(), ui.style(), &theme, text, language(path));
+    let count = text.lines().count().max(1);
+    let numbers: String = (1..=count).map(|n| format!("{n:>5}\n")).collect();
+    egui::ScrollArea::both().auto_shrink(false).show(ui, |ui| {
+        ui.horizontal_top(|ui| {
+            ui.label(RichText::new(numbers).font(font).color(Color32::from_gray(90)));
+            ui.add(egui::Label::new(job).wrap_mode(TextWrapMode::Extend).selectable(true));
+        });
+    });
+}
+
+/// File contents for the viewer, refusing very large or binary files.
+pub fn read(path: &str) -> Result<String, String> {
+    let bytes = std::fs::read(path).map_err(|e| format!("can't open {path}: {e}"))?;
+    if bytes.len() > MAX_VIEW_BYTES {
+        return Err(format!("{path} is too large to show ({} MB)", bytes.len() / 1_000_000));
+    }
+    String::from_utf8(bytes).map_err(|_| format!("{path} is not a text file"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn change(file: &str, old: &str, new: &str) -> Change {
+        Change { file: file.into(), old: old.into(), new: new.into() }
+    }
+
+    #[test]
+    fn groups_by_file_in_first_seen_order() {
+        let c = vec![change("/a/x.rs", "1\n", "2\n"), change("/a/y.rs", "", "new\n"), change("/a/x.rs", "3\n", "4\n5\n")];
+        let g = group(&c);
+        assert_eq!(g.iter().map(|f| f.file.as_str()).collect::<Vec<_>>(), vec!["/a/x.rs", "/a/y.rs"]);
+        assert_eq!(g[0].edits, vec![0, 2]);
+        assert_eq!((g[0].added, g[0].removed), (3, 2));
+        assert_eq!(split_path("/a/x.rs"), ("x.rs", "/a"));
+    }
+
+    #[test]
+    fn collapses_unchanged_lines_between_hunks() {
+        let old: String = (1..=20).map(|n| format!("line{n}\n")).collect();
+        let new = old.replace("line2\n", "two\n").replace("line19\n", "nineteen\n");
+        let l = lines(&change("f", &old, &new));
+        assert!(l.contains(&Line::Gap));
+        assert!(l.contains(&Line::Removed("line2".into())) && l.contains(&Line::Added("two".into())));
+        assert!(l.contains(&Line::Context("line5".into())) && !l.contains(&Line::Context("line10".into())));
+    }
+}

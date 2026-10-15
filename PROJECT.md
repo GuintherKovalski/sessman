@@ -45,7 +45,11 @@ there. Each change is specified first with Spec Kit (see [How the project is bui
   - Every workspace has its own color (no two share one). Its tab is tinted with it, and in
     "All sessions" each session in a workspace gets a colored stripe and tint (the ▌ above).
 
-### Middle: conversation
+### Middle: conversation and file tabs
+- When a file is open, a tab bar appears on top: **Main** (the conversation) and one tab per
+  open file, with the active one highlighted and an `x` to close. Files are **read-only**, with
+  line numbers and syntax highlighting; text can be selected and copied. They reload whenever
+  the session reloads, so they show Claude's latest changes.
 - **Click anywhere** in the main area to put the cursor in the prompt input, like a terminal.
   Opening a session also focuses it.
 - **Prompt input** at the bottom, styled like a terminal line (`>` prompt, monospace, dark
@@ -60,9 +64,15 @@ there. Each change is specified first with Spec Kit (see [How the project is bui
   `[tool: Name]`.
 
 ### Right: Changes and Info tabs
-- **Changes**: every file change Claude made in the session (Edit, MultiEdit, Write), in
-  order, with the file path and removed (red `-`) / added (green `+`) lines. Long diffs are
-  cut at 200 lines.
+- **Changes**: one card per changed file, in order of its first change: file name, folder,
+  and `+added -removed` counts, then each edit as diff hunks with syntax highlighting, green /
+  red tinted rows for added / removed lines, and unchanged stretches collapsed to 3 lines of
+  context (`⋮` marks a gap). At the bottom, **Files** lists every changed file:
+  - **click** a file (or a card's header) to show only its changes; click again or
+    **Show all** to see everything;
+  - **double-click** to open it in the main area (see below).
+  Only edits made with Claude's Edit / MultiEdit / Write tools are known; changes made through
+  shell commands don't show up here.
 - **Info** (top to bottom):
   - **Goal**: until you click **Summarize goal** it shows the start of the first prompt. The
     button asks Claude Haiku (a little of your usage) for the goal plus a **checklist of 3–7
@@ -117,13 +127,14 @@ src/
 ├── history.rs     Up/Down prompt history
 ├── names.rs       custom session names and goals
 ├── goal.rs        goal + subgoal checklist format
+├── diffview.rs    changes grouped by file, diff cards, read-only file viewer
 ├── runner.rs      runs `claude -p` (send, new session, goal summary), folder picker
 ├── status.rs      `sessman statusline`: saves Claude Code's status data; usage limits
 └── workspaces.rs  workspaces: create, move, remove, delete, load/save
 ```
 
-Built with [egui/eframe](https://github.com/emilk/egui) (GUI), `serde_json` (parsing),
-`similar` (diffs).
+Built with [egui/eframe](https://github.com/emilk/egui) (GUI), `egui_extras` + `syntect`
+(syntax highlighting), `serde_json` (parsing), `similar` (diffs).
 
 ```sh
 cargo run --release   # start the app
@@ -146,6 +157,7 @@ spec → plan → tasks → implementation, and the documents stay in the repo:
 | `specs/006-right-panel-info-tab/` | Changes / Info tabs: model, context, goal, usage limits |
 | `specs/007-goal-checklist-btw/` | Goal subgoal checklist, `/btw` side questions |
 | `specs/008-goal-questions-in-info/` | Goal first in Info, its own question field (replaces `/btw`) |
+| `specs/009-changes-by-file-file-tabs/` | Changes by file with highlighting, file list, read-only file tabs |
 
 Each feature folder has `spec.md` (what and why), `plan.md` (how), and `tasks.md` (the
 checklist that was implemented). `specs/001-session-manager-ui/research.md` lists open
