@@ -50,7 +50,7 @@ pub struct App {
 
 impl App {
     pub fn new() -> Self {
-        Self {
+        let mut app = Self {
             sessions: session::list(&session::projects_dir()),
             selected: None,
             open: None,
@@ -64,7 +64,12 @@ impl App {
             pinned: None,
             names: Names::load(&Names::path()),
             renaming: None,
+        };
+        // Persist colors assigned on load to workspaces saved before colors existed.
+        if !app.workspaces.list.is_empty() {
+            app.save_workspaces();
         }
+        app
     }
 
     fn save_workspaces(&mut self) {
@@ -178,7 +183,15 @@ impl App {
                 }
                 let label = format!("{title}\n{}", short_project(&s.project));
                 // One widget that senses both: a separate drag-source wrapper would swallow the click.
+                let bg = ui.painter().add(egui::Shape::Noop);
                 let row = ui.selectable_label(self.selected == Some(i), label).interact(Sense::click_and_drag());
+                if let Some(c) = self.tab.is_none().then(|| self.workspaces.color_of(&s.id)).flatten() {
+                    // Tint behind the row, stripe on its left edge.
+                    let full = egui::Rect::from_x_y_ranges(ui.max_rect().x_range(), row.rect.y_range());
+                    ui.painter().set(bg, egui::Shape::rect_filled(full, 3.0, tint(c, 45)));
+                    let stripe = egui::Rect::from_min_size(full.min, egui::vec2(3.0, full.height()));
+                    ui.painter().rect_filled(stripe, 1.0, rgb(c));
+                }
                 row.dnd_set_drag_payload(s.id.clone());
                 if row.dragged() {
                     if let Some(pos) = ui.ctx().pointer_interact_pos() {
@@ -221,7 +234,14 @@ impl App {
                 actions.push(Action::Tab(None));
             }
             for (w, ws) in self.workspaces.list.iter().enumerate() {
+                let bg = ui.painter().add(egui::Shape::Noop);
                 let tab = ui.selectable_label(self.tab == Some(w), &ws.name);
+                if let Some(c) = ws.color {
+                    ui.painter().set(bg, egui::Shape::rect_filled(tab.rect, 3.0, tint(c, 90)));
+                    if self.tab == Some(w) {
+                        ui.painter().rect_stroke(tab.rect, 3.0, Stroke::new(1.5, rgb(c)), StrokeKind::Inside);
+                    }
+                }
                 if tab.clicked() {
                     actions.push(Action::Tab(Some(w)));
                 }
@@ -274,25 +294,39 @@ impl App {
                 }
             }
         }
-        ui.horizontal(|ui| {
-            let hint = if self.running.is_some() { "Claude is working…" } else { "Prompt (Up/Down for history, Enter to send)" };
-            let edit = egui::TextEdit::singleline(&mut self.input)
-                .id(id)
-                .hint_text(hint)
-                .desired_width(ui.available_width() - 60.0);
-            let resp = ui.add_enabled(enabled, edit);
-            let submitted = resp.lost_focus() && ui.input(|i| i.key_pressed(Key::Enter));
-            if (ui.add_enabled(enabled, egui::Button::new("Send")).clicked() || submitted) && enabled {
-                self.send(ui.ctx());
-                resp.request_focus();
-            }
-            if self.running.is_some() {
-                ui.spinner();
-            }
-        });
         if let Some(e) = &self.error {
             ui.colored_label(Color32::LIGHT_RED, e);
         }
+        egui::Frame::new()
+            .fill(Color32::from_rgb(14, 14, 16))
+            .stroke(Stroke::new(1.0, Color32::from_gray(60)))
+            .inner_margin(egui::Margin::symmetric(10, 8))
+            .corner_radius(4.0)
+            .show(ui, |ui| {
+                ui.horizontal(|ui| {
+                    ui.label(RichText::new(">").monospace().strong().color(Color32::from_rgb(110, 210, 120)));
+                    let hint = match (&self.open, &self.running) {
+                        (None, _) => "select a session",
+                        (_, Some(_)) => "claude is working…",
+                        _ => "type a prompt · up/down for history · enter to send",
+                    };
+                    let edit = egui::TextEdit::singleline(&mut self.input)
+                        .id(id)
+                        .frame(egui::Frame::NONE)
+                        .font(egui::TextStyle::Monospace)
+                        .text_color(Color32::from_gray(230))
+                        .hint_text(RichText::new(hint).monospace())
+                        .desired_width(ui.available_width() - 24.0);
+                    let resp = ui.add_enabled(enabled, edit);
+                    if enabled && resp.lost_focus() && ui.input(|i| i.key_pressed(Key::Enter)) {
+                        self.send(ui.ctx());
+                        resp.request_focus();
+                    }
+                    if self.running.is_some() {
+                        ui.spinner();
+                    }
+                });
+            });
     }
 
     fn conversation(&mut self, ui: &mut egui::Ui) {
@@ -391,6 +425,14 @@ fn diff_block(ui: &mut egui::Ui, c: &Change) {
     }
 }
 
+fn rgb([r, g, b]: [u8; 3]) -> Color32 {
+    Color32::from_rgb(r, g, b)
+}
+
+fn tint([r, g, b]: [u8; 3], alpha: u8) -> Color32 {
+    Color32::from_rgba_unmultiplied(r, g, b, alpha)
+}
+
 /// "-Users-me-Desktop-foo-bar" → "Desktop-foo-bar"
 fn short_project(p: &str) -> String {
     let home = std::env::var("HOME").unwrap_or_default().replace(['/', '.'], "-");
@@ -403,8 +445,11 @@ impl eframe::App for App {
         egui::Panel::left("sessions").default_size(260.0).resizable(true).show(ui, |ui| self.sidebar(ui));
         egui::Panel::right("diffs").default_size(420.0).resizable(true).show(ui, |ui| self.diffs(ui));
         egui::CentralPanel::default().show(ui, |ui| {
-            self.prompt_bar(ui);
-            ui.separator();
+            egui::Panel::bottom("prompt")
+                .frame(egui::Frame::new().inner_margin(egui::Margin::symmetric(0, 6)))
+                .show_separator_line(false)
+                .resizable(false)
+                .show(ui, |ui| self.prompt_bar(ui));
             self.conversation(ui);
         });
     }

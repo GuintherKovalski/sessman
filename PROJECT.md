@@ -11,14 +11,16 @@ there. Each change is specified first with Spec Kit (see [How the project is bui
 
 ```
 ┌──────────────────┬──────────────────────────────────────┬─────────────────────┐
-│ Sessions ⟳       │ [ prompt bar               ] [Send]  │ Changes             │
-│ All sessions │ A │ ┌──────────────────────────────────┐ │ src/app.rs          │
-│ │ +            │ │ You  (pinned prompt)             │ │ - old line          │
-│──────────────────│ └──────────────────────────────────┘ │ + new line          │
-│ Session title    │ You                                  │                     │
-│ project folder   │ ...                                  │ src/main.rs         │
-│ Session title    │ Claude                               │ + added line        │
-│ ...              │ ...                                  │ ...                 │
+│ Sessions ⟳       │ ┌──────────────────────────────────┐ │ Changes             │
+│ All │ A │ B │ +  │ │ You  (pinned prompt)             │ │ src/app.rs          │
+│──────────────────│ └──────────────────────────────────┘ │ - old line          │
+│▌Session title    │ You                                  │ + new line          │
+│▌project folder   │ ...                                  │                     │
+│ Session title    │ Claude                               │ src/main.rs         │
+│ ...              │ ...                                  │ + added line        │
+│                  │ ┌──────────────────────────────────┐ │                     │
+│                  │ │ > type a prompt_                 │ │ ...                 │
+│                  │ └──────────────────────────────────┘ │                     │
 └──────────────────┴──────────────────────────────────────┴─────────────────────┘
 ```
 
@@ -36,12 +38,15 @@ there. Each change is specified first with Spec Kit (see [How the project is bui
   - Inside a workspace tab, right-click a session → **Remove from workspace**.
   - Right-click a workspace tab → **Delete workspace** (the sessions themselves are untouched).
   - A session belongs to at most one workspace; "All sessions" always shows everything.
+  - Every workspace has its own color (no two share one). Its tab is tinted with it, and in
+    "All sessions" each session in a workspace gets a colored stripe and tint (the ▌ above).
 
 ### Middle: conversation
-- **Prompt bar** at the top, always visible. With it focused:
+- **Prompt input** at the bottom, styled like a terminal line (`>` prompt, monospace, dark
+  background, no buttons). With it focused:
   - **Up / Down** step through the prompts you sent earlier in this session (like shell
     history). Going past the newest brings back what you were typing.
-  - **Enter** (or Send) sends the prompt to the session. A spinner shows while Claude works;
+  - **Enter** sends the prompt to the session. A spinner shows while Claude works;
     the conversation reloads when it is done.
 - **Pinned "You"**: the prompt that the reply at the top of your view answers stays pinned
   above the conversation, so you always know what a long reply is about.
@@ -61,7 +66,7 @@ file path and removed (red `-`) / added (green `+`) lines. Long diffs are cut at
 | Prompt history | The prompts you typed in that session (tool results and slash-command wrappers are skipped). |
 | Diffs | The `Edit` / `MultiEdit` / `Write` tool calls recorded in the session, diffed line by line. |
 | Sending a prompt | Runs `claude -p --resume <session-id> "<prompt>"` in the session's folder, in the background. |
-| Workspaces | sessman's own file: `~/.config/sessman/workspaces.json`. |
+| Workspaces and their colors | sessman's own file: `~/.config/sessman/workspaces.json`. |
 | Custom session names | sessman's own file: `~/.config/sessman/names.json`. |
 
 sessman never writes to Claude's files. Everything it adds (workspaces, custom names) lives in its own config files.
@@ -104,6 +109,7 @@ spec → plan → tasks → implementation, and the documents stay in the repo:
 | `specs/001-session-manager-ui/` | Session list, prompt bar with history, diff panel |
 | `specs/002-workspaces-pinned-prompt/` | Workspace tabs, drag-and-drop, Move to, pinned prompt |
 | `specs/003-rename-sessions/` | Double-click to rename a session |
+| `specs/004-workspace-colors-terminal-input/` | Workspace colors, terminal-style input at the bottom |
 
 Each feature folder has `spec.md` (what and why), `plan.md` (how), and `tasks.md` (the
 checklist that was implemented). `specs/001-session-manager-ui/research.md` lists open
