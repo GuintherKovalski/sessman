@@ -108,24 +108,33 @@ pub fn load(path: &Path) -> std::io::Result<Session> {
 pub fn parse(lines: impl Iterator<Item = String>) -> Session {
     let mut s = Session::default();
     for line in lines {
-        let Ok(v) = serde_json::from_str::<Value>(&line) else { continue };
-        if v["isSidechain"].as_bool() == Some(true) {
-            continue;
+        if let Ok(v) = serde_json::from_str::<Value>(&line) {
+            s.apply(&v);
         }
-        if s.cwd.is_none() {
-            s.cwd = v["cwd"].as_str().map(PathBuf::from);
+    }
+    s
+}
+
+impl Session {
+    /// Adds one session-file line. `claude -p --output-format stream-json` emits its
+    /// `assistant` / `user` lines in the same shape, so a running reply is applied the same way.
+    pub fn apply(&mut self, v: &Value) {
+        if v["isSidechain"].as_bool() == Some(true) {
+            return;
+        }
+        if self.cwd.is_none() {
+            self.cwd = v["cwd"].as_str().map(PathBuf::from);
         }
         match v["type"].as_str() {
             Some("user") => {
-                if let Some(p) = typed_prompt(&v) {
-                    s.prompts.push(p.clone());
-                    push(&mut s.messages, Role::User, p);
+                if let Some(p) = typed_prompt(v) {
+                    self.push_prompt(p);
                 }
             }
             Some("assistant") => {
                 let msg = &v["message"];
                 if let Some(m) = msg["model"].as_str().filter(|m| !m.starts_with('<')) {
-                    s.model = Some(m.to_owned());
+                    self.model = Some(m.to_owned());
                 }
                 let u = &msg["usage"];
                 let tokens: u64 = ["input_tokens", "cache_creation_input_tokens", "cache_read_input_tokens"]
@@ -133,16 +142,16 @@ pub fn parse(lines: impl Iterator<Item = String>) -> Session {
                     .filter_map(|k| u[k].as_u64())
                     .sum();
                 if tokens > 0 {
-                    s.context_tokens = tokens;
+                    self.context_tokens = tokens;
                 }
-                let Some(blocks) = v["message"]["content"].as_array() else { continue };
+                let Some(blocks) = msg["content"].as_array() else { return };
                 for b in blocks {
                     match b["type"].as_str() {
-                        Some("text") => push(&mut s.messages, Role::Assistant, str_of(&b["text"])),
+                        Some("text") => push(&mut self.messages, Role::Assistant, str_of(&b["text"])),
                         Some("tool_use") => {
                             let name = str_of(&b["name"]);
-                            push(&mut s.messages, Role::Assistant, format!("[tool: {name}]"));
-                            collect_changes(&name, &b["input"], &mut s.changes);
+                            push(&mut self.messages, Role::Assistant, format!("[tool: {name}]"));
+                            collect_changes(&name, &b["input"], &mut self.changes);
                         }
                         _ => {}
                     }
@@ -151,7 +160,12 @@ pub fn parse(lines: impl Iterator<Item = String>) -> Session {
             _ => {}
         }
     }
-    s
+
+    /// A prompt the user typed: added to the conversation and the prompt history.
+    pub fn push_prompt(&mut self, p: String) {
+        self.prompts.push(p.clone());
+        push(&mut self.messages, Role::User, p);
+    }
 }
 
 /// The conversation as compact text for a summarizer: each message cut to `per_message` chars,
@@ -254,6 +268,23 @@ mod tests {
         assert_eq!(s.changes.len(), 2);
         assert_eq!((s.changes[0].old.as_str(), s.changes[0].new.as_str()), ("x", "y"));
         assert_eq!(s.changes[1].old, "");
+    }
+
+    #[test]
+    fn streamed_lines_extend_an_open_session() {
+        let mut s = run(&[r#"{"type":"user","cwd":"/tmp/x","message":{"content":"first"}}"#]);
+        s.push_prompt("second".into());
+        for line in [
+            r#"{"type":"assistant","message":{"model":"claude-a","content":[{"type":"text","text":"working"}]}}"#,
+            r#"{"type":"assistant","message":{"content":[{"type":"tool_use","name":"Edit","input":{"file_path":"a.rs","old_string":"x","new_string":"y"}}]}}"#,
+        ] {
+            s.apply(&serde_json::from_str(line).unwrap());
+        }
+        assert_eq!(s.prompts, vec!["first", "second"]);
+        assert_eq!(s.messages.len(), 2);
+        assert_eq!(s.messages[1].text, "working\n[tool: Edit]");
+        assert_eq!(s.changes.len(), 1);
+        assert_eq!(s.model.as_deref(), Some("claude-a"));
     }
 
     #[test]

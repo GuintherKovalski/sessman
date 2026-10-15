@@ -4,8 +4,11 @@ mod goal;
 mod history;
 mod names;
 mod runner;
+mod search;
+mod markdown;
 mod session;
 mod status;
+mod theme;
 mod workspaces;
 
 fn main() -> eframe::Result {
@@ -17,5 +20,12 @@ fn main() -> eframe::Result {
         viewport: eframe::egui::ViewportBuilder::default().with_inner_size([1400.0, 850.0]),
         ..Default::default()
     };
-    eframe::run_native("sessman", options, Box::new(|_cc| Ok(Box::new(app::App::new()))))
+    eframe::run_native(
+        "sessman",
+        options,
+        Box::new(|cc| {
+            cc.egui_ctx.set_theme(theme::load());
+            Ok(Box::new(app::App::new(&cc.egui_ctx)))
+        }),
+    )
 }

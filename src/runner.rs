@@ -1,23 +1,94 @@
-use std::io::Read;
+use serde_json::Value;
+use std::io::{BufRead, BufReader, Read};
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
 use std::sync::mpsc::{Receiver, channel};
 
-/// Runs `claude -p` on a thread: `--resume <id>` for an existing session, `--session-id <id>`
-/// to start a new one. The receiver yields Ok(stdout) or Err(message).
-pub fn send(
-    ctx: eframe::egui::Context,
-    id: String,
-    cwd: Option<PathBuf>,
-    prompt: String,
-    new: bool,
-) -> Receiver<Result<String, String>> {
+/// What a running `claude -p` reports, as it happens.
+pub enum RunEvent {
+    /// A complete `assistant` / `user` line, in the session file's shape.
+    Line(Value),
+    /// Text being written in the current reply.
+    Delta(String),
+    /// A tool call is starting (its name).
+    Tool(String),
+    Done(Result<(), String>),
+}
+
+/// Runs `claude -p` on a thread, streaming its progress: `--resume <id>` for an existing
+/// session, `--session-id <id>` to start a new one.
+pub fn send(ctx: eframe::egui::Context, id: String, cwd: Option<PathBuf>, prompt: String, new: bool) -> Receiver<RunEvent> {
     let mut cmd = Command::new("claude");
-    cmd.args(["-p", if new { "--session-id" } else { "--resume" }, &id, &prompt]);
+    cmd.args(["-p", if new { "--session-id" } else { "--resume" }, &id]);
+    cmd.args(["--output-format", "stream-json", "--verbose", "--include-partial-messages", &prompt]);
     if let Some(dir) = cwd {
         cmd.current_dir(dir);
     }
-    run(ctx, cmd)
+    cmd.stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped());
+    let (tx, rx) = channel();
+    std::thread::spawn(move || {
+        let done = stream(&mut cmd, |event| {
+            let _ = tx.send(event);
+            ctx.request_repaint();
+        });
+        let _ = tx.send(RunEvent::Done(done));
+        ctx.request_repaint();
+    });
+    rx
+}
+
+fn stream(cmd: &mut Command, mut emit: impl FnMut(RunEvent)) -> Result<(), String> {
+    let mut child = cmd.spawn().map_err(|e| format!("failed to run claude: {e}"))?;
+    let mut stderr = child.stderr.take();
+    let err_reader = std::thread::spawn(move || {
+        let mut s = String::new();
+        if let Some(e) = stderr.as_mut() {
+            let _ = e.read_to_string(&mut s);
+        }
+        s
+    });
+    let mut failure = None;
+    for line in BufReader::new(child.stdout.take().unwrap()).lines().map_while(Result::ok) {
+        let Ok(v) = serde_json::from_str::<Value>(&line) else { continue };
+        match event(&v) {
+            Some(e) => emit(e),
+            None if v["type"] == "result" && v["is_error"].as_bool() == Some(true) => {
+                failure = Some(v["result"].as_str().unwrap_or("claude reported an error").to_owned());
+            }
+            None => {}
+        }
+    }
+    let status = child.wait().map_err(|e| e.to_string())?;
+    let stderr = err_reader.join().unwrap_or_default();
+    match failure {
+        Some(f) => Err(f),
+        None if !status.success() => Err(format!("claude exited with {status}: {}", stderr.trim())),
+        None => Ok(()),
+    }
+}
+
+/// The progress event in one stream-json line, if it carries one.
+fn event(v: &Value) -> Option<RunEvent> {
+    // Sub-agent steps aren't part of the conversation (the session file marks them sidechain).
+    if !v["parent_tool_use_id"].is_null() {
+        return None;
+    }
+    match v["type"].as_str()? {
+        "assistant" | "user" => Some(RunEvent::Line(v.clone())),
+        "stream_event" => {
+            let e = &v["event"];
+            match e["type"].as_str()? {
+                "content_block_delta" if e["delta"]["type"] == "text_delta" => {
+                    Some(RunEvent::Delta(e["delta"]["text"].as_str()?.to_owned()))
+                }
+                "content_block_start" if e["content_block"]["type"] == "tool_use" => {
+                    Some(RunEvent::Tool(e["content_block"]["name"].as_str()?.to_owned()))
+                }
+                _ => None,
+            }
+        }
+        _ => None,
+    }
 }
 
 /// A side question with the session's full context, like Claude Code's /btw: the session is
@@ -45,6 +116,11 @@ pub fn summarize_goal(ctx: eframe::egui::Context, digest: String) -> Receiver<Re
          - [ ] <open subgoal>\n\n\
          Session digest:\n{digest}"
     );
+    ask_haiku(ctx, prompt)
+}
+
+/// A one-off question to a small, cheap model, outside any session.
+pub fn ask_haiku(ctx: eframe::egui::Context, prompt: String) -> Receiver<Result<String, String>> {
     let mut cmd = Command::new("claude");
     cmd.args(["-p", "--model", "haiku", "--no-session-persistence", &prompt]).current_dir(std::env::temp_dir());
     run(ctx, cmd)
@@ -105,6 +181,19 @@ pub fn new_session_id() -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn stream_lines_become_events() {
+        let ev = |s: &str| event(&serde_json::from_str(s).unwrap());
+        let delta = ev(r#"{"type":"stream_event","event":{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"Hi"}}}"#);
+        assert!(matches!(delta, Some(RunEvent::Delta(t)) if t == "Hi"));
+        let tool = ev(r#"{"type":"stream_event","event":{"type":"content_block_start","index":1,"content_block":{"type":"tool_use","name":"Read","input":{}}}}"#);
+        assert!(matches!(tool, Some(RunEvent::Tool(n)) if n == "Read"));
+        assert!(matches!(ev(r#"{"type":"assistant","message":{"content":[]}}"#), Some(RunEvent::Line(_))));
+        assert!(ev(r#"{"type":"stream_event","event":{"type":"message_stop"}}"#).is_none());
+        assert!(ev(r#"{"type":"system","subtype":"init"}"#).is_none());
+        assert!(ev(r#"{"type":"assistant","parent_tool_use_id":"toolu_1","message":{"content":[]}}"#).is_none());
+    }
 
     #[test]
     fn session_ids_are_uuid_v4_and_distinct() {

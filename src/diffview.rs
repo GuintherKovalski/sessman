@@ -1,7 +1,8 @@
 //! Changes grouped by file, rendered as diff cards; and a read-only file viewer.
 use crate::session::Change;
+use crate::theme::{self, Palette};
 use eframe::egui::text::{LayoutJob, TextFormat};
-use eframe::egui::{self, Color32, FontId, RichText, Stroke, TextWrapMode};
+use eframe::egui::{self, FontId, RichText, Stroke, TextWrapMode};
 use egui_extras::syntax_highlighting::{CodeTheme, highlight};
 use similar::{ChangeTag, TextDiff};
 use std::path::Path;
@@ -87,11 +88,6 @@ fn language(file: &str) -> &str {
     Path::new(file).extension().and_then(|e| e.to_str()).unwrap_or("txt")
 }
 
-const ADD_FG: Color32 = Color32::from_rgb(110, 210, 120);
-const DEL_FG: Color32 = Color32::from_rgb(240, 110, 110);
-const ADD_BG: Color32 = Color32::from_rgb(28, 48, 32);
-const DEL_BG: Color32 = Color32::from_rgb(56, 28, 30);
-
 pub enum CardEvent {
     None,
     Clicked,
@@ -101,8 +97,9 @@ pub enum CardEvent {
 /// One file's changes as a card: header with name, folder and counts, then every edit's hunks.
 pub fn file_card(ui: &mut egui::Ui, f: &FileChanges, changes: &[Change]) -> CardEvent {
     let mut event = CardEvent::None;
+    let pal = theme::palette(ui.visuals());
     egui::Frame::new()
-        .stroke(Stroke::new(1.0, Color32::from_gray(60)))
+        .stroke(Stroke::new(1.0, pal.border))
         .corner_radius(6.0)
         .inner_margin(8.0)
         .show(ui, |ui| {
@@ -111,8 +108,8 @@ pub fn file_card(ui: &mut egui::Ui, f: &FileChanges, changes: &[Change]) -> Card
             let header = ui
                 .horizontal(|ui| {
                     ui.label(RichText::new(name).strong().monospace());
-                    ui.label(RichText::new(format!("+{}", f.added)).color(ADD_FG).monospace());
-                    ui.label(RichText::new(format!("-{}", f.removed)).color(DEL_FG).monospace());
+                    ui.label(RichText::new(format!("+{}", f.added)).color(pal.add_fg).monospace());
+                    ui.label(RichText::new(format!("-{}", f.removed)).color(pal.del_fg).monospace());
                 })
                 .response
                 .interact(egui::Sense::click())
@@ -134,7 +131,7 @@ pub fn file_card(ui: &mut egui::Ui, f: &FileChanges, changes: &[Change]) -> Card
                 ui.spacing_mut().item_spacing.y = 0.0;
                 let all = lines(&changes[i]);
                 for line in all.iter().take(MAX_LINES_PER_EDIT) {
-                    diff_line(ui, line, lang);
+                    diff_line(ui, line, lang, &pal);
                 }
                 if all.len() > MAX_LINES_PER_EDIT {
                     ui.label(RichText::new(format!("… {} more lines", all.len() - MAX_LINES_PER_EDIT)).weak());
@@ -144,11 +141,11 @@ pub fn file_card(ui: &mut egui::Ui, f: &FileChanges, changes: &[Change]) -> Card
     event
 }
 
-fn diff_line(ui: &mut egui::Ui, line: &Line, lang: &str) {
+fn diff_line(ui: &mut egui::Ui, line: &Line, lang: &str, pal: &Palette) {
     let (sign, text, bg, sign_color, dim) = match line {
-        Line::Added(t) => ("+", t.as_str(), Some(ADD_BG), ADD_FG, false),
-        Line::Removed(t) => ("-", t.as_str(), Some(DEL_BG), DEL_FG, false),
-        Line::Context(t) => (" ", t.as_str(), None, Color32::GRAY, true),
+        Line::Added(t) => ("+", t.as_str(), Some(pal.add_bg), pal.add_fg, false),
+        Line::Removed(t) => ("-", t.as_str(), Some(pal.del_bg), pal.del_fg, false),
+        Line::Context(t) => (" ", t.as_str(), None, pal.context, true),
         Line::Gap => {
             ui.label(RichText::new("  ⋮").weak().monospace());
             return;
@@ -179,12 +176,13 @@ fn diff_line(ui: &mut egui::Ui, line: &Line, lang: &str) {
 
 /// Read-only file contents with line numbers and syntax highlighting.
 pub fn file_view(ui: &mut egui::Ui, path: &str, contents: &Result<String, String>) {
+    let pal = theme::palette(ui.visuals());
     ui.label(RichText::new(path).weak().monospace());
     ui.add_space(4.0);
     let text = match contents {
         Ok(t) => t,
         Err(e) => {
-            ui.colored_label(Color32::LIGHT_RED, e);
+            ui.colored_label(pal.error, e);
             return;
         }
     };
@@ -195,7 +193,7 @@ pub fn file_view(ui: &mut egui::Ui, path: &str, contents: &Result<String, String
     let numbers: String = (1..=count).map(|n| format!("{n:>5}\n")).collect();
     egui::ScrollArea::both().auto_shrink(false).show(ui, |ui| {
         ui.horizontal_top(|ui| {
-            ui.label(RichText::new(numbers).font(font).color(Color32::from_gray(90)));
+            ui.label(RichText::new(numbers).font(font).color(pal.line_number));
             ui.add(egui::Label::new(job).wrap_mode(TextWrapMode::Extend).selectable(true));
         });
     });

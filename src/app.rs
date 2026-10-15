@@ -1,18 +1,20 @@
 use crate::diffview::{self, CardEvent};
 use crate::goal;
 use crate::history::History;
+use crate::markdown;
 use crate::names::Names;
-use crate::runner;
+use crate::runner::{self, RunEvent};
+use crate::search::{self, Hit, Source};
 use crate::status;
+use crate::theme;
 use crate::session::{self, Role, Session, SessionMeta};
 use crate::workspaces::Workspaces;
 use eframe::egui::text::{CCursor, CCursorRange};
-use eframe::egui::{self, Align2, Color32, Id, Key, LayerId, Modifiers, Order, RichText, Sense, Stroke, StrokeKind};
+use eframe::egui::{self, Align2, Color32, Id, Key, LayerId, Modifiers, Order, RichText, Sense, Stroke, StrokeKind, ThemePreference};
+use egui_commonmark::CommonMarkCache;
 use std::path::PathBuf;
 use std::time::{SystemTime, UNIX_EPOCH};
 use std::sync::mpsc::Receiver;
-
-const USER_COLOR: Color32 = Color32::from_rgb(120, 170, 255);
 
 /// Sidebar interactions, collected while drawing and applied afterwards.
 enum Action {
@@ -45,7 +47,10 @@ pub struct App {
     error: Option<String>,
     input: String,
     history: History,
-    running: Option<Receiver<Result<String, String>>>,
+    running: Option<Receiver<RunEvent>>,
+    /// The reply being written by the running claude, and the tool it is starting.
+    live: String,
+    live_tool: Option<String>,
     workspaces: Workspaces,
     /// None = "All sessions", Some(i) = workspace i.
     tab: Option<usize>,
@@ -72,10 +77,42 @@ pub struct App {
     goal_question: String,
     /// Changes tab shows only this file, when set.
     changes_filter: Option<String>,
-    /// Files open read-only in the main area, with their contents.
-    file_tabs: Vec<(String, Result<String, String>)>,
+    /// Files open read-only in the main area.
+    file_tabs: Vec<FileTab>,
     /// Active main tab: None = the conversation ("Main"), Some(i) = file_tabs[i].
     main_tab: Option<usize>,
+    md_cache: CommonMarkCache,
+    /// Rendered height of each message (0 = not measured yet), so off-screen ones can be skipped.
+    heights: Vec<f32>,
+    /// Width the heights were measured at.
+    heights_width: f32,
+    theme: ThemePreference,
+    /// Background indexer: fresh session lists + content index, and a channel to poke it.
+    snapshots: Receiver<search::Snapshot>,
+    poke_index: std::sync::mpsc::Sender<()>,
+    index: search::Index,
+    /// Bumped on every snapshot, so cached search hits know when they're stale.
+    generation: u64,
+    search: String,
+    /// Live hits for (query, tab, generation).
+    hits: Option<(String, Option<usize>, u64, Vec<Hit>)>,
+    ai: Option<AiSearch>,
+}
+
+/// An Enter-search: Haiku picks sessions from a catalog. Results are kept as session ids, so
+/// a list refresh doesn't shift them.
+struct AiSearch {
+    query: String,
+    ids: Vec<String>,
+    rx: Option<Receiver<Result<String, String>>>,
+    result: Option<Result<Vec<(String, String)>, String>>,
+}
+
+/// A file open read-only in the main area. Markdown files can show rendered or as source.
+struct FileTab {
+    path: String,
+    contents: Result<String, String>,
+    rendered: bool,
 }
 
 /// A side question about the session (like Claude Code's /btw): asked with its context, not added to it.
@@ -86,7 +123,8 @@ struct Btw {
 }
 
 impl App {
-    pub fn new() -> Self {
+    pub fn new(ctx: &egui::Context) -> Self {
+        let (snapshots, poke_index) = search::spawn_indexer(ctx.clone());
         let mut app = Self {
             sessions: session::list(&session::projects_dir()),
             selected: None,
@@ -95,6 +133,8 @@ impl App {
             input: String::new(),
             history: History::default(),
             running: None,
+            live: String::new(),
+            live_tool: None,
             workspaces: Workspaces::load(&Workspaces::path()),
             tab: None,
             new_workspace: None,
@@ -113,6 +153,17 @@ impl App {
             changes_filter: None,
             file_tabs: Vec::new(),
             main_tab: None,
+            md_cache: CommonMarkCache::default(),
+            heights: Vec::new(),
+            heights_width: 0.0,
+            theme: theme::load(),
+            snapshots,
+            poke_index,
+            index: search::Index::new(),
+            generation: 0,
+            search: String::new(),
+            hits: None,
+            ai: None,
         };
         // Persist colors assigned on load to workspaces saved before colors existed.
         if !app.workspaces.list.is_empty() {
@@ -212,8 +263,8 @@ impl App {
     }
 
     fn reload(&mut self) {
-        for (path, contents) in &mut self.file_tabs {
-            *contents = diffview::read(path);
+        for tab in &mut self.file_tabs {
+            tab.contents = diffview::read(&tab.path);
         }
         let Some(meta) = self.selected.and_then(|i| self.sessions.get(i)) else { return };
         match session::load(&meta.path) {
@@ -221,17 +272,29 @@ impl App {
                 self.history = History::new(s.prompts.clone());
                 self.open = Some(s);
                 self.pinned = None;
+                self.heights.clear();
                 self.error = None;
             }
             Err(e) => self.error = Some(format!("could not read {}: {e}", meta.path.display())),
         }
     }
 
-    fn refresh_list(&mut self) {
-        let current = self.selected.map(|i| self.sessions[i].id.clone());
-        self.sessions = session::list(&session::projects_dir());
-        self.selected = current.and_then(|id| self.sessions.iter().position(|s| s.id == id));
-        self.reload();
+    /// Takes the indexer's latest snapshot: new list (selection kept by id) and content index.
+    /// The open session reloads if its file changed elsewhere (e.g. a terminal session).
+    fn poll_snapshots(&mut self) {
+        let Some(snap) = self.snapshots.try_iter().last() else { return };
+        let current = self.selected.map(|i| (self.sessions[i].id.clone(), self.sessions[i].modified));
+        self.sessions = snap.sessions;
+        self.index = snap.index;
+        self.generation += 1;
+        self.selected = current.as_ref().and_then(|(id, _)| self.sessions.iter().position(|s| &s.id == id));
+        let changed = match (&current, self.selected) {
+            (Some((_, before)), Some(i)) => self.sessions[i].modified != *before,
+            _ => false,
+        };
+        if changed && self.running.is_none() {
+            self.reload();
+        }
     }
 
     fn send(&mut self, ctx: &egui::Context) {
@@ -252,36 +315,175 @@ impl App {
                 self.save_workspaces();
             }
         }
+        if let Some(s) = &mut self.open {
+            s.push_prompt(prompt.clone());
+        }
+        self.history = History::new(self.open.as_ref().map(|s| s.prompts.clone()).unwrap_or_default());
+        self.live.clear();
+        self.live_tool = None;
         self.running = Some(runner::send(ctx.clone(), id, cwd, prompt, new));
     }
 
     fn poll_runner(&mut self) {
         let Some(rx) = &self.running else { return };
-        if let Ok(result) = rx.try_recv() {
-            self.running = None;
-            if let Some(id) = self.creating.take() {
-                self.sessions = session::list(&session::projects_dir());
-                // If claude failed before creating it, stay on the empty session to retry.
-                if let Some(i) = self.sessions.iter().position(|s| s.id == id) {
-                    self.selected = Some(i);
-                    self.new_session = None;
+        let mut done = None;
+        for event in rx.try_iter() {
+            match event {
+                RunEvent::Line(v) => {
+                    if let Some(s) = &mut self.open {
+                        s.apply(&v);
+                    }
+                    self.live.clear();
+                    self.live_tool = None;
+                }
+                RunEvent::Delta(t) => self.live.push_str(&t),
+                RunEvent::Tool(name) => self.live_tool = Some(name),
+                RunEvent::Done(result) => done = Some(result),
+            }
+        }
+        let Some(result) = done else { return };
+        self.running = None;
+        self.live.clear();
+        self.live_tool = None;
+        if let Some(id) = self.creating.take() {
+            self.sessions = session::list(&session::projects_dir());
+            // If claude failed before creating it, stay on the empty session to retry.
+            if let Some(i) = self.sessions.iter().position(|s| s.id == id) {
+                self.selected = Some(i);
+                self.new_session = None;
+            }
+        }
+        // The file now holds what was streamed; reloading makes it canonical.
+        if self.new_session.is_none() {
+            self.reload();
+        }
+        let _ = self.poke_index.send(());
+        if let Err(e) = result {
+            self.error = Some(e);
+        }
+    }
+
+    fn poll_ai(&mut self) {
+        let Some(ai) = &mut self.ai else { return };
+        let Some(result) = ai.rx.as_ref().and_then(|rx| rx.try_recv().ok()) else { return };
+        ai.rx = None;
+        ai.result = Some(result.map(|reply| {
+            search::parse_ai(&reply, ai.ids.len()).into_iter().map(|(i, why)| (ai.ids[i].clone(), why)).collect()
+        }));
+    }
+
+    /// Sessions in the active tab (all, or one workspace), newest first.
+    fn visible(&self) -> Vec<usize> {
+        match self.tab.and_then(|w| self.workspaces.list.get(w)) {
+            None => (0..self.sessions.len()).collect(),
+            Some(w) => (0..self.sessions.len()).filter(|&i| w.sessions.contains(&self.sessions[i].id)).collect(),
+        }
+    }
+
+    fn title(&self, i: usize) -> &str {
+        let s = &self.sessions[i];
+        self.names.get(&s.id).unwrap_or(&s.title)
+    }
+
+    /// Rows to list, with a note replacing the folder line: all visible sessions, or search results.
+    fn rows(&mut self) -> Vec<(usize, Option<String>)> {
+        let visible = self.visible();
+        let query = self.search.trim().to_owned();
+        if query.is_empty() {
+            return visible.into_iter().map(|i| (i, None)).collect();
+        }
+        if let Some(Ok(picked)) = self.ai.as_ref().filter(|a| a.query == query).and_then(|a| a.result.as_ref()) {
+            return picked
+                .iter()
+                .filter_map(|(id, why)| visible.iter().copied().find(|&i| &self.sessions[i].id == id).map(|i| (i, Some(why.clone()))))
+                .collect();
+        }
+        let fresh = self.hits.as_ref().is_some_and(|(q, t, g, _)| *q == query && *t == self.tab && *g == self.generation);
+        if !fresh {
+            let candidates: Vec<search::Candidate> = visible
+                .iter()
+                .map(|&i| search::Candidate {
+                    index: i,
+                    name: self.title(i),
+                    goal: self.goals.get(&self.sessions[i].id),
+                    entry: self.index.get(&self.sessions[i].id).map(|e| &**e),
+                    modified: self.sessions[i].modified,
+                })
+                .collect();
+            let hits = search::rank(&query, &candidates);
+            self.hits = Some((query, self.tab, self.generation, hits));
+        }
+        let hits = &self.hits.as_ref().unwrap().3;
+        hits.iter()
+            .map(|h| {
+                let note = match h.source {
+                    Source::Name => None,
+                    Source::Goal => Some("matched in its goal".to_owned()),
+                    Source::Content => h.note.clone(),
+                };
+                (h.index, note)
+            })
+            .collect()
+    }
+
+    /// Enter in the search: ask Haiku which of the 40 most recent visible sessions match.
+    fn ask_ai(&mut self, ctx: &egui::Context) {
+        let query = self.search.trim().to_owned();
+        if query.is_empty() {
+            return;
+        }
+        let recent: Vec<usize> = self.visible().into_iter().take(40).collect();
+        let catalog: Vec<_> = recent
+            .iter()
+            .map(|&i| {
+                let id = &self.sessions[i].id;
+                let prompts = self.index.get(id).map(|e| e.prompts.clone()).unwrap_or_default();
+                (self.title(i).to_owned(), self.goals.get(id).map(str::to_owned), prompts)
+            })
+            .collect();
+        let rx = runner::ask_haiku(ctx.clone(), search::ai_prompt(&query, &catalog));
+        let ids = recent.iter().map(|&i| self.sessions[i].id.clone()).collect();
+        self.ai = Some(AiSearch { query, ids, rx: Some(rx), result: None });
+    }
+
+    /// The search field at the bottom of the sidebar, with the AI search status above it.
+    fn search_bar(&mut self, ui: &mut egui::Ui) {
+        let query = self.search.trim().to_owned();
+        if let Some(ai) = self.ai.as_ref().filter(|a| a.query == query) {
+            match &ai.result {
+                None => {
+                    ui.horizontal(|ui| {
+                        ui.spinner();
+                        ui.label(RichText::new("Asking Haiku…").weak());
+                    });
+                }
+                Some(Ok(picked)) if picked.is_empty() => {
+                    ui.label(RichText::new("Haiku found no matching session. Edit the query for live results.").weak());
+                }
+                Some(Ok(_)) => {
+                    ui.label(RichText::new("Haiku's picks, best first. Edit the query for live results.").weak().small());
+                }
+                Some(Err(e)) => {
+                    ui.colored_label(theme::palette(ui.visuals()).error, format!("AI search failed: {e}"));
                 }
             }
-            self.reload();
-            if let Err(e) = result {
-                self.error = Some(e);
-            }
+        }
+        let edit = egui::TextEdit::singleline(&mut self.search)
+            .id(Id::new("search"))
+            .hint_text("🔍 Search · Enter asks Haiku")
+            .desired_width(f32::INFINITY);
+        let resp = ui.add(edit);
+        if resp.lost_focus() && ui.input(|i| i.key_pressed(Key::Escape)) {
+            self.search.clear();
+        }
+        if resp.lost_focus() && ui.input(|i| i.key_pressed(Key::Enter)) {
+            self.ask_ai(ui.ctx());
+            resp.request_focus();
         }
     }
 
     fn sidebar(&mut self, ui: &mut egui::Ui) {
         let mut actions = Vec::new();
-        ui.horizontal(|ui| {
-            ui.heading("Sessions");
-            if ui.button("⟳").on_hover_text("Refresh").clicked() {
-                self.refresh_list();
-            }
-        });
         self.tabs(ui, &mut actions);
         ui.add_space(4.0);
         let new_button = egui::Button::new(RichText::new("+  New session").strong()).min_size(egui::vec2(ui.available_width(), 28.0));
@@ -290,12 +492,15 @@ impl App {
             self.picker = Some(runner::pick_folder(ui.ctx().clone(), start));
         }
         ui.separator();
+        egui::Panel::bottom("search")
+            .frame(egui::Frame::new().inner_margin(egui::Margin::symmetric(0, 6)))
+            .resizable(false)
+            .show(ui, |ui| self.search_bar(ui));
 
-        let visible: Vec<usize> = match self.tab.and_then(|w| self.workspaces.list.get(w)) {
-            None => (0..self.sessions.len()).collect(),
-            Some(w) => (0..self.sessions.len()).filter(|&i| w.sessions.contains(&self.sessions[i].id)).collect(),
-        };
-        if visible.is_empty() {
+        let rows = self.rows();
+        if rows.is_empty() && !self.search.trim().is_empty() {
+            ui.label(RichText::new("No matches. Press Enter to ask Haiku.").weak());
+        } else if rows.is_empty() {
             ui.label(if self.tab.is_some() {
                 "Empty workspace. Drag sessions onto its tab, or right-click a session → Move to."
             } else {
@@ -303,14 +508,14 @@ impl App {
             });
         }
         egui::ScrollArea::vertical().show(ui, |ui| {
-            for i in visible {
+            for (i, note) in rows {
                 let s = &self.sessions[i];
                 let title = self.names.get(&s.id).unwrap_or(&s.title);
                 if let Some(r) = self.renaming.as_mut().filter(|r| r.id == s.id) {
                     rename_field(ui, r, &s.project, &mut actions);
                     continue;
                 }
-                let label = format!("{title}\n{}", short_project(&s.project));
+                let label = format!("{title}\n{}", note.unwrap_or_else(|| short_project(&s.project)));
                 // One widget that senses both: a separate drag-source wrapper would swallow the click.
                 let bg = ui.painter().add(egui::Shape::Noop);
                 let row = ui.selectable_label(self.selected == Some(i), label).interact(Sense::click_and_drag());
@@ -326,7 +531,7 @@ impl App {
                     if let Some(pos) = ui.ctx().pointer_interact_pos() {
                         let painter = ui.ctx().layer_painter(LayerId::new(Order::Tooltip, Id::new("drag-ghost")));
                         let font = egui::FontId::proportional(14.0);
-                        painter.text(pos + egui::vec2(14.0, 0.0), Align2::LEFT_CENTER, title, font, USER_COLOR);
+                        painter.text(pos + egui::vec2(14.0, 0.0), Align2::LEFT_CENTER, title, font, theme::palette(ui.visuals()).user);
                     }
                 }
                 if row.clicked() {
@@ -375,7 +580,7 @@ impl App {
                     actions.push(Action::Tab(Some(w)));
                 }
                 if tab.dnd_hover_payload::<String>().is_some() {
-                    ui.painter().rect_stroke(tab.rect, 3.0, Stroke::new(2.0, USER_COLOR), StrokeKind::Outside);
+                    ui.painter().rect_stroke(tab.rect, 3.0, Stroke::new(2.0, theme::palette(ui.visuals()).user), StrokeKind::Outside);
                 }
                 if let Some(id) = tab.dnd_release_payload::<String>() {
                     actions.push(Action::MoveTo((*id).clone(), w));
@@ -410,8 +615,19 @@ impl App {
     fn prompt_bar(&mut self, ui: &mut egui::Ui) {
         let id = Id::new("prompt");
         let enabled = self.open.is_some() && self.running.is_none();
-        // Consume arrows before the TextEdit sees them, so they drive history instead of the cursor.
-        if ui.memory(|m| m.has_focus(id)) {
+        // Consume arrows before the TextEdit sees them, so they drive history instead of the
+        // cursor; only for a one-line input, where there are no lines to move between.
+        let focused = ui.memory(|m| m.has_focus(id));
+        // Plain Enter sends (Shift+Enter is the TextEdit's new line); taken before it sees it.
+        let enter = focused
+            && ui.input_mut(|i| {
+                let hit = !i.modifiers.shift && i.key_pressed(Key::Enter);
+                if hit {
+                    i.events.retain(|e| !matches!(e, egui::Event::Key { key: Key::Enter, .. }));
+                }
+                hit
+            });
+        if focused && !self.input.contains('\n') {
             if ui.input_mut(|i| i.consume_key(Modifiers::NONE, Key::ArrowUp)) {
                 if let Some(p) = self.history.up(&self.input) {
                     self.input = p;
@@ -423,37 +639,49 @@ impl App {
                 }
             }
         }
+        let pal = theme::palette(ui.visuals());
         if let Some(e) = &self.error {
-            ui.colored_label(Color32::LIGHT_RED, e);
+            ui.colored_label(pal.error, e);
         }
         egui::Frame::new()
-            .fill(Color32::from_rgb(14, 14, 16))
-            .stroke(Stroke::new(1.0, Color32::from_gray(60)))
+            .fill(pal.prompt_bg)
+            .stroke(Stroke::new(1.0, pal.border))
             .inner_margin(egui::Margin::symmetric(10, 8))
             .corner_radius(4.0)
             .show(ui, |ui| {
-                ui.horizontal(|ui| {
-                    ui.label(RichText::new(">").monospace().strong().color(Color32::from_rgb(110, 210, 120)));
+                ui.horizontal_top(|ui| {
+                    ui.label(RichText::new(">").monospace().strong().color(pal.prompt_sign));
                     let hint = match (&self.open, &self.running) {
                         (None, _) => "select a session",
                         (_, Some(_)) => "claude is working…",
-                        _ => "type a prompt · up/down for history · enter to send",
+                        _ => "type a prompt · enter to send · shift+enter for a new line · up/down for history",
                     };
-                    let edit = egui::TextEdit::singleline(&mut self.input)
-                        .id(id)
-                        .frame(egui::Frame::NONE)
-                        .font(egui::TextStyle::Monospace)
-                        .text_color(Color32::from_gray(230))
-                        .hint_text(RichText::new(hint).monospace())
-                        .desired_width(ui.available_width() - 24.0);
-                    let resp = ui.add_enabled(enabled, edit);
+                    // Grows with the text up to ~10 lines, then scrolls.
+                    let row = ui.text_style_height(&egui::TextStyle::Monospace);
+                    let width = ui.available_width() - 24.0;
+                    let resp = egui::ScrollArea::vertical()
+                        .id_salt("prompt-scroll")
+                        .max_height(row * 10.0 + 4.0)
+                        .stick_to_bottom(true)
+                        .show(ui, |ui| {
+                            let edit = egui::TextEdit::multiline(&mut self.input)
+                                .id(id)
+                                .frame(egui::Frame::NONE)
+                                .font(egui::TextStyle::Monospace)
+                                .text_color(pal.prompt_text)
+                                .hint_text(RichText::new(hint).monospace())
+                                .desired_rows(1)
+                                .return_key(egui::KeyboardShortcut::new(Modifiers::SHIFT, Key::Enter))
+                                .desired_width(width);
+                            ui.add_enabled(enabled, edit)
+                        })
+                        .inner;
                     if self.focus_prompt && enabled {
                         resp.request_focus();
                     }
                     self.focus_prompt = false;
-                    if enabled && resp.lost_focus() && ui.input(|i| i.key_pressed(Key::Enter)) {
+                    if enabled && enter {
                         self.send(ui.ctx());
-                        resp.request_focus();
                     }
                     if self.running.is_some() {
                         ui.spinner();
@@ -474,32 +702,60 @@ impl App {
             });
             return;
         }
+        let pal = theme::palette(ui.visuals());
         // Pinned "You": the prompt of the turn at the top of the viewport (computed last frame).
         let pinned = self.pinned.or_else(|| s.messages.iter().position(|m| m.role == Role::User));
         if let Some(m) = pinned.and_then(|i| s.messages.get(i)) {
             egui::Frame::new().fill(ui.visuals().faint_bg_color).inner_margin(6.0).corner_radius(4.0).show(ui, |ui| {
                 ui.set_width(ui.available_width());
-                ui.label(RichText::new("You").strong().color(USER_COLOR));
-                egui::ScrollArea::vertical().id_salt("pinned").max_height(90.0).show(ui, |ui| ui.label(&m.text));
+                ui.label(RichText::new("You").strong().color(pal.user));
+                egui::ScrollArea::vertical()
+                    .id_salt("pinned")
+                    .max_height(90.0)
+                    .show(ui, |ui| ui.push_id("pinned", |ui| markdown::show(ui, &mut self.md_cache, &m.text)));
             });
             ui.add_space(4.0);
         }
+        // Heights are measured at one width; a resize measures again.
+        let width = ui.available_width();
+        if (width - self.heights_width).abs() > 0.5 {
+            self.heights.clear();
+            self.heights_width = width;
+        }
+        self.heights.resize(s.messages.len(), 0.0);
         let mut top_prompt = None;
         egui::ScrollArea::vertical().auto_shrink(false).stick_to_bottom(true).show_viewport(ui, |ui, viewport| {
             let origin = ui.cursor().top();
+            // Render only messages near the viewport; the rest just take their remembered height.
+            let near = viewport.expand2(egui::vec2(0.0, 400.0));
             for (i, m) in s.messages.iter().enumerate() {
-                let (who, color) = match m.role {
-                    Role::User => {
-                        if ui.cursor().top() - origin <= viewport.min.y + 1.0 {
-                            top_prompt = Some(i);
-                        }
-                        ("You", USER_COLOR)
-                    }
-                    Role::Assistant => ("Claude", Color32::from_rgb(230, 150, 90)),
-                };
-                ui.label(RichText::new(who).strong().color(color));
-                ui.label(&m.text);
-                ui.add_space(8.0);
+                let y = ui.cursor().top() - origin;
+                if m.role == Role::User && y <= viewport.min.y + 1.0 {
+                    top_prompt = Some(i);
+                }
+                let h = self.heights[i];
+                if h > 0.0 && (y + h < near.min.y || y > near.max.y) {
+                    ui.allocate_space(egui::vec2(ui.available_width(), h));
+                } else {
+                    let rect = ui.push_id(i, |ui| message(ui, &mut self.md_cache, m, &pal)).response.rect;
+                    self.heights[i] = rect.height().max(1.0);
+                }
+            }
+            if self.running.is_some() {
+                // The reply as it is being written, then what Claude is doing right now.
+                if !self.live.is_empty() {
+                    let m = session::Message { role: Role::Assistant, text: self.live.clone() };
+                    ui.push_id("live", |ui| message(ui, &mut self.md_cache, &m, &pal));
+                }
+                ui.horizontal(|ui| {
+                    ui.spinner();
+                    let doing = match &self.live_tool {
+                        Some(tool) => format!("⚙ {tool}…"),
+                        None if self.live.is_empty() => "Claude is working…".to_owned(),
+                        None => "Writing…".to_owned(),
+                    };
+                    ui.label(RichText::new(doing).weak().monospace());
+                });
             }
         });
         if top_prompt != self.pinned {
@@ -508,10 +764,47 @@ impl App {
         }
     }
 
+    /// A file tab: Markdown files render, with a toggle to their source; others show as source.
+    fn file_tab(&mut self, ui: &mut egui::Ui, i: usize) {
+        let tab = &mut self.file_tabs[i];
+        let text = match (&tab.contents, markdown::is_markdown(&tab.path)) {
+            (Ok(text), true) => text,
+            _ => return diffview::file_view(ui, &tab.path, &tab.contents),
+        };
+        ui.horizontal(|ui| {
+            ui.selectable_value(&mut tab.rendered, true, "Rendered");
+            ui.selectable_value(&mut tab.rendered, false, "Source");
+        });
+        if !tab.rendered {
+            return diffview::file_view(ui, &tab.path, &tab.contents);
+        }
+        ui.label(RichText::new(&tab.path).weak().monospace());
+        ui.add_space(4.0);
+        egui::ScrollArea::vertical().id_salt(("md-file", i)).auto_shrink(false).show(ui, |ui| {
+            egui::Frame::new().inner_margin(egui::Margin::symmetric(12, 4)).show(ui, |ui| markdown::show(ui, &mut self.md_cache, text));
+        });
+    }
+
+    /// Dark / Light / System, saved to sessman's settings.
+    fn theme_switch(&mut self, ui: &mut egui::Ui) {
+        let before = self.theme;
+        // Right-to-left layout: listed in reverse.
+        ui.selectable_value(&mut self.theme, ThemePreference::System, "💻").on_hover_text("Follow the system appearance");
+        ui.selectable_value(&mut self.theme, ThemePreference::Light, "☀").on_hover_text("Light");
+        ui.selectable_value(&mut self.theme, ThemePreference::Dark, "🌙").on_hover_text("Dark");
+        if self.theme != before {
+            ui.ctx().set_theme(self.theme);
+            if let Err(e) = theme::save(self.theme) {
+                self.error = Some(format!("could not save the theme: {e}"));
+            }
+        }
+    }
+
     fn right_panel(&mut self, ui: &mut egui::Ui) {
         ui.horizontal(|ui| {
             ui.selectable_value(&mut self.right_tab, RightTab::Changes, RichText::new("Changes").heading());
             ui.selectable_value(&mut self.right_tab, RightTab::Info, RichText::new("Info").heading());
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| self.theme_switch(ui));
         });
         ui.separator();
         match self.right_tab {
@@ -540,7 +833,7 @@ impl App {
                     if let Some(b) = &self.btw {
                         egui::Frame::new()
                             .fill(ui.visuals().faint_bg_color)
-                            .stroke(Stroke::new(1.0, Color32::from_rgb(200, 170, 90)))
+                            .stroke(Stroke::new(1.0, theme::palette(ui.visuals()).note))
                             .inner_margin(8.0)
                             .corner_radius(4.0)
                             .show(ui, |ui| {
@@ -558,11 +851,9 @@ impl App {
                                             ui.label("Thinking (not added to the session)…");
                                         });
                                     }
-                                    Some(Ok(a)) => {
-                                        ui.label(a);
-                                    }
+                                    Some(Ok(a)) => markdown::show(ui, &mut self.md_cache, a),
                                     Some(Err(e)) => {
-                                        ui.colored_label(Color32::LIGHT_RED, e);
+                                        ui.colored_label(theme::palette(ui.visuals()).error, e);
                                     }
                                 });
                             });
@@ -668,10 +959,11 @@ impl App {
     }
 
     fn open_file(&mut self, path: &str) {
-        let i = match self.file_tabs.iter().position(|(p, _)| p == path) {
+        let i = match self.file_tabs.iter().position(|t| t.path == path) {
             Some(i) => i,
             None => {
-                self.file_tabs.push((path.to_owned(), diffview::read(path)));
+                let tab = FileTab { path: path.to_owned(), contents: diffview::read(path), rendered: markdown::is_markdown(path) };
+                self.file_tabs.push(tab);
                 self.file_tabs.len() - 1
             }
         };
@@ -750,9 +1042,9 @@ impl App {
             if ui.selectable_label(self.main_tab.is_none(), RichText::new("Main").strong()).clicked() {
                 self.main_tab = None;
             }
-            for (i, (path, _)) in self.file_tabs.iter().enumerate() {
-                let (name, _) = diffview::split_path(path);
-                let tab = ui.selectable_label(self.main_tab == Some(i), RichText::new(name).monospace()).on_hover_text(path);
+            for (i, t) in self.file_tabs.iter().enumerate() {
+                let (name, _) = diffview::split_path(&t.path);
+                let tab = ui.selectable_label(self.main_tab == Some(i), RichText::new(name).monospace()).on_hover_text(&t.path);
                 if tab.clicked() {
                     self.main_tab = Some(i);
                 }
@@ -766,6 +1058,36 @@ impl App {
             self.close_file(i);
         }
     }
+}
+
+/// One message as a card: role label and accent stripe, then its rendered Markdown.
+/// Messages that are only tool calls show as a single dimmed line.
+fn message(ui: &mut egui::Ui, cache: &mut CommonMarkCache, m: &session::Message, pal: &theme::Palette) {
+    if m.role == Role::Assistant && m.text.lines().all(|l| l.starts_with("[tool:")) {
+        egui::Frame::new().inner_margin(egui::Margin { left: 14, right: 0, top: 0, bottom: 6 }).show(ui, |ui| markdown::show(ui, cache, &m.text));
+        return;
+    }
+    let (who, accent) = match m.role {
+        Role::User => ("You", pal.user),
+        Role::Assistant => ("Claude", pal.assistant),
+    };
+    let fill = match m.role {
+        Role::User => accent.gamma_multiply(0.08),
+        Role::Assistant => ui.visuals().faint_bg_color,
+    };
+    let card = egui::Frame::new()
+        .fill(fill)
+        .corner_radius(6.0)
+        .inner_margin(egui::Margin { left: 14, right: 10, top: 6, bottom: 8 })
+        .show(ui, |ui| {
+            ui.set_width(ui.available_width());
+            ui.label(RichText::new(who).strong().color(accent));
+            markdown::show(ui, cache, &m.text);
+        });
+    let r = card.response.rect;
+    let stripe = egui::Rect::from_min_max(r.min, egui::pos2(r.left() + 3.0, r.bottom()));
+    ui.painter().rect_filled(stripe, egui::CornerRadius { nw: 6, sw: 6, ne: 0, se: 0 }, accent);
+    ui.add_space(6.0);
 }
 
 /// Editable name in place of a session row. Enter or clicking away saves; Escape cancels.
@@ -888,6 +1210,8 @@ impl eframe::App for App {
         self.poll_picker();
         self.poll_summary();
         self.poll_btw();
+        self.poll_snapshots();
+        self.poll_ai();
         egui::Panel::left("sessions").default_size(260.0).resizable(true).show(ui, |ui| self.sidebar(ui));
         egui::Panel::right("diffs").default_size(420.0).resizable(true).show(ui, |ui| self.right_panel(ui));
         egui::CentralPanel::default().show(ui, |ui| {
@@ -899,8 +1223,8 @@ impl eframe::App for App {
                 .show_separator_line(false)
                 .resizable(false)
                 .show(ui, |ui| self.prompt_bar(ui));
-            match self.main_tab.and_then(|i| self.file_tabs.get(i)) {
-                Some((path, contents)) => diffview::file_view(ui, path, contents),
+            match self.main_tab.filter(|&i| i < self.file_tabs.len()) {
+                Some(i) => self.file_tab(ui, i),
                 None => self.conversation(ui),
             }
             // A plain click anywhere in the main area goes to the input, like a terminal.
