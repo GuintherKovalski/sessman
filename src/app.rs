@@ -69,9 +69,11 @@ pub struct App {
     /// Session id whose goal is being summarized, and the pending result.
     summarizing: Option<(String, Receiver<Result<String, String>>)>,
     btw: Option<Btw>,
+    /// Text in the Info tab's "ask about this goal" field.
+    goal_question: String,
 }
 
-/// A `/btw` side question: asked with the session's context, not added to it.
+/// A side question about the session (like Claude Code's /btw): asked with its context, not added to it.
 struct Btw {
     question: String,
     answer: Option<Result<String, String>>,
@@ -102,6 +104,7 @@ impl App {
             goals: Names::load(&Names::goals_path()),
             summarizing: None,
             btw: None,
+            goal_question: String::new(),
         };
         // Persist colors assigned on load to workspaces saved before colors existed.
         if !app.workspaces.list.is_empty() {
@@ -227,20 +230,6 @@ impl App {
         };
         let prompt = std::mem::take(&mut self.input);
         if prompt.trim().is_empty() {
-            return;
-        }
-        if let Some(question) = prompt.trim().strip_prefix("/btw") {
-            if new {
-                self.error = Some("/btw needs a session with a conversation; send a first prompt".into());
-                return;
-            }
-            let question = question.trim().to_owned();
-            if question.is_empty() {
-                self.error = Some("Type a question after /btw".into());
-                return;
-            }
-            let rx = runner::btw(ctx.clone(), id, cwd, question.clone());
-            self.btw = Some(Btw { question, answer: None, rx: Some(rx) });
             return;
         }
         if new {
@@ -424,42 +413,6 @@ impl App {
         if let Some(e) = &self.error {
             ui.colored_label(Color32::LIGHT_RED, e);
         }
-        if let Some(b) = &self.btw {
-            let mut dismiss = false;
-            egui::Frame::new()
-                .fill(ui.visuals().faint_bg_color)
-                .stroke(Stroke::new(1.0, Color32::from_rgb(200, 170, 90)))
-                .inner_margin(8.0)
-                .corner_radius(4.0)
-                .show(ui, |ui| {
-                    ui.set_width(ui.available_width());
-                    ui.horizontal(|ui| {
-                        ui.label(RichText::new("btw").strong().color(Color32::from_rgb(220, 190, 100)));
-                        ui.label(RichText::new(&b.question).italics());
-                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                            dismiss = ui.small_button("Dismiss").clicked();
-                        });
-                    });
-                    egui::ScrollArea::vertical().id_salt("btw").max_height(220.0).show(ui, |ui| match &b.answer {
-                        None => {
-                            ui.horizontal(|ui| {
-                                ui.spinner();
-                                ui.label("Thinking (not added to the session)…");
-                            });
-                        }
-                        Some(Ok(a)) => {
-                            ui.label(a);
-                        }
-                        Some(Err(e)) => {
-                            ui.colored_label(Color32::LIGHT_RED, e);
-                        }
-                    });
-                });
-            if dismiss {
-                self.btw = None;
-            }
-            ui.add_space(4.0);
-        }
         egui::Frame::new()
             .fill(Color32::from_rgb(14, 14, 16))
             .stroke(Stroke::new(1.0, Color32::from_gray(60)))
@@ -471,7 +424,7 @@ impl App {
                     let hint = match (&self.open, &self.running) {
                         (None, _) => "select a session",
                         (_, Some(_)) => "claude is working…",
-                        _ => "type a prompt · /btw to ask on the side · up/down for history · enter to send",
+                        _ => "type a prompt · up/down for history · enter to send",
                     };
                     let edit = egui::TextEdit::singleline(&mut self.input)
                         .id(id)
@@ -562,27 +515,8 @@ impl App {
         let id = self.selected.map(|i| self.sessions[i].id.clone());
         let mut start_summary = false;
         let mut toggled = None;
+        let (mut ask, mut dismiss) = (false, false);
         egui::ScrollArea::vertical().auto_shrink(false).show(ui, |ui| {
-            section(ui, "Model");
-            ui.label(RichText::new(s.model.as_deref().unwrap_or("unknown yet")).monospace());
-
-            section(ui, "Context");
-            let exact = id.as_ref().and_then(|id| status::load(&status::dir().join(format!("{id}.json"))));
-            let window_size = exact.as_ref().and_then(|(v, _)| v["context_window"]["context_window_size"].as_u64());
-            if s.context_tokens == 0 {
-                ui.label("No replies yet");
-            } else {
-                let window = window_size.unwrap_or_else(|| context_window(s.model.as_deref()));
-                let used = s.context_tokens as f32 / window as f32;
-                ui.add(egui::ProgressBar::new(used.min(1.0)).text(format!(
-                    "{} / {} tokens ({:.0}%)",
-                    short_tokens(s.context_tokens),
-                    short_tokens(window),
-                    used * 100.0
-                )));
-                ui.label(RichText::new("As of the latest reply").weak().small());
-            }
-
             section(ui, "Goal");
             let goal = id.as_deref().and_then(|id| self.goals.get(id));
             match (goal, &id) {
@@ -622,6 +556,70 @@ impl App {
                 }
             }
 
+            // Questions about the goal, answered with the session's context but not added to it.
+            if id.is_some() && !s.messages.is_empty() {
+                ui.add_space(8.0);
+                let asking = self.btw.as_ref().is_some_and(|b| b.answer.is_none());
+                let field = egui::TextEdit::singleline(&mut self.goal_question)
+                    .hint_text("Ask about this goal, Enter to send")
+                    .desired_width(f32::INFINITY);
+                let resp = ui.add_enabled(!asking, field);
+                if resp.lost_focus() && ui.input(|i| i.key_pressed(Key::Enter)) && !self.goal_question.trim().is_empty() {
+                    ask = true;
+                }
+                if let Some(b) = &self.btw {
+                    ui.add_space(4.0);
+                    egui::Frame::new()
+                        .fill(ui.visuals().faint_bg_color)
+                        .stroke(Stroke::new(1.0, Color32::from_rgb(200, 170, 90)))
+                        .inner_margin(8.0)
+                        .corner_radius(4.0)
+                        .show(ui, |ui| {
+                            ui.set_width(ui.available_width());
+                            ui.horizontal(|ui| {
+                                ui.label(RichText::new(&b.question).italics());
+                                ui.with_layout(egui::Layout::right_to_left(egui::Align::Min), |ui| {
+                                    dismiss = ui.small_button("Dismiss").clicked();
+                                });
+                            });
+                            match &b.answer {
+                                None => {
+                                    ui.horizontal(|ui| {
+                                        ui.spinner();
+                                        ui.label("Thinking (not added to the session)…");
+                                    });
+                                }
+                                Some(Ok(a)) => {
+                                    ui.label(a);
+                                }
+                                Some(Err(e)) => {
+                                    ui.colored_label(Color32::LIGHT_RED, e);
+                                }
+                            }
+                        });
+                }
+            }
+
+            section(ui, "Model");
+            ui.label(RichText::new(s.model.as_deref().unwrap_or("unknown yet")).monospace());
+
+            section(ui, "Context");
+            let exact = id.as_ref().and_then(|id| status::load(&status::dir().join(format!("{id}.json"))));
+            let window_size = exact.as_ref().and_then(|(v, _)| v["context_window"]["context_window_size"].as_u64());
+            if s.context_tokens == 0 {
+                ui.label("No replies yet");
+            } else {
+                let window = window_size.unwrap_or_else(|| context_window(s.model.as_deref()));
+                let used = s.context_tokens as f32 / window as f32;
+                ui.add(egui::ProgressBar::new(used.min(1.0)).text(format!(
+                    "{} / {} tokens ({:.0}%)",
+                    short_tokens(s.context_tokens),
+                    short_tokens(window),
+                    used * 100.0
+                )));
+                ui.label(RichText::new("As of the latest reply").weak().small());
+            }
+
             section(ui, "Usage limits");
             if limits_ui(ui) {
                 match status::enable() {
@@ -636,6 +634,14 @@ impl App {
             if let Err(e) = self.goals.save(&Names::goals_path()) {
                 self.error = Some(format!("could not save goal: {e}"));
             }
+        }
+        if dismiss {
+            self.btw = None;
+        }
+        if let (true, Some(id)) = (ask, &id) {
+            let question = std::mem::take(&mut self.goal_question).trim().to_owned();
+            let rx = runner::btw(ui.ctx().clone(), id.clone(), s.cwd.clone(), goal_question_prompt(self.goals.get(id), &question));
+            self.btw = Some(Btw { question, answer: None, rx: Some(rx) });
         }
         if let (true, Some(id)) = (start_summary, id) {
             let rx = runner::summarize_goal(ui.ctx().clone(), session::digest(&s.messages, 400, 12_000));
@@ -742,6 +748,17 @@ fn short_duration(d: std::time::Duration) -> String {
         (0, 0, m) => format!("{m}m"),
         (0, h, m) => format!("{h}h {m}m"),
         (days, h, _) => format!("{days}d {h}h"),
+    }
+}
+
+/// The question sent to the forked session, with the current goal and checklist for focus.
+fn goal_question_prompt(goal: Option<&str>, question: &str) -> String {
+    match goal {
+        Some(raw) => format!(
+            "Side question about this session (answer briefly; do not change any files).\n\
+             The session's goal and subgoal checklist:\n{raw}\n\nQuestion: {question}"
+        ),
+        None => format!("Side question about this session (answer briefly; do not change any files).\n\nQuestion: {question}"),
     }
 }
 
