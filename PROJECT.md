@@ -139,6 +139,7 @@ which sets `statusLine` in `~/.claude/settings.json` and nothing else.
 - You can't rename or reorder workspaces (sessions can be renamed).
 
 Known gaps in the newer features are listed in [README.md](README.md#gaps).
+Planned features for the next rounds are in [ROADMAP.md](ROADMAP.md).
 
 ## Code layout
 
