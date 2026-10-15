@@ -154,6 +154,28 @@ pub fn parse(lines: impl Iterator<Item = String>) -> Session {
     s
 }
 
+/// The conversation as compact text for a summarizer: each message cut to `per_message` chars,
+/// and if the whole is longer than `max`, its start and (mostly) its end are kept.
+pub fn digest(messages: &[Message], per_message: usize, max: usize) -> String {
+    let mut out = String::new();
+    for m in messages {
+        let who = if m.role == Role::User { "USER" } else { "CLAUDE" };
+        let text: String = m.text.lines().filter(|l| !l.starts_with("[tool:")).collect::<Vec<_>>().join(" ");
+        if text.trim().is_empty() {
+            continue;
+        }
+        let cut: String = text.chars().take(per_message).collect();
+        out.push_str(&format!("{who}: {cut}\n"));
+    }
+    let chars: Vec<char> = out.chars().collect();
+    if chars.len() <= max {
+        return out;
+    }
+    let head: String = chars[..max / 4].iter().collect();
+    let tail: String = chars[chars.len() - max * 3 / 4..].iter().collect();
+    format!("{head}\n[…]\n{tail}")
+}
+
 /// The text a human typed, or None for tool results, meta lines and command wrappers.
 fn typed_prompt(v: &Value) -> Option<String> {
     if v["type"] != "user" || v["isMeta"].as_bool() == Some(true) {
@@ -232,6 +254,19 @@ mod tests {
         assert_eq!(s.changes.len(), 2);
         assert_eq!((s.changes[0].old.as_str(), s.changes[0].new.as_str()), ("x", "y"));
         assert_eq!(s.changes[1].old, "");
+    }
+
+    #[test]
+    fn digest_skips_tool_lines_and_keeps_both_ends() {
+        let msgs = vec![
+            Message { role: Role::User, text: "build it".into() },
+            Message { role: Role::Assistant, text: "[tool: Bash]".into() },
+            Message { role: Role::Assistant, text: "done\n[tool: Edit]".into() },
+        ];
+        assert_eq!(digest(&msgs, 100, 1000), "USER: build it\nCLAUDE: done\n");
+        let long = vec![Message { role: Role::User, text: "a".repeat(50) + &"z".repeat(50) }];
+        let d = digest(&long, 100, 40);
+        assert!(d.starts_with("USER: aaaa") && d.trim_end().ends_with("zzzz") && d.contains("[…]"));
     }
 
     #[test]

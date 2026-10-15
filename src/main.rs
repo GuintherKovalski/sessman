@@ -1,4 +1,5 @@
 mod app;
+mod goal;
 mod history;
 mod names;
 mod runner;

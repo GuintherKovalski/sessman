@@ -52,6 +52,9 @@ there. Each change is specified first with Spec Kit (see [How the project is bui
   background, no buttons). With it focused:
   - **Up / Down** step through the prompts you sent earlier in this session (like shell
     history). Going past the newest brings back what you were typing.
+  - **`/btw <question>`** asks about the session on the side, like Claude Code's `/btw`: it
+    uses the session's full context but adds nothing to it. The answer appears above the
+    input until you click Dismiss.
   - **Enter** sends the prompt to the session. A spinner shows while Claude works;
     the conversation reloads when it is done.
 - **Pinned "You"**: the prompt that the reply at the top of your view answers stays pinned
@@ -66,8 +69,10 @@ there. Each change is specified first with Spec Kit (see [How the project is bui
 - **Info**:
   - **Model** of the latest reply.
   - **Context**: tokens in context vs the window size (e.g. 204k / 1.0M).
-  - **Goal**: a one- or two-sentence description. Until you click **Summarize goal** (which
-    asks Claude Haiku, using a little of your usage) it shows the start of the first prompt.
+  - **Goal**: until you click **Summarize goal** it shows the start of the first prompt. The
+    button asks Claude Haiku (a little of your usage) for the goal plus a **checklist of 3–7
+    subgoals**, ticked where the conversation shows they're done, with "N of M done". You can
+    tick and untick items yourself; that is saved.
   - **Usage limits**: your 5-hour and weekly limits with time until reset. Claude Code only
     shares these with its status line, so click **Enable** once: it sets sessman as Claude
     Code's status line (`statusLine` in `~/.claude/settings.json`). Limits then appear after
@@ -86,7 +91,8 @@ there. Each change is specified first with Spec Kit (see [How the project is bui
 | New session | Runs `claude -p --session-id <new uuid> "<first prompt>"` in the chosen folder. |
 | Model, context tokens | The latest reply's `model` and `usage` in the session file. |
 | Context size, usage limits | Claude Code's status-line data, saved by `sessman statusline` to `~/.config/sessman/status/`. Without it, the size is inferred from the model. |
-| Goal | `claude -p --model haiku --no-session-persistence` on request; saved to `~/.config/sessman/goals.json`. |
+| Goal and checklist | `claude -p --model haiku --no-session-persistence` with a digest of the conversation, on request; saved (with your ticks) to `~/.config/sessman/goals.json`. |
+| `/btw` answers | `claude -p --resume <id> --fork-session --no-session-persistence "<question>"`: full context, original session untouched, nothing saved. |
 | Workspaces and their colors | sessman's own file: `~/.config/sessman/workspaces.json`. |
 | Custom session names | sessman's own file: `~/.config/sessman/names.json`. |
 
@@ -109,6 +115,7 @@ src/
 ├── session.rs     finds and parses Claude Code session files
 ├── history.rs     Up/Down prompt history
 ├── names.rs       custom session names and goals
+├── goal.rs        goal + subgoal checklist format
 ├── runner.rs      runs `claude -p` (send, new session, goal summary), folder picker
 ├── status.rs      `sessman statusline`: saves Claude Code's status data; usage limits
 └── workspaces.rs  workspaces: create, move, remove, delete, load/save
@@ -136,6 +143,7 @@ spec → plan → tasks → implementation, and the documents stay in the repo:
 | `specs/004-workspace-colors-terminal-input/` | Workspace colors, terminal-style input at the bottom |
 | `specs/005-new-session-click-focus/` | New session button, click anywhere to focus the input |
 | `specs/006-right-panel-info-tab/` | Changes / Info tabs: model, context, goal, usage limits |
+| `specs/007-goal-checklist-btw/` | Goal subgoal checklist, `/btw` side questions |
 
 Each feature folder has `spec.md` (what and why), `plan.md` (how), and `tasks.md` (the
 checklist that was implemented). `specs/001-session-manager-ui/research.md` lists open

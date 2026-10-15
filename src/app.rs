@@ -1,3 +1,4 @@
+use crate::goal;
 use crate::history::History;
 use crate::names::Names;
 use crate::runner;
@@ -67,6 +68,14 @@ pub struct App {
     goals: Names,
     /// Session id whose goal is being summarized, and the pending result.
     summarizing: Option<(String, Receiver<Result<String, String>>)>,
+    btw: Option<Btw>,
+}
+
+/// A `/btw` side question: asked with the session's context, not added to it.
+struct Btw {
+    question: String,
+    answer: Option<Result<String, String>>,
+    rx: Option<Receiver<Result<String, String>>>,
 }
 
 impl App {
@@ -92,6 +101,7 @@ impl App {
             right_tab: RightTab::Changes,
             goals: Names::load(&Names::goals_path()),
             summarizing: None,
+            btw: None,
         };
         // Persist colors assigned on load to workspaces saved before colors existed.
         if !app.workspaces.list.is_empty() {
@@ -136,6 +146,7 @@ impl App {
 
     fn select(&mut self, i: usize) {
         self.selected = Some(i);
+        self.btw = None;
         self.new_session = None;
         self.focus_prompt = true;
         self.reload();
@@ -150,6 +161,14 @@ impl App {
         self.pinned = None;
         self.error = None;
         self.focus_prompt = true;
+    }
+
+    fn poll_btw(&mut self) {
+        let Some(b) = &mut self.btw else { return };
+        if let Some(Ok(result)) = b.rx.as_ref().map(|rx| rx.try_recv()) {
+            b.answer = Some(result);
+            b.rx = None;
+        }
     }
 
     fn poll_summary(&mut self) {
@@ -208,6 +227,20 @@ impl App {
         };
         let prompt = std::mem::take(&mut self.input);
         if prompt.trim().is_empty() {
+            return;
+        }
+        if let Some(question) = prompt.trim().strip_prefix("/btw") {
+            if new {
+                self.error = Some("/btw needs a session with a conversation; send a first prompt".into());
+                return;
+            }
+            let question = question.trim().to_owned();
+            if question.is_empty() {
+                self.error = Some("Type a question after /btw".into());
+                return;
+            }
+            let rx = runner::btw(ctx.clone(), id, cwd, question.clone());
+            self.btw = Some(Btw { question, answer: None, rx: Some(rx) });
             return;
         }
         if new {
@@ -391,6 +424,42 @@ impl App {
         if let Some(e) = &self.error {
             ui.colored_label(Color32::LIGHT_RED, e);
         }
+        if let Some(b) = &self.btw {
+            let mut dismiss = false;
+            egui::Frame::new()
+                .fill(ui.visuals().faint_bg_color)
+                .stroke(Stroke::new(1.0, Color32::from_rgb(200, 170, 90)))
+                .inner_margin(8.0)
+                .corner_radius(4.0)
+                .show(ui, |ui| {
+                    ui.set_width(ui.available_width());
+                    ui.horizontal(|ui| {
+                        ui.label(RichText::new("btw").strong().color(Color32::from_rgb(220, 190, 100)));
+                        ui.label(RichText::new(&b.question).italics());
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            dismiss = ui.small_button("Dismiss").clicked();
+                        });
+                    });
+                    egui::ScrollArea::vertical().id_salt("btw").max_height(220.0).show(ui, |ui| match &b.answer {
+                        None => {
+                            ui.horizontal(|ui| {
+                                ui.spinner();
+                                ui.label("Thinking (not added to the session)…");
+                            });
+                        }
+                        Some(Ok(a)) => {
+                            ui.label(a);
+                        }
+                        Some(Err(e)) => {
+                            ui.colored_label(Color32::LIGHT_RED, e);
+                        }
+                    });
+                });
+            if dismiss {
+                self.btw = None;
+            }
+            ui.add_space(4.0);
+        }
         egui::Frame::new()
             .fill(Color32::from_rgb(14, 14, 16))
             .stroke(Stroke::new(1.0, Color32::from_gray(60)))
@@ -402,7 +471,7 @@ impl App {
                     let hint = match (&self.open, &self.running) {
                         (None, _) => "select a session",
                         (_, Some(_)) => "claude is working…",
-                        _ => "type a prompt · up/down for history · enter to send",
+                        _ => "type a prompt · /btw to ask on the side · up/down for history · enter to send",
                     };
                     let edit = egui::TextEdit::singleline(&mut self.input)
                         .id(id)
@@ -492,6 +561,7 @@ impl App {
         };
         let id = self.selected.map(|i| self.sessions[i].id.clone());
         let mut start_summary = false;
+        let mut toggled = None;
         egui::ScrollArea::vertical().auto_shrink(false).show(ui, |ui| {
             section(ui, "Model");
             ui.label(RichText::new(s.model.as_deref().unwrap_or("unknown yet")).monospace());
@@ -516,8 +586,20 @@ impl App {
             section(ui, "Goal");
             let goal = id.as_deref().and_then(|id| self.goals.get(id));
             match (goal, &id) {
-                (Some(g), _) => {
-                    ui.label(g);
+                (Some(raw), _) => {
+                    let g = goal::parse(raw);
+                    ui.label(&g.text);
+                    if !g.items.is_empty() {
+                        ui.add_space(4.0);
+                        let done = g.items.iter().filter(|(d, _)| *d).count();
+                        ui.label(RichText::new(format!("{done} of {} done", g.items.len())).weak().small());
+                    }
+                    for (i, (done, text)) in g.items.into_iter().enumerate() {
+                        let mut checked = done;
+                        if ui.checkbox(&mut checked, text).changed() {
+                            toggled = Some(i);
+                        }
+                    }
                 }
                 (None, _) if s.prompts.is_empty() => {
                     ui.label("No prompts yet");
@@ -535,7 +617,7 @@ impl App {
                     });
                 } else {
                     let label = if goal.is_some() { "Summarize again" } else { "Summarize goal" };
-                    let btn = ui.button(label).on_hover_text("Asks Claude Haiku for a one-sentence goal (uses a little of your usage)");
+                    let btn = ui.button(label).on_hover_text("Asks Claude Haiku for the goal and a checklist of subgoals (uses a little of your usage)");
                     start_summary = btn.clicked();
                 }
             }
@@ -548,8 +630,15 @@ impl App {
                 }
             }
         });
+        if let (Some(i), Some(id)) = (toggled, &id) {
+            let raw = goal::toggle(self.goals.get(id).unwrap_or_default(), i);
+            self.goals.set(id, &raw);
+            if let Err(e) = self.goals.save(&Names::goals_path()) {
+                self.error = Some(format!("could not save goal: {e}"));
+            }
+        }
         if let (true, Some(id)) = (start_summary, id) {
-            let rx = runner::summarize_goal(ui.ctx().clone(), s.prompts.clone());
+            let rx = runner::summarize_goal(ui.ctx().clone(), session::digest(&s.messages, 400, 12_000));
             self.summarizing = Some((id, rx));
         }
     }
@@ -694,6 +783,7 @@ impl eframe::App for App {
         self.poll_runner();
         self.poll_picker();
         self.poll_summary();
+        self.poll_btw();
         egui::Panel::left("sessions").default_size(260.0).resizable(true).show(ui, |ui| self.sidebar(ui));
         egui::Panel::right("diffs").default_size(420.0).resizable(true).show(ui, |ui| self.right_panel(ui));
         egui::CentralPanel::default().show(ui, |ui| {

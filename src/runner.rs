@@ -1,6 +1,6 @@
 use std::io::Read;
 use std::path::PathBuf;
-use std::process::Command;
+use std::process::{Command, Stdio};
 use std::sync::mpsc::{Receiver, channel};
 
 /// Runs `claude -p` on a thread: `--resume <id>` for an existing session, `--session-id <id>`
@@ -12,43 +12,54 @@ pub fn send(
     prompt: String,
     new: bool,
 ) -> Receiver<Result<String, String>> {
-    let (tx, rx) = channel();
-    std::thread::spawn(move || {
-        let mut cmd = Command::new("claude");
-        cmd.args(["-p", if new { "--session-id" } else { "--resume" }, &id, &prompt]);
-        if let Some(dir) = cwd {
-            cmd.current_dir(dir);
-        }
-        let result = match cmd.output() {
-            Ok(out) if out.status.success() => Ok(String::from_utf8_lossy(&out.stdout).into_owned()),
-            Ok(out) => Err(format!("claude exited with {}: {}", out.status, String::from_utf8_lossy(&out.stderr))),
-            Err(e) => Err(format!("failed to run claude: {e}")),
-        };
-        let _ = tx.send(result);
-        ctx.request_repaint();
-    });
-    rx
+    let mut cmd = Command::new("claude");
+    cmd.args(["-p", if new { "--session-id" } else { "--resume" }, &id, &prompt]);
+    if let Some(dir) = cwd {
+        cmd.current_dir(dir);
+    }
+    run(ctx, cmd)
 }
 
-/// Asks a small model for a one-sentence goal of a session, from its prompts.
+/// A side question with the session's full context, like Claude Code's /btw: the session is
+/// forked and the fork isn't saved, so the original conversation is untouched.
+pub fn btw(ctx: eframe::egui::Context, id: String, cwd: Option<PathBuf>, question: String) -> Receiver<Result<String, String>> {
+    let mut cmd = Command::new("claude");
+    cmd.args(["-p", "--resume", &id, "--fork-session", "--no-session-persistence", &question]);
+    if let Some(dir) = cwd {
+        cmd.current_dir(dir);
+    }
+    run(ctx, cmd)
+}
+
+/// Asks a small model for the session goal and a checklist of subgoals (format in goal.rs).
 /// Uses --no-session-persistence so the summary itself doesn't become a session.
-pub fn summarize_goal(ctx: eframe::egui::Context, prompts: Vec<String>) -> Receiver<Result<String, String>> {
+pub fn summarize_goal(ctx: eframe::egui::Context, digest: String) -> Receiver<Result<String, String>> {
+    let prompt = format!(
+        "Below is a digest of a coding session between a USER and CLAUDE (an AI coding assistant).\n\
+         Write the session's overall goal and a checklist of 3 to 7 concrete subgoals.\n\
+         Mark a subgoal [x] when CLAUDE reported it done (e.g. it built, committed, verified or \
+         shipped it) or the USER moved on to build on it; mark [ ] only if it is still open.\n\
+         Keep each subgoal under 12 words. Reply in exactly this format and nothing else:\n\n\
+         GOAL: <one or two short sentences>\n\
+         - [x] <completed subgoal>\n\
+         - [ ] <open subgoal>\n\n\
+         Session digest:\n{digest}"
+    );
+    let mut cmd = Command::new("claude");
+    cmd.args(["-p", "--model", "haiku", "--no-session-persistence", &prompt]).current_dir(std::env::temp_dir());
+    run(ctx, cmd)
+}
+
+/// Runs `cmd` on a thread; yields Ok(trimmed stdout) or Err(message), then repaints.
+fn run(ctx: eframe::egui::Context, mut cmd: Command) -> Receiver<Result<String, String>> {
+    // Without this, `claude -p` waits 3 s for piped stdin before starting.
+    cmd.stdin(Stdio::null());
     let (tx, rx) = channel();
     std::thread::spawn(move || {
-        let mut text: String = prompts.iter().take(8).map(|p| format!("- {p}\n")).collect();
-        text.truncate(text.floor_char_boundary(6000));
-        let prompt = format!(
-            "These are the prompts a user sent in a coding session. In one or two short sentences, \
-             describe the goal of the session. Reply with only the description.\n\n{text}"
-        );
-        let out = Command::new("claude")
-            .args(["-p", "--model", "haiku", "--no-session-persistence", &prompt])
-            .current_dir(std::env::temp_dir())
-            .output();
-        let result = match out {
-            Ok(o) if o.status.success() => Ok(String::from_utf8_lossy(&o.stdout).trim().to_owned()),
-            Ok(o) => Err(String::from_utf8_lossy(&o.stderr).into_owned()),
-            Err(e) => Err(e.to_string()),
+        let result = match cmd.output() {
+            Ok(out) if out.status.success() => Ok(String::from_utf8_lossy(&out.stdout).trim().to_owned()),
+            Ok(out) => Err(format!("claude exited with {}: {}", out.status, String::from_utf8_lossy(&out.stderr))),
+            Err(e) => Err(format!("failed to run claude: {e}")),
         };
         let _ = tx.send(result);
         ctx.request_repaint();
