@@ -2,7 +2,7 @@ use crate::history::History;
 use crate::runner;
 use crate::session::{self, Change, Role, Session, SessionMeta};
 use crate::workspaces::Workspaces;
-use eframe::egui::{self, Color32, Id, Key, Modifiers, RichText, Stroke, StrokeKind};
+use eframe::egui::{self, Align2, Color32, Id, Key, LayerId, Modifiers, Order, RichText, Sense, Stroke, StrokeKind};
 use similar::{ChangeTag, TextDiff};
 use std::sync::mpsc::Receiver;
 
@@ -149,11 +149,16 @@ impl App {
             for i in visible {
                 let s = &self.sessions[i];
                 let label = format!("{}\n{}", s.title, short_project(&s.project));
-                let row = ui
-                    .dnd_drag_source(Id::new(("session", &s.id)), s.id.clone(), |ui| {
-                        ui.selectable_label(self.selected == Some(i), label)
-                    })
-                    .inner;
+                // One widget that senses both: a separate drag-source wrapper would swallow the click.
+                let row = ui.selectable_label(self.selected == Some(i), label).interact(Sense::click_and_drag());
+                row.dnd_set_drag_payload(s.id.clone());
+                if row.dragged() {
+                    if let Some(pos) = ui.ctx().pointer_interact_pos() {
+                        let painter = ui.ctx().layer_painter(LayerId::new(Order::Tooltip, Id::new("drag-ghost")));
+                        let font = egui::FontId::proportional(14.0);
+                        painter.text(pos + egui::vec2(14.0, 0.0), Align2::LEFT_CENTER, &s.title, font, USER_COLOR);
+                    }
+                }
                 if row.clicked() {
                     actions.push(Action::Select(i));
                 }
