@@ -1,11 +1,22 @@
 use crate::history::History;
 use crate::runner;
 use crate::session::{self, Change, Role, Session, SessionMeta};
-use eframe::egui::{self, Color32, Id, Key, Modifiers, RichText};
+use crate::workspaces::Workspaces;
+use eframe::egui::{self, Color32, Id, Key, Modifiers, RichText, Stroke, StrokeKind};
 use similar::{ChangeTag, TextDiff};
 use std::sync::mpsc::Receiver;
 
 const MAX_DIFF_LINES: usize = 200;
+const USER_COLOR: Color32 = Color32::from_rgb(120, 170, 255);
+
+/// Sidebar interactions, collected while drawing and applied afterwards.
+enum Action {
+    Select(usize),
+    Tab(Option<usize>),
+    MoveTo(String, usize),
+    Remove(String),
+    DeleteWorkspace(usize),
+}
 
 pub struct App {
     sessions: Vec<SessionMeta>,
@@ -15,6 +26,13 @@ pub struct App {
     input: String,
     history: History,
     running: Option<Receiver<Result<String, String>>>,
+    workspaces: Workspaces,
+    /// None = "All sessions", Some(i) = workspace i.
+    tab: Option<usize>,
+    /// Some while the "+" name field is open.
+    new_workspace: Option<String>,
+    /// Index into the open session's messages of the "You" prompt pinned above the conversation.
+    pinned: Option<usize>,
 }
 
 impl App {
@@ -27,6 +45,36 @@ impl App {
             input: String::new(),
             history: History::default(),
             running: None,
+            workspaces: Workspaces::load(&Workspaces::path()),
+            tab: None,
+            new_workspace: None,
+            pinned: None,
+        }
+    }
+
+    fn save_workspaces(&mut self) {
+        if let Err(e) = self.workspaces.save(&Workspaces::path()) {
+            self.error = Some(format!("could not save workspaces: {e}"));
+        }
+    }
+
+    fn apply(&mut self, action: Action) {
+        match action {
+            Action::Select(i) => self.select(i),
+            Action::Tab(t) => self.tab = t,
+            Action::MoveTo(id, w) => {
+                self.workspaces.move_to(&id, w);
+                self.save_workspaces();
+            }
+            Action::Remove(id) => {
+                self.workspaces.remove(&id);
+                self.save_workspaces();
+            }
+            Action::DeleteWorkspace(w) => {
+                self.workspaces.delete(w);
+                self.tab = None;
+                self.save_workspaces();
+            }
         }
     }
 
@@ -41,6 +89,7 @@ impl App {
             Ok(s) => {
                 self.history = History::new(s.prompts.clone());
                 self.open = Some(s);
+                self.pinned = None;
                 self.error = None;
             }
             Err(e) => self.error = Some(format!("could not read {}: {e}", meta.path.display())),
@@ -75,27 +124,101 @@ impl App {
     }
 
     fn sidebar(&mut self, ui: &mut egui::Ui) {
+        let mut actions = Vec::new();
         ui.horizontal(|ui| {
             ui.heading("Sessions");
             if ui.button("⟳").on_hover_text("Refresh").clicked() {
                 self.refresh_list();
             }
         });
+        self.tabs(ui, &mut actions);
         ui.separator();
-        if self.sessions.is_empty() {
-            ui.label("No sessions found in ~/.claude/projects");
+
+        let visible: Vec<usize> = match self.tab.and_then(|w| self.workspaces.list.get(w)) {
+            None => (0..self.sessions.len()).collect(),
+            Some(w) => (0..self.sessions.len()).filter(|&i| w.sessions.contains(&self.sessions[i].id)).collect(),
+        };
+        if visible.is_empty() {
+            ui.label(if self.tab.is_some() {
+                "Empty workspace. Drag sessions onto its tab, or right-click a session → Move to."
+            } else {
+                "No sessions found in ~/.claude/projects"
+            });
         }
-        let mut clicked = None;
         egui::ScrollArea::vertical().show(ui, |ui| {
-            for (i, s) in self.sessions.iter().enumerate() {
+            for i in visible {
+                let s = &self.sessions[i];
                 let label = format!("{}\n{}", s.title, short_project(&s.project));
-                if ui.selectable_label(self.selected == Some(i), label).clicked() {
-                    clicked = Some(i);
+                let row = ui
+                    .dnd_drag_source(Id::new(("session", &s.id)), s.id.clone(), |ui| {
+                        ui.selectable_label(self.selected == Some(i), label)
+                    })
+                    .inner;
+                if row.clicked() {
+                    actions.push(Action::Select(i));
                 }
+                row.context_menu(|ui| {
+                    ui.menu_button("Move to", |ui| {
+                        if self.workspaces.list.is_empty() {
+                            ui.label("No workspaces yet. Create one with +");
+                        }
+                        for (w, ws) in self.workspaces.list.iter().enumerate() {
+                            if ui.button(&ws.name).clicked() {
+                                actions.push(Action::MoveTo(s.id.clone(), w));
+                            }
+                        }
+                    });
+                    if self.tab.is_some() && ui.button("Remove from workspace").clicked() {
+                        actions.push(Action::Remove(s.id.clone()));
+                    }
+                });
             }
         });
-        if let Some(i) = clicked {
-            self.select(i);
+        for a in actions {
+            self.apply(a);
+        }
+    }
+
+    fn tabs(&mut self, ui: &mut egui::Ui, actions: &mut Vec<Action>) {
+        ui.horizontal_wrapped(|ui| {
+            if ui.selectable_label(self.tab.is_none(), "All sessions").clicked() {
+                actions.push(Action::Tab(None));
+            }
+            for (w, ws) in self.workspaces.list.iter().enumerate() {
+                let tab = ui.selectable_label(self.tab == Some(w), &ws.name);
+                if tab.clicked() {
+                    actions.push(Action::Tab(Some(w)));
+                }
+                if tab.dnd_hover_payload::<String>().is_some() {
+                    ui.painter().rect_stroke(tab.rect, 3.0, Stroke::new(2.0, USER_COLOR), StrokeKind::Outside);
+                }
+                if let Some(id) = tab.dnd_release_payload::<String>() {
+                    actions.push(Action::MoveTo((*id).clone(), w));
+                }
+                tab.context_menu(|ui| {
+                    if ui.button("Delete workspace").clicked() {
+                        actions.push(Action::DeleteWorkspace(w));
+                    }
+                });
+            }
+            if ui.button("+").on_hover_text("New workspace").clicked() {
+                self.new_workspace = Some(String::new());
+            }
+        });
+        let Some(name) = &mut self.new_workspace else { return };
+        let id = Id::new("new-workspace");
+        let resp = ui.add(egui::TextEdit::singleline(name).id(id).hint_text("Workspace name, Enter to create"));
+        if !resp.has_focus() && !resp.lost_focus() {
+            resp.request_focus();
+        }
+        if resp.lost_focus() {
+            if ui.input(|i| i.key_pressed(Key::Enter)) {
+                if let Some(w) = self.workspaces.add(name) {
+                    actions.push(Action::Tab(Some(w)));
+                    self.save_workspaces();
+                }
+            }
+            self.new_workspace = None;
         }
     }
 
@@ -136,15 +259,32 @@ impl App {
         }
     }
 
-    fn conversation(&self, ui: &mut egui::Ui) {
+    fn conversation(&mut self, ui: &mut egui::Ui) {
         let Some(s) = &self.open else {
             ui.centered_and_justified(|ui| ui.label("Select a session on the left"));
             return;
         };
-        egui::ScrollArea::vertical().auto_shrink(false).stick_to_bottom(true).show(ui, |ui| {
-            for m in &s.messages {
+        // Pinned "You": the prompt of the turn at the top of the viewport (computed last frame).
+        let pinned = self.pinned.or_else(|| s.messages.iter().position(|m| m.role == Role::User));
+        if let Some(m) = pinned.and_then(|i| s.messages.get(i)) {
+            egui::Frame::new().fill(ui.visuals().faint_bg_color).inner_margin(6.0).corner_radius(4.0).show(ui, |ui| {
+                ui.set_width(ui.available_width());
+                ui.label(RichText::new("You").strong().color(USER_COLOR));
+                egui::ScrollArea::vertical().id_salt("pinned").max_height(90.0).show(ui, |ui| ui.label(&m.text));
+            });
+            ui.add_space(4.0);
+        }
+        let mut top_prompt = None;
+        egui::ScrollArea::vertical().auto_shrink(false).stick_to_bottom(true).show_viewport(ui, |ui, viewport| {
+            let origin = ui.cursor().top();
+            for (i, m) in s.messages.iter().enumerate() {
                 let (who, color) = match m.role {
-                    Role::User => ("You", Color32::from_rgb(120, 170, 255)),
+                    Role::User => {
+                        if ui.cursor().top() - origin <= viewport.min.y + 1.0 {
+                            top_prompt = Some(i);
+                        }
+                        ("You", USER_COLOR)
+                    }
                     Role::Assistant => ("Claude", Color32::from_rgb(230, 150, 90)),
                 };
                 ui.label(RichText::new(who).strong().color(color));
@@ -152,6 +292,10 @@ impl App {
                 ui.add_space(8.0);
             }
         });
+        if top_prompt != self.pinned {
+            self.pinned = top_prompt;
+            ui.ctx().request_repaint();
+        }
     }
 
     fn diffs(&self, ui: &mut egui::Ui) {

@@ -2,6 +2,7 @@ mod app;
 mod history;
 mod runner;
 mod session;
+mod workspaces;
 
 fn main() -> eframe::Result {
     let options = eframe::NativeOptions {
