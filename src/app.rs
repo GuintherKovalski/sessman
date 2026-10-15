@@ -12,6 +12,7 @@ use crate::workspaces::Workspaces;
 use eframe::egui::text::{CCursor, CCursorRange};
 use eframe::egui::{self, Align2, Color32, Id, Key, LayerId, Modifiers, Order, RichText, Sense, Stroke, StrokeKind, ThemePreference};
 use egui_commonmark::CommonMarkCache;
+use std::collections::HashMap;
 use std::path::PathBuf;
 use std::time::{SystemTime, UNIX_EPOCH};
 use std::sync::mpsc::Receiver;
@@ -47,10 +48,8 @@ pub struct App {
     error: Option<String>,
     input: String,
     history: History,
-    running: Option<Receiver<RunEvent>>,
-    /// The reply being written by the running claude, and the tool it is starting.
-    live: String,
-    live_tool: Option<String>,
+    /// Prompts running right now, by session id; each session can run on its own.
+    runs: HashMap<String, Run>,
     workspaces: Workspaces,
     /// None = "All sessions", Some(i) = workspace i.
     tab: Option<usize>,
@@ -62,8 +61,8 @@ pub struct App {
     renaming: Option<Renaming>,
     /// Folder of a new session that has no prompt yet (nothing exists on disk until then).
     new_session: Option<PathBuf>,
-    /// Id of a session being created by the running `claude`, to select once it exists.
-    creating: Option<String>,
+    /// Id given to the new session's first prompt, to select it once it exists.
+    new_id: Option<String>,
     picker: Option<Receiver<Option<PathBuf>>>,
     /// Set to move keyboard focus to the prompt input on the next frame.
     focus_prompt: bool,
@@ -99,6 +98,15 @@ pub struct App {
     ai: Option<AiSearch>,
 }
 
+/// A running `claude -p` for one session: its events, the reply being written, and the tool
+/// it is starting.
+struct Run {
+    rx: Receiver<RunEvent>,
+    live: String,
+    tool: Option<String>,
+    new: bool,
+}
+
 /// An Enter-search: Haiku picks sessions from a catalog. Results are kept as session ids, so
 /// a list refresh doesn't shift them.
 struct AiSearch {
@@ -132,9 +140,7 @@ impl App {
             error: None,
             input: String::new(),
             history: History::default(),
-            running: None,
-            live: String::new(),
-            live_tool: None,
+            runs: HashMap::new(),
             workspaces: Workspaces::load(&Workspaces::path()),
             tab: None,
             new_workspace: None,
@@ -142,7 +148,7 @@ impl App {
             names: Names::load(&Names::path()),
             renaming: None,
             new_session: None,
-            creating: None,
+            new_id: None,
             picker: None,
             focus_prompt: false,
             right_tab: RightTab::Changes,
@@ -292,7 +298,7 @@ impl App {
             (Some((_, before)), Some(i)) => self.sessions[i].modified != *before,
             _ => false,
         };
-        if changed && self.running.is_none() {
+        if changed && !self.open_running() {
             self.reload();
         }
     }
@@ -305,11 +311,11 @@ impl App {
             _ => return,
         };
         let prompt = std::mem::take(&mut self.input);
-        if prompt.trim().is_empty() {
+        if prompt.trim().is_empty() || self.runs.contains_key(&id) {
             return;
         }
         if new {
-            self.creating = Some(id.clone());
+            self.new_id = Some(id.clone());
             if let Some(w) = self.tab {
                 self.workspaces.move_to(&id, w);
                 self.save_workspaces();
@@ -319,47 +325,66 @@ impl App {
             s.push_prompt(prompt.clone());
         }
         self.history = History::new(self.open.as_ref().map(|s| s.prompts.clone()).unwrap_or_default());
-        self.live.clear();
-        self.live_tool = None;
-        self.running = Some(runner::send(ctx.clone(), id, cwd, prompt, new));
+        let rx = runner::send(ctx.clone(), id.clone(), cwd, prompt, new);
+        self.runs.insert(id, Run { rx, live: String::new(), tool: None, new });
     }
 
+    /// Id of the session in the main area: the selected one, or the new one being created.
+    fn open_id(&self) -> Option<String> {
+        match &self.new_session {
+            Some(_) => self.new_id.clone(),
+            None => self.selected.map(|i| self.sessions[i].id.clone()),
+        }
+    }
+
+    fn open_running(&self) -> bool {
+        self.open_id().is_some_and(|id| self.runs.contains_key(&id))
+    }
+
+    /// Drains every run's events. Steps of the open session's run are applied to the
+    /// conversation as they arrive; other sessions catch up from disk when opened.
     fn poll_runner(&mut self) {
-        let Some(rx) = &self.running else { return };
-        let mut done = None;
-        for event in rx.try_iter() {
-            match event {
-                RunEvent::Line(v) => {
-                    if let Some(s) = &mut self.open {
-                        s.apply(&v);
+        let open_id = self.open_id();
+        let mut finished = Vec::new();
+        for (id, run) in &mut self.runs {
+            let is_open = open_id.as_ref() == Some(id);
+            for event in run.rx.try_iter() {
+                match event {
+                    RunEvent::Line(v) => {
+                        if let Some(s) = self.open.as_mut().filter(|_| is_open) {
+                            s.apply(&v);
+                        }
+                        run.live.clear();
+                        run.tool = None;
                     }
-                    self.live.clear();
-                    self.live_tool = None;
+                    RunEvent::Delta(t) => run.live.push_str(&t),
+                    RunEvent::Tool(name) => run.tool = Some(name),
+                    RunEvent::Done(result) => finished.push((id.clone(), run.new, is_open, result)),
                 }
-                RunEvent::Delta(t) => self.live.push_str(&t),
-                RunEvent::Tool(name) => self.live_tool = Some(name),
-                RunEvent::Done(result) => done = Some(result),
             }
         }
-        let Some(result) = done else { return };
-        self.running = None;
-        self.live.clear();
-        self.live_tool = None;
-        if let Some(id) = self.creating.take() {
-            self.sessions = session::list(&session::projects_dir());
-            // If claude failed before creating it, stay on the empty session to retry.
-            if let Some(i) = self.sessions.iter().position(|s| s.id == id) {
-                self.selected = Some(i);
-                self.new_session = None;
+        for (id, new, is_open, result) in finished {
+            self.runs.remove(&id);
+            if new {
+                let current = self.selected.map(|i| self.sessions[i].id.clone());
+                self.sessions = session::list(&session::projects_dir());
+                self.selected = current.and_then(|c| self.sessions.iter().position(|s| s.id == c));
+                // Still looking at it: select it. If claude failed before creating it, stay on
+                // the empty session to retry.
+                if is_open && let Some(i) = self.sessions.iter().position(|s| s.id == id) {
+                    self.selected = Some(i);
+                    self.new_session = None;
+                }
             }
-        }
-        // The file now holds what was streamed; reloading makes it canonical.
-        if self.new_session.is_none() {
-            self.reload();
-        }
-        let _ = self.poke_index.send(());
-        if let Err(e) = result {
-            self.error = Some(e);
+            // The file now holds what was streamed; reloading makes it canonical.
+            if is_open && self.new_session.is_none() {
+                self.reload();
+            }
+            if let Err(e) = result {
+                let name = self.sessions.iter().find(|s| s.id == id).map(|s| s.title.clone()).unwrap_or_default();
+                self.error = Some(if is_open { e } else { format!("{name}: {e}") });
+            }
+            let _ = self.poke_index.send(());
         }
     }
 
@@ -515,7 +540,8 @@ impl App {
                     rename_field(ui, r, &s.project, &mut actions);
                     continue;
                 }
-                let label = format!("{title}\n{}", note.unwrap_or_else(|| short_project(&s.project)));
+                let working = if self.runs.contains_key(&s.id) { "  ⏳" } else { "" };
+                let label = format!("{title}{working}\n{}", note.unwrap_or_else(|| short_project(&s.project)));
                 // One widget that senses both: a separate drag-source wrapper would swallow the click.
                 let bg = ui.painter().add(egui::Shape::Noop);
                 let row = ui.selectable_label(self.selected == Some(i), label).interact(Sense::click_and_drag());
@@ -614,7 +640,8 @@ impl App {
 
     fn prompt_bar(&mut self, ui: &mut egui::Ui) {
         let id = Id::new("prompt");
-        let enabled = self.open.is_some() && self.running.is_none();
+        let running = self.open_running();
+        let enabled = self.open.is_some() && !running;
         // Consume arrows before the TextEdit sees them, so they drive history instead of the
         // cursor; only for a one-line input, where there are no lines to move between.
         let focused = ui.memory(|m| m.has_focus(id));
@@ -651,9 +678,9 @@ impl App {
             .show(ui, |ui| {
                 ui.horizontal_top(|ui| {
                     ui.label(RichText::new(">").monospace().strong().color(pal.prompt_sign));
-                    let hint = match (&self.open, &self.running) {
+                    let hint = match (&self.open, running) {
                         (None, _) => "select a session",
-                        (_, Some(_)) => "claude is working…",
+                        (_, true) => "claude is working on this session… (other sessions are free)",
                         _ => "type a prompt · enter to send · shift+enter for a new line · up/down for history",
                     };
                     // Grows with the text up to ~10 lines, then scrolls.
@@ -683,7 +710,7 @@ impl App {
                     if enabled && enter {
                         self.send(ui.ctx());
                     }
-                    if self.running.is_some() {
+                    if running {
                         ui.spinner();
                     }
                 });
@@ -697,7 +724,7 @@ impl App {
         };
         if let Some(dir) = self.new_session.as_ref().filter(|_| s.messages.is_empty()) {
             ui.centered_and_justified(|ui| {
-                let status = if self.running.is_some() { "Starting…" } else { "Type your first prompt below." };
+                let status = if self.open_running() { "Starting…" } else { "Type your first prompt below." };
                 ui.label(format!("New session in {}\n\n{status}", dir.display()));
             });
             return;
@@ -724,6 +751,7 @@ impl App {
         }
         self.heights.resize(s.messages.len(), 0.0);
         let mut top_prompt = None;
+        let open_id = self.open_id();
         egui::ScrollArea::vertical().auto_shrink(false).stick_to_bottom(true).show_viewport(ui, |ui, viewport| {
             let origin = ui.cursor().top();
             // Render only messages near the viewport; the rest just take their remembered height.
@@ -741,17 +769,17 @@ impl App {
                     self.heights[i] = rect.height().max(1.0);
                 }
             }
-            if self.running.is_some() {
+            if let Some(run) = open_id.as_ref().and_then(|id| self.runs.get(id)) {
                 // The reply as it is being written, then what Claude is doing right now.
-                if !self.live.is_empty() {
-                    let m = session::Message { role: Role::Assistant, text: self.live.clone() };
+                if !run.live.is_empty() {
+                    let m = session::Message { role: Role::Assistant, text: run.live.clone() };
                     ui.push_id("live", |ui| message(ui, &mut self.md_cache, &m, &pal));
                 }
                 ui.horizontal(|ui| {
                     ui.spinner();
-                    let doing = match &self.live_tool {
+                    let doing = match &run.tool {
                         Some(tool) => format!("⚙ {tool}…"),
-                        None if self.live.is_empty() => "Claude is working…".to_owned(),
+                        None if run.live.is_empty() => "Claude is working…".to_owned(),
                         None => "Writing…".to_owned(),
                     };
                     ui.label(RichText::new(doing).weak().monospace());

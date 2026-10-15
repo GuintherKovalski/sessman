@@ -70,6 +70,9 @@ there. Each change is specified first with Spec Kit (see [How the project is bui
     Claude's progress follows live: the reply as it is written, a `⚙ Tool…` line when a tool
     starts, and each finished step (and its file changes, in the Changes tab) before the
     whole run ends.
+  - Several sessions can run at once: while one works (⏳ next to its name in the list), you
+    can open another, or start a new one, and send it a prompt. Switching back to a working
+    session shows what it has done so far and keeps streaming.
 - **Pinned "You"**: the prompt that the reply at the top of your view answers stays pinned
   above the conversation, so you always know what a long reply is about.
 - The conversation itself: one card per message (blue accent for you, orange for Claude),

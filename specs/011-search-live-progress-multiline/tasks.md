@@ -34,6 +34,7 @@ Tests only for pure logic (constitution): `Session::apply`, scoring, ranking, sn
 
 - [x] T011 `cargo test`, `cargo clippy`, run the app
 - [x] T012 Update PROJECT.md, README.md (incl. Gaps) and the specs table
+- [x] T013 Fix: a running prompt blocked every session's input. Runs are kept per session (`runs: HashMap<id, Run>`); only that session's input is disabled, other sessions (and new ones) can run at the same time; running sessions show ⏳ in the list; switching back to one reloads it from disk (claude writes the file as it goes) and streams on from there, in src/app.rs
 
 ## Dependencies
 

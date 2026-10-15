@@ -41,5 +41,8 @@ Known shortcomings of what's already built, to pick up as Spec Kit features late
   first three prompts, not the whole conversation.
 - **Sub-agent work isn't shown live.** While a sub-agent (Task tool) runs, only its tool line
   shows; its own steps don't stream in.
+- **Switching back to a running session can show a step twice** until the run ends (the step
+  was already on disk when the session reloaded and then arrived from the stream too); the
+  reload at the end of the run fixes it.
 
 See [PROJECT.md](PROJECT.md) for a full explanation of the app, how it works, and how it is built.
