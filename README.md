@@ -5,7 +5,7 @@ A small desktop app for browsing and continuing Claude Code sessions.
 - **Left**: a **+ New session** button, then your sessions from `~/.claude/projects`, newest first, with workspace tabs (+ to create, drag or right-click → Move to)
 - **Center bottom**: a terminal-style prompt input. Up/Down walks through this session's previous prompts; Enter sends the prompt via `claude -p --resume <id>`
 - **Center**: the conversation (click anywhere to focus the input)
-- **Right**: code changes (Edit / MultiEdit / Write) made in the session
+- **Right**: tabs. **Changes**: code changes made in the session. **Info**: model, context usage, session goal, usage limits
 
 ```sh
 cargo run --release

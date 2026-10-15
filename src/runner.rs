@@ -30,6 +30,32 @@ pub fn send(
     rx
 }
 
+/// Asks a small model for a one-sentence goal of a session, from its prompts.
+/// Uses --no-session-persistence so the summary itself doesn't become a session.
+pub fn summarize_goal(ctx: eframe::egui::Context, prompts: Vec<String>) -> Receiver<Result<String, String>> {
+    let (tx, rx) = channel();
+    std::thread::spawn(move || {
+        let mut text: String = prompts.iter().take(8).map(|p| format!("- {p}\n")).collect();
+        text.truncate(text.floor_char_boundary(6000));
+        let prompt = format!(
+            "These are the prompts a user sent in a coding session. In one or two short sentences, \
+             describe the goal of the session. Reply with only the description.\n\n{text}"
+        );
+        let out = Command::new("claude")
+            .args(["-p", "--model", "haiku", "--no-session-persistence", &prompt])
+            .current_dir(std::env::temp_dir())
+            .output();
+        let result = match out {
+            Ok(o) if o.status.success() => Ok(String::from_utf8_lossy(&o.stdout).trim().to_owned()),
+            Ok(o) => Err(String::from_utf8_lossy(&o.stderr).into_owned()),
+            Err(e) => Err(e.to_string()),
+        };
+        let _ = tx.send(result);
+        ctx.request_repaint();
+    });
+    rx
+}
+
 /// Opens the macOS folder picker on a thread. Yields None if the user cancels.
 pub fn pick_folder(ctx: eframe::egui::Context, start: Option<PathBuf>) -> Receiver<Option<PathBuf>> {
     let (tx, rx) = channel();

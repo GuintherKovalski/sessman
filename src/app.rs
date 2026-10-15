@@ -1,12 +1,14 @@
 use crate::history::History;
 use crate::names::Names;
 use crate::runner;
+use crate::status;
 use crate::session::{self, Change, Role, Session, SessionMeta};
 use crate::workspaces::Workspaces;
 use eframe::egui::text::{CCursor, CCursorRange};
 use eframe::egui::{self, Align2, Color32, Id, Key, LayerId, Modifiers, Order, RichText, Sense, Stroke, StrokeKind};
 use similar::{ChangeTag, TextDiff};
 use std::path::PathBuf;
+use std::time::{SystemTime, UNIX_EPOCH};
 use std::sync::mpsc::Receiver;
 
 const MAX_DIFF_LINES: usize = 200;
@@ -21,6 +23,12 @@ enum Action {
     DeleteWorkspace(usize),
     Rename(String, String),
     CancelRename,
+}
+
+#[derive(PartialEq)]
+enum RightTab {
+    Changes,
+    Info,
 }
 
 /// Inline rename in progress: which session, the edited text, and whether it was just opened.
@@ -54,6 +62,11 @@ pub struct App {
     picker: Option<Receiver<Option<PathBuf>>>,
     /// Set to move keyboard focus to the prompt input on the next frame.
     focus_prompt: bool,
+    right_tab: RightTab,
+    /// AI-written one-line goals, keyed by session id.
+    goals: Names,
+    /// Session id whose goal is being summarized, and the pending result.
+    summarizing: Option<(String, Receiver<Result<String, String>>)>,
 }
 
 impl App {
@@ -76,6 +89,9 @@ impl App {
             creating: None,
             picker: None,
             focus_prompt: false,
+            right_tab: RightTab::Changes,
+            goals: Names::load(&Names::goals_path()),
+            summarizing: None,
         };
         // Persist colors assigned on load to workspaces saved before colors existed.
         if !app.workspaces.list.is_empty() {
@@ -134,6 +150,23 @@ impl App {
         self.pinned = None;
         self.error = None;
         self.focus_prompt = true;
+    }
+
+    fn poll_summary(&mut self) {
+        let Some((id, rx)) = &self.summarizing else { return };
+        if let Ok(result) = rx.try_recv() {
+            let id = id.clone();
+            self.summarizing = None;
+            match result {
+                Ok(goal) => {
+                    self.goals.set(&id, &goal);
+                    if let Err(e) = self.goals.save(&Names::goals_path()) {
+                        self.error = Some(format!("could not save goal: {e}"));
+                    }
+                }
+                Err(e) => self.error = Some(format!("could not summarize: {e}")),
+            }
+        }
     }
 
     fn poll_picker(&mut self) {
@@ -440,9 +473,88 @@ impl App {
         }
     }
 
-    fn diffs(&self, ui: &mut egui::Ui) {
-        ui.heading("Changes");
+    fn right_panel(&mut self, ui: &mut egui::Ui) {
+        ui.horizontal(|ui| {
+            ui.selectable_value(&mut self.right_tab, RightTab::Changes, RichText::new("Changes").heading());
+            ui.selectable_value(&mut self.right_tab, RightTab::Info, RichText::new("Info").heading());
+        });
         ui.separator();
+        match self.right_tab {
+            RightTab::Changes => self.diffs(ui),
+            RightTab::Info => self.info(ui),
+        }
+    }
+
+    fn info(&mut self, ui: &mut egui::Ui) {
+        let Some(s) = &self.open else {
+            ui.label("Select a session to see its info");
+            return;
+        };
+        let id = self.selected.map(|i| self.sessions[i].id.clone());
+        let mut start_summary = false;
+        egui::ScrollArea::vertical().auto_shrink(false).show(ui, |ui| {
+            section(ui, "Model");
+            ui.label(RichText::new(s.model.as_deref().unwrap_or("unknown yet")).monospace());
+
+            section(ui, "Context");
+            let exact = id.as_ref().and_then(|id| status::load(&status::dir().join(format!("{id}.json"))));
+            let window_size = exact.as_ref().and_then(|(v, _)| v["context_window"]["context_window_size"].as_u64());
+            if s.context_tokens == 0 {
+                ui.label("No replies yet");
+            } else {
+                let window = window_size.unwrap_or_else(|| context_window(s.model.as_deref()));
+                let used = s.context_tokens as f32 / window as f32;
+                ui.add(egui::ProgressBar::new(used.min(1.0)).text(format!(
+                    "{} / {} tokens ({:.0}%)",
+                    short_tokens(s.context_tokens),
+                    short_tokens(window),
+                    used * 100.0
+                )));
+                ui.label(RichText::new("As of the latest reply").weak().small());
+            }
+
+            section(ui, "Goal");
+            let goal = id.as_deref().and_then(|id| self.goals.get(id));
+            match (goal, &id) {
+                (Some(g), _) => {
+                    ui.label(g);
+                }
+                (None, _) if s.prompts.is_empty() => {
+                    ui.label("No prompts yet");
+                }
+                (None, _) => {
+                    let first: String = s.prompts[0].chars().take(280).collect();
+                    ui.label(RichText::new(format!("First prompt: {first}…")).weak());
+                }
+            }
+            if let Some(id) = id.as_ref().filter(|_| !s.prompts.is_empty()) {
+                if self.summarizing.as_ref().is_some_and(|(sid, _)| sid == id) {
+                    ui.horizontal(|ui| {
+                        ui.spinner();
+                        ui.label("Summarizing…");
+                    });
+                } else {
+                    let label = if goal.is_some() { "Summarize again" } else { "Summarize goal" };
+                    let btn = ui.button(label).on_hover_text("Asks Claude Haiku for a one-sentence goal (uses a little of your usage)");
+                    start_summary = btn.clicked();
+                }
+            }
+
+            section(ui, "Usage limits");
+            if limits_ui(ui) {
+                match status::enable() {
+                    Ok(()) => self.error = None,
+                    Err(e) => self.error = Some(format!("could not enable status line: {e}")),
+                }
+            }
+        });
+        if let (true, Some(id)) = (start_summary, id) {
+            let rx = runner::summarize_goal(ui.ctx().clone(), s.prompts.clone());
+            self.summarizing = Some((id, rx));
+        }
+    }
+
+    fn diffs(&self, ui: &mut egui::Ui) {
         let Some(s) = &self.open else { return };
         if s.changes.is_empty() {
             ui.label("No code changes in this session");
@@ -497,6 +609,72 @@ fn diff_block(ui: &mut egui::Ui, c: &Change) {
     }
 }
 
+/// Account usage limits from the latest status-line payload. Returns true if "Enable" was clicked.
+fn limits_ui(ui: &mut egui::Ui) -> bool {
+    // The file changes whenever Claude Code refreshes its status line; re-read every few seconds.
+    ui.ctx().request_repaint_after(std::time::Duration::from_secs(5));
+    match status::setup() {
+        status::Setup::Other(cmd) => {
+            ui.label(RichText::new(format!("Claude Code limits are only shared with the status line, and yours is already set to `{cmd}`. sessman won't replace it.")).weak());
+            return false;
+        }
+        status::Setup::NotSet => {
+            ui.label(RichText::new("Claude Code shares usage limits only with its status line. Enable sessman's status line to see them here (sets statusLine in ~/.claude/settings.json).").weak());
+            return ui.button("Enable").clicked();
+        }
+        status::Setup::Enabled => {}
+    }
+    let Some((v, at)) = status::load(&status::dir().join("latest.json")) else {
+        ui.label(RichText::new("Enabled. Limits appear after your next reply in an interactive Claude Code session (Pro/Max plans only).").weak());
+        return false;
+    };
+    let now = SystemTime::now();
+    for w in status::limits(&v) {
+        let reset = w.resets_at.map(|t| UNIX_EPOCH + std::time::Duration::from_secs(t));
+        if reset.is_some_and(|r| r <= now) {
+            continue; // window has reset since the payload was written
+        }
+        ui.label(w.label);
+        let text = match reset.and_then(|r| r.duration_since(now).ok()) {
+            Some(d) => format!("{:.0}% · resets in {}", w.used, short_duration(d)),
+            None => format!("{:.0}%", w.used),
+        };
+        ui.add(egui::ProgressBar::new((w.used / 100.0) as f32).text(text));
+    }
+    let age = now.duration_since(at).unwrap_or_default();
+    ui.label(RichText::new(format!("Updated {} ago", short_duration(age))).weak().small());
+    false
+}
+
+/// 8000s → "2h 13m"
+fn short_duration(d: std::time::Duration) -> String {
+    let m = d.as_secs() / 60;
+    match (m / 1440, m / 60 % 24, m % 60) {
+        (0, 0, m) => format!("{m}m"),
+        (0, h, m) => format!("{h}h {m}m"),
+        (days, h, _) => format!("{days}d {h}h"),
+    }
+}
+
+fn section(ui: &mut egui::Ui, title: &str) {
+    ui.add_space(10.0);
+    ui.label(RichText::new(title).strong());
+    ui.add_space(2.0);
+}
+
+/// Fallback when there is no status-line payload for the session. Per the model docs, 1M is the
+/// default for current models; Claude 3 and Opus/Sonnet up to 4.6 have 200k unless `[1m]`.
+fn context_window(model: Option<&str>) -> u64 {
+    let m = model.unwrap_or_default();
+    let old = m.starts_with("claude-3") || ["-4-0", "-4-1", "-4-5", "-4-6", "-4-2025"].iter().any(|v| m.contains(v));
+    if old && !m.contains("[1m]") { 200_000 } else { 1_000_000 }
+}
+
+/// 180234 → "180k"
+fn short_tokens(n: u64) -> String {
+    if n >= 1_000_000 { format!("{:.1}M", n as f64 / 1e6) } else { format!("{}k", n / 1000) }
+}
+
 fn rgb([r, g, b]: [u8; 3]) -> Color32 {
     Color32::from_rgb(r, g, b)
 }
@@ -515,8 +693,9 @@ impl eframe::App for App {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         self.poll_runner();
         self.poll_picker();
+        self.poll_summary();
         egui::Panel::left("sessions").default_size(260.0).resizable(true).show(ui, |ui| self.sidebar(ui));
-        egui::Panel::right("diffs").default_size(420.0).resizable(true).show(ui, |ui| self.diffs(ui));
+        egui::Panel::right("diffs").default_size(420.0).resizable(true).show(ui, |ui| self.right_panel(ui));
         egui::CentralPanel::default().show(ui, |ui| {
             egui::Panel::bottom("prompt")
                 .frame(egui::Frame::new().inner_margin(egui::Margin::symmetric(0, 6)))

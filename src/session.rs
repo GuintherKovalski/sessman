@@ -36,6 +36,10 @@ pub struct Session {
     pub messages: Vec<Message>,
     pub prompts: Vec<String>,
     pub changes: Vec<Change>,
+    /// Model of the latest assistant reply.
+    pub model: Option<String>,
+    /// Tokens in context at the latest assistant reply (input incl. cache, as Claude Code counts it).
+    pub context_tokens: u64,
 }
 
 pub fn projects_dir() -> PathBuf {
@@ -119,6 +123,18 @@ pub fn parse(lines: impl Iterator<Item = String>) -> Session {
                 }
             }
             Some("assistant") => {
+                let msg = &v["message"];
+                if let Some(m) = msg["model"].as_str().filter(|m| !m.starts_with('<')) {
+                    s.model = Some(m.to_owned());
+                }
+                let u = &msg["usage"];
+                let tokens: u64 = ["input_tokens", "cache_creation_input_tokens", "cache_read_input_tokens"]
+                    .iter()
+                    .filter_map(|k| u[k].as_u64())
+                    .sum();
+                if tokens > 0 {
+                    s.context_tokens = tokens;
+                }
                 let Some(blocks) = v["message"]["content"].as_array() else { continue };
                 for b in blocks {
                     match b["type"].as_str() {
@@ -216,6 +232,17 @@ mod tests {
         assert_eq!(s.changes.len(), 2);
         assert_eq!((s.changes[0].old.as_str(), s.changes[0].new.as_str()), ("x", "y"));
         assert_eq!(s.changes[1].old, "");
+    }
+
+    #[test]
+    fn tracks_latest_model_and_context() {
+        let s = run(&[
+            r#"{"type":"assistant","message":{"model":"claude-a","usage":{"input_tokens":10,"cache_read_input_tokens":100,"output_tokens":5},"content":[]}}"#,
+            r#"{"type":"assistant","message":{"model":"<synthetic>","usage":{"input_tokens":0,"output_tokens":0},"content":[]}}"#,
+            r#"{"type":"assistant","message":{"model":"claude-b","usage":{"input_tokens":1,"cache_creation_input_tokens":20,"cache_read_input_tokens":200,"output_tokens":9},"content":[]}}"#,
+        ]);
+        assert_eq!(s.model.as_deref(), Some("claude-b"));
+        assert_eq!(s.context_tokens, 221);
     }
 
     #[test]

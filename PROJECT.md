@@ -11,7 +11,7 @@ there. Each change is specified first with Spec Kit (see [How the project is bui
 
 ```
 ┌──────────────────┬──────────────────────────────────────┬─────────────────────┐
-│ [+ New session ] │ ┌──────────────────────────────────┐ │ Changes             │
+│ [+ New session ] │ ┌──────────────────────────────────┐ │ Changes │ Info      │
 │ Sessions ⟳       │ │ You  (pinned prompt)             │ │ src/app.rs          │
 │ All │ A │ B │ +  │ └──────────────────────────────────┘ │ - old line          │
 │▌Session title    │ You                                  │ + new line          │
@@ -59,9 +59,20 @@ there. Each change is specified first with Spec Kit (see [How the project is bui
 - The conversation itself: your prompts in blue, Claude's text in orange, tool calls shown as
   `[tool: Name]`.
 
-### Right: changes
-Every file change Claude made in the session (Edit, MultiEdit, Write), in order, with the
-file path and removed (red `-`) / added (green `+`) lines. Long diffs are cut at 200 lines.
+### Right: Changes and Info tabs
+- **Changes**: every file change Claude made in the session (Edit, MultiEdit, Write), in
+  order, with the file path and removed (red `-`) / added (green `+`) lines. Long diffs are
+  cut at 200 lines.
+- **Info**:
+  - **Model** of the latest reply.
+  - **Context**: tokens in context vs the window size (e.g. 204k / 1.0M).
+  - **Goal**: a one- or two-sentence description. Until you click **Summarize goal** (which
+    asks Claude Haiku, using a little of your usage) it shows the start of the first prompt.
+  - **Usage limits**: your 5-hour and weekly limits with time until reset. Claude Code only
+    shares these with its status line, so click **Enable** once: it sets sessman as Claude
+    Code's status line (`statusLine` in `~/.claude/settings.json`). Limits then appear after
+    your next reply in an interactive Claude Code session (Pro/Max plans). If you already
+    have a status line, sessman leaves it alone.
 
 ## How it works
 
@@ -73,10 +84,15 @@ file path and removed (red `-`) / added (green `+`) lines. Long diffs are cut at
 | Diffs | The `Edit` / `MultiEdit` / `Write` tool calls recorded in the session, diffed line by line. |
 | Sending a prompt | Runs `claude -p --resume <session-id> "<prompt>"` in the session's folder, in the background. |
 | New session | Runs `claude -p --session-id <new uuid> "<first prompt>"` in the chosen folder. |
+| Model, context tokens | The latest reply's `model` and `usage` in the session file. |
+| Context size, usage limits | Claude Code's status-line data, saved by `sessman statusline` to `~/.config/sessman/status/`. Without it, the size is inferred from the model. |
+| Goal | `claude -p --model haiku --no-session-persistence` on request; saved to `~/.config/sessman/goals.json`. |
 | Workspaces and their colors | sessman's own file: `~/.config/sessman/workspaces.json`. |
 | Custom session names | sessman's own file: `~/.config/sessman/names.json`. |
 
-sessman never writes to Claude's files. Everything it adds (workspaces, custom names) lives in its own config files.
+sessman never writes to Claude's session files. Everything it adds (workspaces, names, goals,
+status data) lives in its own config folder. The one exception is the opt-in **Enable** button,
+which sets `statusLine` in `~/.claude/settings.json` and nothing else.
 
 ### Current limitations
 - Replies appear when complete, not word by word.
@@ -92,8 +108,9 @@ src/
 ├── app.rs         the three panels, tabs, drag-and-drop, context menus, pinned prompt
 ├── session.rs     finds and parses Claude Code session files
 ├── history.rs     Up/Down prompt history
-├── names.rs       custom session names
-├── runner.rs      runs `claude -p --resume` on a background thread
+├── names.rs       custom session names and goals
+├── runner.rs      runs `claude -p` (send, new session, goal summary), folder picker
+├── status.rs      `sessman statusline`: saves Claude Code's status data; usage limits
 └── workspaces.rs  workspaces: create, move, remove, delete, load/save
 ```
 
@@ -118,6 +135,7 @@ spec → plan → tasks → implementation, and the documents stay in the repo:
 | `specs/003-rename-sessions/` | Double-click to rename a session |
 | `specs/004-workspace-colors-terminal-input/` | Workspace colors, terminal-style input at the bottom |
 | `specs/005-new-session-click-focus/` | New session button, click anywhere to focus the input |
+| `specs/006-right-panel-info-tab/` | Changes / Info tabs: model, context, goal, usage limits |
 
 Each feature folder has `spec.md` (what and why), `plan.md` (how), and `tasks.md` (the
 checklist that was implemented). `specs/001-session-manager-ui/research.md` lists open
