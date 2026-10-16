@@ -1,21 +1,29 @@
 use crate::diffview::{self, CardEvent};
+use crate::dictation;
 use crate::goal;
 use crate::history::History;
 use crate::markdown;
 use crate::names::Names;
+use crate::queue::Queue;
+use crate::refine;
 use crate::runner::{self, RunEvent};
 use crate::search::{self, Hit, Source};
+use crate::session::{self, Role, Session, SessionMeta};
+use crate::settings::{self, Settings};
+use crate::state::{self, OpenFile, State, View, Views};
 use crate::status;
 use crate::theme;
-use crate::session::{self, Role, Session, SessionMeta};
-use crate::workspaces::Workspaces;
+use crate::workspaces::{self, Workspaces};
 use eframe::egui::text::{CCursor, CCursorRange};
-use eframe::egui::{self, Align2, Color32, Id, Key, LayerId, Modifiers, Order, RichText, Sense, Stroke, StrokeKind, ThemePreference};
+use eframe::egui::{self, Align2, Color32, Id, Key, LayerId, Modifiers, Order, RichText, Sense, Stroke, StrokeKind};
 use egui_commonmark::CommonMarkCache;
 use std::collections::HashMap;
 use std::path::PathBuf;
+use std::sync::mpsc::{self, Receiver, TryRecvError};
 use std::time::{SystemTime, UNIX_EPOCH};
-use std::sync::mpsc::Receiver;
+
+/// Height of the bar at the top of the window, where the macOS window buttons sit.
+pub const TITLE_BAR_HEIGHT: f32 = 28.0;
 
 /// Sidebar interactions, collected while drawing and applied afterwards.
 enum Action {
@@ -26,6 +34,8 @@ enum Action {
     DeleteWorkspace(usize),
     Rename(String, String),
     CancelRename,
+    /// Back to a new session whose first prompt is running (it isn't on disk yet).
+    OpenPending(String),
 }
 
 #[derive(PartialEq)]
@@ -42,6 +52,7 @@ struct Renaming {
 }
 
 pub struct App {
+    ctx: egui::Context,
     sessions: Vec<SessionMeta>,
     selected: Option<usize>,
     open: Option<Session>,
@@ -50,11 +61,17 @@ pub struct App {
     history: History,
     /// Prompts running right now, by session id; each session can run on its own.
     runs: HashMap<String, Run>,
+    /// Prompts waiting for a session's run to end, by session id.
+    queues: HashMap<String, Queue>,
+    /// Sessions whose last run was stopped, with what Claude had written of its reply.
+    interrupted: HashMap<String, String>,
     workspaces: Workspaces,
     /// None = "All sessions", Some(i) = workspace i.
     tab: Option<usize>,
     /// Some while the "+" name field is open.
     new_workspace: Option<String>,
+    /// Workspace waiting for "Delete?" to be confirmed.
+    confirm_delete: Option<usize>,
     /// Index into the open session's messages of the "You" prompt pinned above the conversation.
     pinned: Option<usize>,
     names: Names,
@@ -63,7 +80,6 @@ pub struct App {
     new_session: Option<PathBuf>,
     /// Id given to the new session's first prompt, to select it once it exists.
     new_id: Option<String>,
-    picker: Option<Receiver<Option<PathBuf>>>,
     /// Set to move keyboard focus to the prompt input on the next frame.
     focus_prompt: bool,
     right_tab: RightTab,
@@ -76,16 +92,35 @@ pub struct App {
     goal_question: String,
     /// Changes tab shows only this file, when set.
     changes_filter: Option<String>,
-    /// Files open read-only in the main area.
+    /// Files open read-only in the main area, for the open session.
     file_tabs: Vec<FileTab>,
     /// Active main tab: None = the conversation ("Main"), Some(i) = file_tabs[i].
     main_tab: Option<usize>,
+    /// File tabs, draft and filter of the sessions not on screen.
+    views: Views,
     md_cache: CommonMarkCache,
     /// Rendered height of each message (0 = not measured yet), so off-screen ones can be skipped.
     heights: Vec<f32>,
     /// Width the heights were measured at.
     heights_width: f32,
-    theme: ThemePreference,
+    settings: Settings,
+    /// The Settings tab is open in the main area, and whether it is the active tab.
+    settings_tab: bool,
+    settings_active: bool,
+    settings_filter: String,
+    /// Prompt input height set by dragging its top edge (None = grows with the text), and
+    /// whether it is collapsed to one line.
+    prompt_height: Option<f32>,
+    prompt_collapsed: bool,
+    /// Height the input had last frame, where a drag starts from.
+    prompt_measured: f32,
+    /// Height of all the text in the input, measured last frame.
+    prompt_text_height: f32,
+    refine: Option<Refining>,
+    /// Text before the last refine, and the refined text (undo applies while it is unchanged).
+    refine_undo: Option<(String, String)>,
+    /// Microphone dictation into the input (the mic button).
+    dictation: Dictation,
     /// Background indexer: fresh session lists + content index, and a channel to poke it.
     snapshots: Receiver<search::Snapshot>,
     poke_index: std::sync::mpsc::Sender<()>,
@@ -96,15 +131,22 @@ pub struct App {
     /// Live hits for (query, tab, generation).
     hits: Option<(String, Option<usize>, u64, Vec<Hit>)>,
     ai: Option<AiSearch>,
+    /// Last state written, to skip rewriting an unchanged file.
+    saved_state: String,
 }
 
-/// A running `claude -p` for one session: its events, the reply being written, and the tool
-/// it is starting.
+/// A running `claude -p` for one session: its events, the reply being written, the tool it
+/// is starting, and what is needed to stop it or send the next queued prompt.
 struct Run {
     rx: Receiver<RunEvent>,
     live: String,
     tool: Option<String>,
     new: bool,
+    cwd: Option<PathBuf>,
+    prompt: String,
+    stop: runner::Stop,
+    /// The indexer was poked once the new session's file appeared.
+    poked: bool,
 }
 
 /// An Enter-search: Haiku picks sessions from a catalog. Results are kept as session ids, so
@@ -130,10 +172,28 @@ struct Btw {
     rx: Option<Receiver<Result<String, String>>>,
 }
 
+/// Refine prompt in progress: waiting for the helper model, or showing its questions.
+struct Refining {
+    original: String,
+    rx: Option<Receiver<Result<String, String>>>,
+    /// Questions with the chosen answer (None = skipped) and the "Other" text.
+    questions: Vec<(refine::Question, Option<String>, String)>,
+    error: Option<String>,
+}
+
+/// Dictation state: recording the microphone, or waiting for the transcript.
+enum Dictation {
+    Idle,
+    Recording(dictation::Recorder),
+    Transcribing(Receiver<Result<String, String>>),
+}
+
 impl App {
     pub fn new(ctx: &egui::Context) -> Self {
         let (snapshots, poke_index) = search::spawn_indexer(ctx.clone());
+        let settings = Settings::load(&settings::path());
         let mut app = Self {
+            ctx: ctx.clone(),
             sessions: session::list(&session::projects_dir()),
             selected: None,
             open: None,
@@ -141,15 +201,17 @@ impl App {
             input: String::new(),
             history: History::default(),
             runs: HashMap::new(),
+            queues: HashMap::new(),
+            interrupted: HashMap::new(),
             workspaces: Workspaces::load(&Workspaces::path()),
             tab: None,
             new_workspace: None,
+            confirm_delete: None,
             pinned: None,
             names: Names::load(&Names::path()),
             renaming: None,
             new_session: None,
             new_id: None,
-            picker: None,
             focus_prompt: false,
             right_tab: RightTab::Changes,
             goals: Names::load(&Names::goals_path()),
@@ -159,10 +221,21 @@ impl App {
             changes_filter: None,
             file_tabs: Vec::new(),
             main_tab: None,
+            views: Views::default(),
             md_cache: CommonMarkCache::default(),
             heights: Vec::new(),
             heights_width: 0.0,
-            theme: theme::load(),
+            settings,
+            settings_tab: false,
+            settings_active: false,
+            settings_filter: String::new(),
+            prompt_height: None,
+            prompt_collapsed: false,
+            prompt_measured: 0.0,
+            prompt_text_height: 0.0,
+            refine: None,
+            refine_undo: None,
+            dictation: Dictation::Idle,
             snapshots,
             poke_index,
             index: search::Index::new(),
@@ -170,12 +243,72 @@ impl App {
             search: String::new(),
             hits: None,
             ai: None,
+            saved_state: String::new(),
         };
+        app.apply_settings();
         // Persist colors assigned on load to workspaces saved before colors existed.
         if !app.workspaces.list.is_empty() {
             app.save_workspaces();
         }
+        if app.settings.restore_state {
+            app.restore(State::load(&state::path()));
+        }
         app
+    }
+
+    /// Puts back what was open when sessman last closed.
+    fn restore(&mut self, mut st: State) {
+        st.prune(|id| self.sessions.iter().any(|s| s.id == id));
+        self.tab = st.tab.as_ref().and_then(|name| self.workspaces.list.iter().position(|w| &w.name == name));
+        self.views = Views(st.views);
+        self.queues = st.queues;
+        self.right_tab = if st.info_tab { RightTab::Info } else { RightTab::Changes };
+        self.search = st.search;
+        self.prompt_height = st.prompt_height;
+        self.prompt_collapsed = st.prompt_collapsed;
+        if let Some(i) = st.open.and_then(|id| self.sessions.iter().position(|s| s.id == id)) {
+            self.select(i);
+        }
+    }
+
+    /// Everything `restore` needs, for the state file.
+    fn state(&self) -> State {
+        let mut views = self.views.0.clone();
+        if let Some(key) = self.view_key() {
+            let mut v = self.current_view();
+            v.draft = self.input.clone();
+            if !v.is_empty() {
+                views.insert(key, v);
+            }
+        }
+        State {
+            tab: self.tab.and_then(|w| self.workspaces.list.get(w)).map(|w| w.name.clone()),
+            open: self.new_session.is_none().then(|| self.open_id()).flatten(),
+            views,
+            queues: self.queues.iter().filter(|(_, q)| !q.is_empty()).map(|(k, q)| (k.clone(), q.clone())).collect(),
+            info_tab: self.right_tab == RightTab::Info,
+            search: self.search.clone(),
+            prompt_height: self.prompt_height,
+            prompt_collapsed: self.prompt_collapsed,
+        }
+    }
+
+    fn save_state(&mut self) {
+        let st = self.state();
+        let Ok(text) = serde_json::to_string(&st) else { return };
+        if text == self.saved_state {
+            return;
+        }
+        match st.save(&state::path()) {
+            Ok(()) => self.saved_state = text,
+            Err(e) => self.error = Some(format!("could not save the app state: {e}")),
+        }
+    }
+
+    fn apply_settings(&mut self) {
+        self.settings.apply(&self.ctx);
+        runner::configure(runner::Claude::from_settings(&self.settings));
+        markdown::SHOW_TOOLS.store(self.settings.show_tool_lines, std::sync::atomic::Ordering::Relaxed);
     }
 
     fn save_workspaces(&mut self) {
@@ -187,7 +320,7 @@ impl App {
     fn apply(&mut self, action: Action) {
         match action {
             Action::Select(i) => self.select(i),
-            Action::Tab(t) => self.tab = t,
+            Action::Tab(t) => self.switch_tab(t),
             Action::MoveTo(id, w) => {
                 self.workspaces.move_to(&id, w);
                 self.save_workspaces();
@@ -204,33 +337,131 @@ impl App {
                 }
             }
             Action::CancelRename => self.renaming = None,
-            Action::DeleteWorkspace(w) => {
-                self.workspaces.delete(w);
-                self.tab = None;
-                self.save_workspaces();
+            Action::DeleteWorkspace(w) if self.settings.confirm_delete_workspace => self.confirm_delete = Some(w),
+            Action::DeleteWorkspace(w) => self.delete_workspace(w),
+            Action::OpenPending(id) => self.open_pending(&id),
+        }
+    }
+
+    fn delete_workspace(&mut self, w: usize) {
+        let showing = self.tab == Some(w);
+        self.workspaces.delete(w);
+        self.save_workspaces();
+        if showing {
+            self.tab = None;
+            self.open_tab();
+        } else if let Some(t) = self.tab.filter(|&t| t > w) {
+            self.tab = Some(t - 1);
+        }
+    }
+
+    /// Key of the session in the main area, for its view: its id, or the folder of a new
+    /// session that has no id yet.
+    fn view_key(&self) -> Option<String> {
+        match &self.new_session {
+            Some(dir) => Some(self.new_id.clone().unwrap_or_else(|| format!("new:{}", dir.display()))),
+            None => self.selected.map(|i| self.sessions[i].id.clone()),
+        }
+    }
+
+    fn current_view(&self) -> View {
+        View {
+            files: self.file_tabs.iter().map(|t| OpenFile { path: t.path.clone(), rendered: t.rendered }).collect(),
+            active: self.main_tab,
+            draft: if self.settings.drafts_per_session { self.input.clone() } else { String::new() },
+            changes_filter: self.changes_filter.clone(),
+        }
+    }
+
+    /// Before the main area shows another session: keeps this one's file tabs, draft and filter,
+    /// and brings back the other's.
+    fn switch_view(&mut self, to: Option<String>) {
+        let from = self.view_key();
+        if from == to {
+            return;
+        }
+        let current = self.current_view();
+        let v = self.views.switch(from.as_deref(), to.as_deref(), current);
+        self.file_tabs = v
+            .files
+            .into_iter()
+            .map(|f| FileTab { contents: diffview::read(&f.path), path: f.path, rendered: f.rendered })
+            .collect();
+        self.main_tab = v.active.filter(|&i| i < self.file_tabs.len());
+        self.changes_filter = v.changes_filter;
+        if self.settings.drafts_per_session {
+            self.input = v.draft;
+        }
+        self.refine = None;
+        self.refine_undo = None;
+        self.settings_active = false;
+    }
+
+    fn select(&mut self, i: usize) {
+        let id = self.sessions[i].id.clone();
+        self.switch_view(Some(id.clone()));
+        self.selected = Some(i);
+        self.btw = None;
+        self.new_session = None;
+        self.focus_prompt = true;
+        if self.workspaces.set_last(self.tab, &id) {
+            self.save_workspaces();
+        }
+        self.reload();
+    }
+
+    /// A workspace tab (or All) was clicked: it shows the session last open there.
+    fn switch_tab(&mut self, t: Option<usize>) {
+        if self.tab == t {
+            return;
+        }
+        self.tab = t;
+        self.open_tab();
+    }
+
+    /// Opens the session last open in the current tab (or its newest; nothing if empty).
+    fn open_tab(&mut self) {
+        let t = self.tab;
+        let visible = self.visible();
+        let ids: Vec<&str> = visible.iter().map(|&i| self.sessions[i].id.as_str()).collect();
+        match workspaces::pick_session(self.workspaces.last(t), &ids) {
+            Some(k) => self.select(visible[k]),
+            None => {
+                self.switch_view(None);
+                self.selected = None;
+                self.open = None;
+                self.new_session = None;
+                self.history = History::default();
+                self.pinned = None;
             }
         }
     }
 
-    fn select(&mut self, i: usize) {
-        self.selected = Some(i);
-        self.btw = None;
-        self.changes_filter = None;
-        self.main_tab = None;
-        self.new_session = None;
-        self.focus_prompt = true;
-        self.reload();
-    }
-
     /// Empty session in `dir`; the first prompt creates it.
     fn start_new_session(&mut self, dir: PathBuf) {
+        self.switch_view(Some(format!("new:{}", dir.display())));
         self.selected = None;
+        self.new_id = None;
         self.open = Some(Session { cwd: Some(dir.clone()), ..Default::default() });
         self.new_session = Some(dir);
         self.history = History::default();
         self.pinned = None;
         self.error = None;
         self.focus_prompt = true;
+    }
+
+    fn open_pending(&mut self, id: &str) {
+        let Some(run) = self.runs.get(id) else { return };
+        let (cwd, prompt) = (run.cwd.clone(), run.prompt.clone());
+        self.switch_view(Some(id.to_owned()));
+        self.selected = None;
+        self.new_id = Some(id.to_owned());
+        let mut s = Session { cwd: cwd.clone(), ..Default::default() };
+        s.push_prompt(prompt);
+        self.open = Some(s);
+        self.new_session = cwd.or_else(|| Some(PathBuf::from(".")));
+        self.pinned = None;
+        self.heights.clear();
     }
 
     fn poll_btw(&mut self) {
@@ -254,16 +485,6 @@ impl App {
                     }
                 }
                 Err(e) => self.error = Some(format!("could not summarize: {e}")),
-            }
-        }
-    }
-
-    fn poll_picker(&mut self) {
-        let Some(rx) = &self.picker else { return };
-        if let Ok(dir) = rx.try_recv() {
-            self.picker = None;
-            if let Some(dir) = dir {
-                self.start_new_session(dir);
             }
         }
     }
@@ -298,22 +519,42 @@ impl App {
             (Some((_, before)), Some(i)) => self.sessions[i].modified != *before,
             _ => false,
         };
+        // A new session being looked at now exists on disk: it becomes a normal, listed one.
+        if let (Some(_), Some(id)) = (&self.new_session, &self.new_id)
+            && let Some(i) = self.sessions.iter().position(|s| &s.id == id)
+        {
+            self.selected = Some(i);
+            self.new_session = None;
+            if self.workspaces.set_last(self.tab, &self.sessions[i].id.clone()) {
+                self.save_workspaces();
+            }
+            if !self.open_running() {
+                self.reload();
+            }
+            return;
+        }
         if changed && !self.open_running() {
             self.reload();
         }
     }
 
-    fn send(&mut self, ctx: &egui::Context) {
+    /// Enter in the prompt input: sends it, or queues it while this session is working.
+    fn send(&mut self) {
         let Some(cwd) = self.open.as_ref().map(|s| s.cwd.clone()) else { return };
+        let prompt = std::mem::take(&mut self.input);
+        if prompt.trim().is_empty() {
+            return;
+        }
+        self.refine_undo = None;
+        if let Some(id) = self.open_id().filter(|id| self.runs.contains_key(id)) {
+            self.queues.entry(id).or_default().push(prompt);
+            return;
+        }
         let (id, new) = match (&self.new_session, self.selected) {
             (Some(_), _) => (runner::new_session_id(), true),
             (None, Some(i)) => (self.sessions[i].id.clone(), false),
             _ => return,
         };
-        let prompt = std::mem::take(&mut self.input);
-        if prompt.trim().is_empty() || self.runs.contains_key(&id) {
-            return;
-        }
         if new {
             self.new_id = Some(id.clone());
             if let Some(w) = self.tab {
@@ -321,12 +562,26 @@ impl App {
                 self.save_workspaces();
             }
         }
-        if let Some(s) = &mut self.open {
+        self.start_run(id, cwd, prompt, new);
+    }
+
+    fn start_run(&mut self, id: String, cwd: Option<PathBuf>, prompt: String, new: bool) {
+        self.interrupted.remove(&id);
+        if self.open_id().as_ref() == Some(&id)
+            && let Some(s) = &mut self.open
+        {
             s.push_prompt(prompt.clone());
+            self.history = History::new(s.prompts.clone());
         }
-        self.history = History::new(self.open.as_ref().map(|s| s.prompts.clone()).unwrap_or_default());
-        let rx = runner::send(ctx.clone(), id.clone(), cwd, prompt, new);
-        self.runs.insert(id, Run { rx, live: String::new(), tool: None, new });
+        let (rx, stop) = runner::send(self.ctx.clone(), id.clone(), cwd.clone(), prompt.clone(), new);
+        self.runs.insert(id, Run { rx, live: String::new(), tool: None, new, cwd, prompt, stop, poked: false });
+    }
+
+    /// Ctrl+C / Stop: ends the open session's run at once.
+    fn stop_open(&mut self) {
+        if let Some(id) = self.open_id().filter(|id| self.runs.contains_key(id)) {
+            self.end_run(&id, Err("stopped".into()), true);
+        }
     }
 
     /// Id of the session in the main area: the selected one, or the new one being created.
@@ -346,6 +601,7 @@ impl App {
     fn poll_runner(&mut self) {
         let open_id = self.open_id();
         let mut finished = Vec::new();
+        let mut poke = false;
         for (id, run) in &mut self.runs {
             let is_open = open_id.as_ref() == Some(id);
             for event in run.rx.try_iter() {
@@ -356,36 +612,65 @@ impl App {
                         }
                         run.live.clear();
                         run.tool = None;
+                        // The new session's file exists now: list it without waiting.
+                        if run.new && !run.poked {
+                            run.poked = true;
+                            poke = true;
+                        }
                     }
                     RunEvent::Delta(t) => run.live.push_str(&t),
                     RunEvent::Tool(name) => run.tool = Some(name),
-                    RunEvent::Done(result) => finished.push((id.clone(), run.new, is_open, result)),
+                    RunEvent::Done(result) => finished.push((id.clone(), result)),
                 }
             }
         }
-        for (id, new, is_open, result) in finished {
-            self.runs.remove(&id);
-            if new {
-                let current = self.selected.map(|i| self.sessions[i].id.clone());
-                self.sessions = session::list(&session::projects_dir());
-                self.selected = current.and_then(|c| self.sessions.iter().position(|s| s.id == c));
-                // Still looking at it: select it. If claude failed before creating it, stay on
-                // the empty session to retry.
-                if is_open && let Some(i) = self.sessions.iter().position(|s| s.id == id) {
-                    self.selected = Some(i);
-                    self.new_session = None;
-                }
-            }
-            // The file now holds what was streamed; reloading makes it canonical.
-            if is_open && self.new_session.is_none() {
-                self.reload();
-            }
-            if let Err(e) = result {
-                let name = self.sessions.iter().find(|s| s.id == id).map(|s| s.title.clone()).unwrap_or_default();
-                self.error = Some(if is_open { e } else { format!("{name}: {e}") });
-            }
+        if poke {
             let _ = self.poke_index.send(());
         }
+        for (id, result) in finished {
+            self.end_run(&id, result, false);
+        }
+    }
+
+    /// A run ended (or was stopped): send the next queued prompt, or pause the queue and say why.
+    fn end_run(&mut self, id: &str, result: Result<(), String>, stopped: bool) {
+        let Some(run) = self.runs.remove(id) else { return };
+        if stopped {
+            run.stop.stop();
+        }
+        let is_open = self.open_id().as_deref() == Some(id);
+        let name = self.sessions.iter().find(|s| s.id == id).map(|s| self.names.get(&s.id).unwrap_or(&s.title).to_owned());
+        let name = name.unwrap_or_else(|| run.prompt.chars().take(40).collect());
+        let queue = self.queues.entry(id.to_owned()).or_default();
+        if stopped {
+            queue.pause("stopped with Ctrl+C");
+            self.interrupted.insert(id.to_owned(), run.live.clone());
+            // The stopped prompt goes back to the input to be fixed (unless something is typed).
+            if is_open && self.input.trim().is_empty() {
+                self.input = run.prompt.clone();
+                self.focus_prompt = true;
+            } else if !is_open && let Some(v) = self.views.0.get_mut(id).filter(|v| v.draft.is_empty()) {
+                v.draft = run.prompt.clone();
+            }
+        } else if let Err(e) = &result {
+            queue.pause("the last run failed");
+            self.error = Some(if is_open { e.clone() } else { format!("{name}: {e}") });
+        } else if let Some(next) = queue.next() {
+            self.start_run(id.to_owned(), run.cwd.clone(), next, false);
+        }
+        if self.settings.notify_when_done && !stopped && !self.ctx.input(|i| i.focused) {
+            let body = match &result {
+                Ok(()) => format!("{name}: Claude finished"),
+                Err(e) => format!("{name}: {e}"),
+            };
+            runner::notify("sessman", &body);
+        }
+        // The file now holds what was streamed; reloading makes it canonical. A new session is
+        // selected when the indexer lists it.
+        if is_open && self.new_session.is_none() && !self.runs.contains_key(id) {
+            self.reload();
+        }
+        let _ = self.poke_index.send(());
     }
 
     fn poll_ai(&mut self) {
@@ -395,6 +680,102 @@ impl App {
         ai.result = Some(result.map(|reply| {
             search::parse_ai(&reply, ai.ids.len()).into_iter().map(|(i, why)| (ai.ids[i].clone(), why)).collect()
         }));
+    }
+
+    /// Asks the helper model to refine the input (first round), or to write the prompt with
+    /// the answers to its questions (second round; None = skip them all).
+    fn start_refine(&mut self, answers: Option<Vec<(refine::Question, Option<String>)>>) {
+        let original = match &self.refine {
+            Some(r) if answers.is_some() => r.original.clone(),
+            _ => self.input.clone(),
+        };
+        if original.trim().is_empty() {
+            return;
+        }
+        let id = self.open_id();
+        let goal = id.as_deref().and_then(|id| self.goals.get(id));
+        let recent = self.open.as_ref().map(|s| s.prompts.clone()).unwrap_or_default();
+        let request = refine::request(&original, goal, &recent, answers.as_deref());
+        let rx = runner::ask_haiku(self.ctx.clone(), request);
+        self.refine = Some(Refining { original, rx: Some(rx), questions: Vec::new(), error: None });
+    }
+
+    fn poll_refine(&mut self) {
+        let Some(r) = &mut self.refine else { return };
+        let Some(result) = r.rx.as_ref().and_then(|rx| rx.try_recv().ok()) else { return };
+        r.rx = None;
+        match result.and_then(|reply| refine::parse(&reply)) {
+            Ok(refine::Reply::Prompt(p)) => {
+                self.refine_undo = Some((r.original.clone(), p.clone()));
+                self.input = p;
+                self.refine = None;
+                self.focus_prompt = true;
+            }
+            Ok(refine::Reply::Questions(qs)) => r.questions = qs.into_iter().map(|q| (q, None, String::new())).collect(),
+            Err(e) => r.error = Some(e),
+        }
+    }
+
+    /// The mic button: starts recording, or stops it and sends the audio off for transcription.
+    fn toggle_dictation(&mut self) {
+        match std::mem::replace(&mut self.dictation, Dictation::Idle) {
+            Dictation::Recording(recorder) => {
+                let audio = recorder.finish();
+                let (tx, rx) = mpsc::channel();
+                let ctx = self.ctx.clone();
+                std::thread::spawn(move || {
+                    let _ = tx.send(dictation::transcribe(&audio));
+                    ctx.request_repaint();
+                });
+                self.dictation = Dictation::Transcribing(rx);
+            }
+            Dictation::Idle => {
+                let model = dictation::model_path();
+                if !model.exists() {
+                    self.error = Some(format!("Dictation needs the Whisper model: download {} to {}", dictation::MODEL_URL, model.display()));
+                    return;
+                }
+                match dictation::Recorder::start() {
+                    Ok(recorder) => {
+                        self.error = None;
+                        self.dictation = Dictation::Recording(recorder);
+                    }
+                    Err(e) => self.error = Some(e),
+                }
+            }
+            busy @ Dictation::Transcribing(_) => self.dictation = busy,
+        }
+    }
+
+    fn poll_dictation(&mut self) {
+        let Dictation::Transcribing(rx) = &self.dictation else { return };
+        let result = match rx.try_recv() {
+            Ok(result) => result,
+            Err(TryRecvError::Empty) => return,
+            Err(TryRecvError::Disconnected) => Err("transcription stopped unexpectedly".to_owned()),
+        };
+        self.dictation = Dictation::Idle;
+        match result {
+            Ok(text) => self.insert_dictated(&text),
+            Err(e) => self.error = Some(e),
+        }
+    }
+
+    /// Puts dictated text into the input at the cursor, with a space before it if needed.
+    fn insert_dictated(&mut self, text: &str) {
+        let id = Id::new("prompt-input");
+        let chars = self.input.chars().count();
+        let at = egui::TextEdit::load_state(&self.ctx, id).and_then(|s| s.cursor.char_range()).map_or(chars, |r| r.primary.index.min(chars));
+        let (input, end) = dictation::insert_at(&self.input, at, text);
+        if input == self.input {
+            return;
+        }
+        self.input = input;
+        // The cursor goes after the new text, once the input has been redrawn.
+        let mut state = egui::TextEdit::load_state(&self.ctx, id).unwrap_or_default();
+        state.cursor.set_char_range(Some(CCursorRange::one(CCursor::new(end))));
+        state.store(&self.ctx, id);
+        self.focus_prompt = true;
     }
 
     /// Sessions in the active tab (all, or one workspace), newest first.
@@ -471,7 +852,8 @@ impl App {
         self.ai = Some(AiSearch { query, ids, rx: Some(rx), result: None });
     }
 
-    /// The search field at the bottom of the sidebar, with the AI search status above it.
+    /// The search field at the bottom of the sidebar, with the AI search status above it, and
+    /// the Settings button next to it.
     fn search_bar(&mut self, ui: &mut egui::Ui) {
         let query = self.search.trim().to_owned();
         if let Some(ai) = self.ai.as_ref().filter(|a| a.query == query) {
@@ -493,18 +875,29 @@ impl App {
                 }
             }
         }
-        let edit = egui::TextEdit::singleline(&mut self.search)
-            .id(Id::new("search"))
-            .hint_text("🔍 Search · Enter asks Haiku")
-            .desired_width(f32::INFINITY);
-        let resp = ui.add(edit);
-        if resp.lost_focus() && ui.input(|i| i.key_pressed(Key::Escape)) {
-            self.search.clear();
-        }
-        if resp.lost_focus() && ui.input(|i| i.key_pressed(Key::Enter)) {
-            self.ask_ai(ui.ctx());
-            resp.request_focus();
-        }
+        ui.horizontal(|ui| {
+            let edit = egui::TextEdit::singleline(&mut self.search)
+                .id(Id::new("search"))
+                .hint_text("🔍 Search · Enter asks Haiku")
+                .desired_width(ui.available_width() - 34.0);
+            let resp = ui.add(edit);
+            if resp.lost_focus() && ui.input(|i| i.key_pressed(Key::Escape)) {
+                self.search.clear();
+            }
+            if resp.lost_focus() && ui.input(|i| i.key_pressed(Key::Enter)) {
+                self.ask_ai(ui.ctx());
+                resp.request_focus();
+            }
+            let cmd = if cfg!(target_os = "macos") { "Cmd" } else { "Ctrl" };
+            if ui.button("⚙").on_hover_text(format!("Settings ({cmd}+,)")).clicked() {
+                self.open_settings();
+            }
+        });
+    }
+
+    fn open_settings(&mut self) {
+        self.settings_tab = true;
+        self.settings_active = true;
     }
 
     fn sidebar(&mut self, ui: &mut egui::Ui) {
@@ -512,9 +905,13 @@ impl App {
         self.tabs(ui, &mut actions);
         ui.add_space(4.0);
         let new_button = egui::Button::new(RichText::new("+  New session").strong()).min_size(egui::vec2(ui.available_width(), 28.0));
-        if ui.add_enabled(self.picker.is_none(), new_button).clicked() {
-            let start = self.open.as_ref().and_then(|s| s.cwd.clone());
-            self.picker = Some(runner::pick_folder(ui.ctx().clone(), start));
+        if ui.add(new_button).clicked() {
+            let start = Some(PathBuf::from(self.settings.default_folder.trim()))
+                .filter(|d| d.is_dir())
+                .or_else(|| self.open.as_ref().and_then(|s| s.cwd.clone()));
+            if let Some(dir) = runner::pick_folder(start) {
+                self.start_new_session(dir);
+            }
         }
         ui.separator();
         egui::Panel::bottom("search")
@@ -523,16 +920,24 @@ impl App {
             .show(ui, |ui| self.search_bar(ui));
 
         let rows = self.rows();
-        if rows.is_empty() && !self.search.trim().is_empty() {
+        let members = self.tab.and_then(|w| self.workspaces.list.get(w)).map(|w| w.sessions.as_slice());
+        let pending = pending_new(&self.runs, &self.sessions, members);
+        if rows.is_empty() && pending.is_empty() && !self.search.trim().is_empty() {
             ui.label(RichText::new("No matches. Press Enter to ask Haiku.").weak());
-        } else if rows.is_empty() {
+        } else if rows.is_empty() && pending.is_empty() {
             ui.label(if self.tab.is_some() {
-                "Empty workspace. Drag sessions onto its tab, or right-click a session → Move to."
+                "Empty workspace. Drag sessions onto its tab, or right-click a session and choose Move to."
             } else {
                 "No sessions found in ~/.claude/projects"
             });
         }
         egui::ScrollArea::vertical().show(ui, |ui| {
+            for (id, title, folder) in pending {
+                let open = self.new_session.is_some() && self.new_id.as_ref() == Some(&id);
+                if ui.selectable_label(open, format!("{title}  ⏳\n{}", short_folder(&folder))).clicked() && !open {
+                    actions.push(Action::OpenPending(id));
+                }
+            }
             for (i, note) in rows {
                 let s = &self.sessions[i];
                 let title = self.names.get(&s.id).unwrap_or(&s.title);
@@ -541,7 +946,11 @@ impl App {
                     continue;
                 }
                 let working = if self.runs.contains_key(&s.id) { "  ⏳" } else { "" };
-                let label = format!("{title}{working}\n{}", note.unwrap_or_else(|| short_project(&s.project)));
+                let queued = match self.queues.get(&s.id).map(|q| q.items.len()) {
+                    Some(n) if n > 0 => format!("  +{n} queued"),
+                    _ => String::new(),
+                };
+                let label = format!("{title}{working}{queued}\n{}", note.unwrap_or_else(|| short_project(&s.project)));
                 // One widget that senses both: a separate drag-source wrapper would swallow the click.
                 let bg = ui.painter().add(egui::Shape::Noop);
                 let row = ui.selectable_label(self.selected == Some(i), label).interact(Sense::click_and_drag());
@@ -638,25 +1047,227 @@ impl App {
         }
     }
 
-    fn prompt_bar(&mut self, ui: &mut egui::Ui) {
-        let id = Id::new("prompt");
+    /// "Delete workspace?" when the setting asks for it.
+    fn confirm_delete_modal(&mut self, ctx: &egui::Context) {
+        let Some(w) = self.confirm_delete else { return };
+        let name = self.workspaces.list.get(w).map(|w| w.name.clone()).unwrap_or_default();
+        let (mut delete, mut cancel) = (false, false);
+        let modal = egui::Modal::new(Id::new("confirm-delete")).show(ctx, |ui| {
+            ui.label(RichText::new(format!("Delete workspace \"{name}\"?")).strong());
+            ui.label("Its sessions are not deleted; they stay in All sessions.");
+            ui.add_space(8.0);
+            ui.horizontal(|ui| {
+                delete = ui.button("Delete").clicked();
+                cancel = ui.button("Cancel").clicked();
+            });
+        });
+        if delete {
+            self.delete_workspace(w);
+        }
+        if delete || cancel || modal.should_close() {
+            self.confirm_delete = None;
+        }
+    }
+
+    /// Prompts waiting for the open session's run, right above the input.
+    fn queue_list(&mut self, ui: &mut egui::Ui) {
+        let Some(id) = self.open_id() else { return };
+        let Some(q) = self.queues.get(&id).filter(|q| !q.is_empty()) else { return };
+        let pal = theme::palette(ui.visuals());
+        let (mut remove, mut edit, mut resume) = (None, None, false);
+        egui::Frame::new().stroke(Stroke::new(1.0, pal.border)).corner_radius(4.0).inner_margin(6.0).show(ui, |ui| {
+            ui.set_width(ui.available_width());
+            if q.paused {
+                ui.horizontal(|ui| {
+                    ui.label(RichText::new(format!("⏸ Queue paused: {}", q.reason.as_deref().unwrap_or("paused"))).color(pal.note));
+                    resume = ui.small_button("Resume queue").clicked();
+                });
+            }
+            for (i, p) in q.items.iter().enumerate() {
+                ui.horizontal(|ui| {
+                    if ui.small_button("x").on_hover_text("Remove from the queue").clicked() {
+                        remove = Some(i);
+                    }
+                    let first: String = p.lines().next().unwrap_or_default().chars().take(140).collect();
+                    let more = if p.lines().count() > 1 || first.chars().count() < p.chars().count() { " …" } else { "" };
+                    let text = RichText::new(format!("queued {} · {first}{more}", i + 1)).monospace().weak();
+                    let row = ui.add(egui::Label::new(text).truncate().sense(Sense::click())).on_hover_text(format!("{p}\n\nClick to edit"));
+                    if row.clicked() {
+                        edit = Some(i);
+                    }
+                });
+            }
+        });
+        ui.add_space(4.0);
+        let q = self.queues.entry(id.clone()).or_default();
+        if let Some(i) = remove {
+            q.take(i);
+        }
+        let (paused, reason) = (q.paused, q.reason.clone());
+        if let Some(p) = edit.and_then(|i| q.take(i)) {
+            if !self.input.trim().is_empty() {
+                // Keep what was typed: it takes the edited prompt's place in the queue,
+                // which stays paused if it was.
+                q.items.insert(0, std::mem::take(&mut self.input));
+                q.paused = paused;
+                q.reason = reason;
+            }
+            self.input = p;
+            self.focus_prompt = true;
+        }
+        if resume && let Some(next) = q.resume() {
+            if self.runs.contains_key(&id) {
+                q.items.insert(0, next);
+            } else {
+                let cwd = self.open.as_ref().and_then(|s| s.cwd.clone());
+                self.start_run(id, cwd, next, false);
+            }
+        }
+    }
+
+    /// Refine's status and questions, above the input.
+    fn refine_panel(&mut self, ui: &mut egui::Ui) {
+        let pal = theme::palette(ui.visuals());
+        if let Some((original, refined)) = &self.refine_undo {
+            if &self.input == refined {
+                let cmd = if cfg!(target_os = "macos") { "Cmd" } else { "Ctrl" };
+                let mut undo = false;
+                ui.horizontal(|ui| {
+                    ui.label(RichText::new("✨ Refined").color(pal.note));
+                    undo = ui.link("Undo refine").on_hover_text(format!("{cmd}+Z")).clicked();
+                });
+                if undo {
+                    self.input = original.clone();
+                    self.refine_undo = None;
+                }
+            } else {
+                self.refine_undo = None;
+            }
+        }
+        let Some(r) = &mut self.refine else { return };
+        let (mut go, mut skip_all, mut cancel) = (false, false, false);
+        egui::Frame::new().stroke(Stroke::new(1.0, pal.note)).corner_radius(4.0).inner_margin(8.0).show(ui, |ui| {
+            ui.set_width(ui.available_width());
+            if let Some(e) = &r.error {
+                ui.horizontal(|ui| {
+                    ui.colored_label(pal.error, format!("Refine failed: {e}"));
+                    cancel = ui.small_button("Dismiss").clicked();
+                });
+            } else if r.rx.is_some() {
+                ui.horizontal(|ui| {
+                    ui.spinner();
+                    ui.label("Refining the prompt… (Esc to cancel)");
+                });
+            } else {
+                ui.label(RichText::new("A few questions first. Pick an answer, write your own, or skip.").strong());
+                for (n, (q, answer, other)) in r.questions.iter_mut().enumerate() {
+                    ui.add_space(6.0);
+                    ui.label(&q.question);
+                    ui.horizontal_wrapped(|ui| {
+                        for opt in &q.options {
+                            let chosen = answer.as_ref() == Some(opt);
+                            if ui.selectable_label(chosen, opt).clicked() {
+                                *answer = if chosen { None } else { Some(opt.clone()) };
+                            }
+                        }
+                        let field = ui.add(egui::TextEdit::singleline(other).id(Id::new(("refine-other", n))).hint_text("Other…").desired_width(180.0));
+                        if field.changed() {
+                            *answer = Some(other.clone()).filter(|o| !o.trim().is_empty());
+                        }
+                        let skipped = answer.is_none();
+                        if ui.selectable_label(skipped, "Skip").clicked() {
+                            *answer = None;
+                            other.clear();
+                        }
+                    });
+                }
+                ui.add_space(8.0);
+                ui.horizontal(|ui| {
+                    go = ui.button("✨ Refine with these answers").clicked();
+                    skip_all = ui.button("Skip all").clicked();
+                    cancel = ui.button("Cancel").clicked();
+                });
+            }
+        });
+        ui.add_space(4.0);
+        if go || skip_all {
+            let answers = r.questions.iter().map(|(q, a, _)| (q.clone(), if skip_all { None } else { a.clone() })).collect();
+            self.start_refine(Some(answers));
+        }
+        if cancel {
+            self.refine = None;
+        }
+    }
+
+    /// The drag handle on the input's top edge: drag to resize, double-click for automatic
+    /// size, chevron to collapse to one line.
+    fn prompt_handle(&mut self, ui: &mut egui::Ui) {
+        let pal = theme::palette(ui.visuals());
+        let width = ui.available_width();
+        ui.spacing_mut().item_spacing.x = 4.0;
+        let (rect, resp) = ui.allocate_exact_size(egui::vec2(width - 22.0, 8.0), Sense::click_and_drag());
+        let resp = resp.on_hover_cursor(egui::CursorIcon::ResizeVertical).on_hover_text("Drag to resize · double-click: automatic size");
+        let color = if resp.hovered() || resp.dragged() { pal.prompt_sign } else { pal.border };
+        ui.painter().hline(egui::Rangef::new(rect.center().x - 20.0, rect.center().x + 20.0), rect.center().y, Stroke::new(2.0, color));
+        if resp.dragged() {
+            let base = self.prompt_height.unwrap_or(self.prompt_measured);
+            self.prompt_height = Some(base - resp.drag_delta().y);
+            self.prompt_collapsed = false;
+        }
+        if resp.double_clicked() {
+            self.prompt_height = None;
+            self.prompt_collapsed = false;
+        }
+        // A small triangle: down to collapse, up to expand.
+        let (crect, toggle) = ui.allocate_exact_size(egui::vec2(18.0, 8.0), Sense::click());
+        let toggle = toggle.on_hover_text(if self.prompt_collapsed { "Expand the input" } else { "Collapse the input to one line" });
+        let c = crect.center();
+        let (w, h) = (4.5, 3.0);
+        let dir = if self.prompt_collapsed { -1.0 } else { 1.0 };
+        let points = vec![c + egui::vec2(-w, -h * dir), c + egui::vec2(w, -h * dir), c + egui::vec2(0.0, h * dir)];
+        let color = if toggle.hovered() { pal.prompt_sign } else { ui.visuals().weak_text_color() };
+        ui.painter().add(egui::Shape::convex_polygon(points, color, Stroke::NONE));
+        if toggle.clicked() {
+            self.prompt_collapsed = !self.prompt_collapsed;
+        }
+    }
+
+    fn prompt_bar(&mut self, ui: &mut egui::Ui, area_height: f32) {
+        let id = Id::new("prompt-input");
         let running = self.open_running();
-        let enabled = self.open.is_some() && !running;
-        // Consume arrows before the TextEdit sees them, so they drive history instead of the
-        // cursor; only for a one-line input, where there are no lines to move between.
+        let enabled = self.open.is_some();
         let focused = ui.memory(|m| m.has_focus(id));
-        // Plain Enter sends (Shift+Enter is the TextEdit's new line); taken before it sees it.
-        let enter = focused
-            && ui.input_mut(|i| {
-                let hit = !i.modifiers.shift && i.key_pressed(Key::Enter);
-                if hit {
+        // Send and refine keys are taken before the TextEdit sees them (it would add a line).
+        let (send, refine_key) = if focused {
+            let with_mod = self.settings.send_with_modifier;
+            ui.input_mut(|i| {
+                let enter = i.key_pressed(Key::Enter);
+                let (cmd, shift) = (i.modifiers.command, i.modifiers.shift);
+                let send = enter && if with_mod { cmd && !shift } else { !cmd && !shift };
+                let refine = enter && if with_mod { cmd && shift } else { cmd && !shift };
+                if send || refine {
                     i.events.retain(|e| !matches!(e, egui::Event::Key { key: Key::Enter, .. }));
                 }
-                hit
-            });
+                (send, refine)
+            })
+        } else {
+            (false, false)
+        };
+        // Cmd+Z right after a refine brings the original text back.
+        if focused
+            && let Some((original, refined)) = self.refine_undo.clone()
+            && self.input == refined
+            && ui.input_mut(|i| i.consume_key(Modifiers::COMMAND, Key::Z))
+        {
+            self.input = original;
+            self.refine_undo = None;
+        }
+        // Arrows drive history (and pull back queued prompts) instead of the cursor, only
+        // for a one-line input, where there are no lines to move between.
         if focused && !self.input.contains('\n') {
             if ui.input_mut(|i| i.consume_key(Modifiers::NONE, Key::ArrowUp)) {
-                if let Some(p) = self.history.up(&self.input) {
+                let queued = self.open_id().and_then(|id| self.queues.get_mut(&id)).filter(|_| self.input.is_empty()).and_then(|q| q.pull_last());
+                if let Some(p) = queued.or_else(|| self.history.up(&self.input)) {
                     self.input = p;
                 }
             }
@@ -670,6 +1281,12 @@ impl App {
         if let Some(e) = &self.error {
             ui.colored_label(pal.error, e);
         }
+        self.queue_list(ui);
+        self.refine_panel(ui);
+        ui.horizontal(|ui| self.prompt_handle(ui));
+        let mut stop = false;
+        let mut refine_click = false;
+        let mut dictate_click = false;
         egui::Frame::new()
             .fill(pal.prompt_bg)
             .stroke(Stroke::new(1.0, pal.border))
@@ -678,17 +1295,24 @@ impl App {
             .show(ui, |ui| {
                 ui.horizontal_top(|ui| {
                     ui.label(RichText::new(">").monospace().strong().color(pal.prompt_sign));
+                    let send_key = if self.settings.send_with_modifier { "cmd+enter" } else { "enter" };
                     let hint = match (&self.open, running) {
-                        (None, _) => "select a session",
-                        (_, true) => "claude is working on this session… (other sessions are free)",
-                        _ => "type a prompt · enter to send · shift+enter for a new line · up/down for history",
+                        (None, _) => "select a session".to_owned(),
+                        (_, true) => format!("claude is working… {send_key} queues a prompt · ctrl+c stops"),
+                        _ => format!("type a prompt · {send_key} to send · cmd+enter refines · up/down for history"),
                     };
-                    // Grows with the text up to ~10 lines, then scrolls.
                     let row = ui.text_style_height(&egui::TextStyle::Monospace);
-                    let width = ui.available_width() - 24.0;
-                    let resp = egui::ScrollArea::vertical()
+                    let (min, max) = input_heights(row, self.settings.input_max_lines, self.prompt_height, self.prompt_collapsed, area_height * 0.7);
+                    // The panel only grows if asked: the text's full height (measured last
+                    // frame), within min..max. The bottom edge stays put, so it grows upwards.
+                    let height = self.prompt_text_height.clamp(min, max);
+                    // Room for the buttons on the right: refine, stop, and the mic with its spinner.
+                    let buttons = (if running { 84.0 } else { 40.0 }) + if dictation::AVAILABLE { 48.0 } else { 0.0 };
+                    let width = ui.available_width() - buttons;
+                    let out = egui::ScrollArea::vertical()
                         .id_salt("prompt-scroll")
-                        .max_height(row * 10.0 + 4.0)
+                        .min_scrolled_height(height)
+                        .max_height(height)
                         .stick_to_bottom(true)
                         .show(ui, |ui| {
                             let edit = egui::TextEdit::multiline(&mut self.input)
@@ -697,29 +1321,79 @@ impl App {
                                 .font(egui::TextStyle::Monospace)
                                 .text_color(pal.prompt_text)
                                 .hint_text(RichText::new(hint).monospace())
-                                .desired_rows(1)
-                                .return_key(egui::KeyboardShortcut::new(Modifiers::SHIFT, Key::Enter))
+                                .desired_rows(((min / row).floor() as usize).max(1))
+                                .return_key(if self.settings.send_with_modifier {
+                                    None
+                                } else {
+                                    Some(egui::KeyboardShortcut::new(Modifiers::SHIFT, Key::Enter))
+                                })
                                 .desired_width(width);
                             ui.add_enabled(enabled, edit)
-                        })
-                        .inner;
+                        });
+                    self.prompt_measured = out.inner_rect.height();
+                    if (out.content_size.y - self.prompt_text_height).abs() > 0.5 {
+                        self.prompt_text_height = out.content_size.y;
+                        ui.ctx().request_repaint();
+                    }
+                    let resp = out.inner;
                     if self.focus_prompt && enabled {
                         resp.request_focus();
                     }
                     self.focus_prompt = false;
-                    if enabled && enter {
-                        self.send(ui.ctx());
-                    }
-                    if running {
-                        ui.spinner();
-                    }
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Min), |ui| {
+                        let waiting = self.refine.as_ref().is_some_and(|r| r.rx.is_some());
+                        let cmd = if cfg!(target_os = "macos") { "Cmd" } else { "Ctrl" };
+                        let keys = if self.settings.send_with_modifier { format!("{cmd}+Shift+Enter") } else { format!("{cmd}+Enter") };
+                        let refine = egui::Button::new("✨").frame(false);
+                        refine_click = ui
+                            .add_enabled(enabled && !waiting && !self.input.trim().is_empty(), refine)
+                            .on_hover_text(format!("Refine the prompt ({keys})"))
+                            .on_disabled_hover_text("Type a prompt to refine it")
+                            .clicked();
+                        // Added after refine, so it sits to the left of it.
+                        if dictation::AVAILABLE {
+                            let recording = matches!(self.dictation, Dictation::Recording(_));
+                            let transcribing = matches!(self.dictation, Dictation::Transcribing(_));
+                            let (icon, color) = if recording { ("⏹", pal.error) } else { ("🎤", ui.visuals().text_color()) };
+                            let mic = egui::Button::new(RichText::new(icon).color(color)).frame(false);
+                            let hover = if recording { "Stop dictation" } else { "Dictate: click to start, click again to stop" };
+                            dictate_click = ui
+                                .add_enabled(recording || (enabled && !transcribing), mic)
+                                .on_hover_text(hover)
+                                .on_disabled_hover_text(if transcribing { "Transcribing…" } else { "Select a session first" })
+                                .clicked();
+                            if transcribing {
+                                ui.spinner();
+                            }
+                        }
+                        if running {
+                            stop = ui.button("⏹").on_hover_text("Stop Claude (Ctrl+C)").clicked();
+                            ui.spinner();
+                        }
+                    });
                 });
             });
+        if stop {
+            self.stop_open();
+        }
+        if dictate_click {
+            self.toggle_dictation();
+        }
+        if enabled && (refine_key || refine_click) && self.refine.as_ref().is_none_or(|r| r.rx.is_none()) {
+            self.start_refine(None);
+        }
+        if enabled && send {
+            self.send();
+        }
     }
 
     fn conversation(&mut self, ui: &mut egui::Ui) {
         let Some(s) = &self.open else {
-            ui.centered_and_justified(|ui| ui.label("Select a session on the left"));
+            ui.centered_and_justified(|ui| ui.label(if self.tab.is_some() && self.visible().is_empty() {
+                "This workspace is empty"
+            } else {
+                "Select a session on the left"
+            }));
             return;
         };
         if let Some(dir) = self.new_session.as_ref().filter(|_| s.messages.is_empty()) {
@@ -731,15 +1405,15 @@ impl App {
         }
         let pal = theme::palette(ui.visuals());
         // Pinned "You": the prompt of the turn at the top of the viewport (computed last frame).
-        let pinned = self.pinned.or_else(|| s.messages.iter().position(|m| m.role == Role::User));
-        if let Some(m) = pinned.and_then(|i| s.messages.get(i)) {
+        let pinned = self.pinned.or_else(|| s.messages.iter().position(|m| pinned_text(m).is_some()));
+        if let Some(text) = pinned.and_then(|i| s.messages.get(i)).and_then(pinned_text) {
             egui::Frame::new().fill(ui.visuals().faint_bg_color).inner_margin(6.0).corner_radius(4.0).show(ui, |ui| {
                 ui.set_width(ui.available_width());
                 ui.label(RichText::new("You").strong().color(pal.user));
                 egui::ScrollArea::vertical()
                     .id_salt("pinned")
                     .max_height(90.0)
-                    .show(ui, |ui| ui.push_id("pinned", |ui| markdown::show(ui, &mut self.md_cache, &m.text)));
+                    .show(ui, |ui| ui.push_id("pinned", |ui| markdown::show(ui, &mut self.md_cache, &text)));
             });
             ui.add_space(4.0);
         }
@@ -752,13 +1426,14 @@ impl App {
         self.heights.resize(s.messages.len(), 0.0);
         let mut top_prompt = None;
         let open_id = self.open_id();
-        egui::ScrollArea::vertical().auto_shrink(false).stick_to_bottom(true).show_viewport(ui, |ui, viewport| {
+        let key = self.view_key();
+        egui::ScrollArea::vertical().id_salt(("conversation", &key)).auto_shrink(false).stick_to_bottom(true).show_viewport(ui, |ui, viewport| {
             let origin = ui.cursor().top();
             // Render only messages near the viewport; the rest just take their remembered height.
             let near = viewport.expand2(egui::vec2(0.0, 400.0));
             for (i, m) in s.messages.iter().enumerate() {
                 let y = ui.cursor().top() - origin;
-                if m.role == Role::User && y <= viewport.min.y + 1.0 {
+                if pinned_text(m).is_some() && y <= viewport.min.y + 1.0 {
                     top_prompt = Some(i);
                 }
                 let h = self.heights[i];
@@ -784,6 +1459,13 @@ impl App {
                     };
                     ui.label(RichText::new(doing).weak().monospace());
                 });
+            } else if let Some(partial) = open_id.as_ref().and_then(|id| self.interrupted.get(id)).filter(|_| !saved_interrupt(&s.messages)) {
+                // What Claude had written when it was stopped, then the mark.
+                if !partial.is_empty() {
+                    let m = session::Message { role: Role::Assistant, text: partial.clone() };
+                    ui.push_id("interrupted", |ui| message(ui, &mut self.md_cache, &m, &pal));
+                }
+                ui.label(RichText::new("⏹ Interrupted").color(pal.note).monospace());
             }
         });
         if top_prompt != self.pinned {
@@ -792,38 +1474,49 @@ impl App {
         }
     }
 
+    fn file_options(&self) -> diffview::FileOptions {
+        diffview::FileOptions {
+            line_numbers: self.settings.line_numbers,
+            wrap: self.settings.wrap_file_lines,
+            tab_width: self.settings.tab_width,
+            font_size: self.settings.mono_size + 0.5,
+        }
+    }
+
     /// A file tab: Markdown files render, with a toggle to their source; others show as source.
     fn file_tab(&mut self, ui: &mut egui::Ui, i: usize) {
+        let opts = self.file_options();
+        let scroll_id = ("file", self.view_key(), self.file_tabs[i].path.clone());
         let tab = &mut self.file_tabs[i];
         let text = match (&tab.contents, markdown::is_markdown(&tab.path)) {
             (Ok(text), true) => text,
-            _ => return diffview::file_view(ui, &tab.path, &tab.contents),
+            _ => return diffview::file_view(ui, &tab.path, &tab.contents, &opts, scroll_id),
         };
         ui.horizontal(|ui| {
             ui.selectable_value(&mut tab.rendered, true, "Rendered");
             ui.selectable_value(&mut tab.rendered, false, "Source");
         });
         if !tab.rendered {
-            return diffview::file_view(ui, &tab.path, &tab.contents);
+            return diffview::file_view(ui, &tab.path, &tab.contents, &opts, scroll_id);
         }
         ui.label(RichText::new(&tab.path).weak().monospace());
         ui.add_space(4.0);
-        egui::ScrollArea::vertical().id_salt(("md-file", i)).auto_shrink(false).show(ui, |ui| {
+        egui::ScrollArea::vertical().id_salt(("md", scroll_id)).auto_shrink(false).show(ui, |ui| {
             egui::Frame::new().inner_margin(egui::Margin::symmetric(12, 4)).show(ui, |ui| markdown::show(ui, &mut self.md_cache, text));
         });
     }
 
-    /// Dark / Light / System, saved to sessman's settings.
-    fn theme_switch(&mut self, ui: &mut egui::Ui) {
-        let before = self.theme;
-        // Right-to-left layout: listed in reverse.
-        ui.selectable_value(&mut self.theme, ThemePreference::System, "💻").on_hover_text("Follow the system appearance");
-        ui.selectable_value(&mut self.theme, ThemePreference::Light, "☀").on_hover_text("Light");
-        ui.selectable_value(&mut self.theme, ThemePreference::Dark, "🌙").on_hover_text("Dark");
-        if self.theme != before {
-            ui.ctx().set_theme(self.theme);
-            if let Err(e) = theme::save(self.theme) {
-                self.error = Some(format!("could not save the theme: {e}"));
+    fn settings_page(&mut self, ui: &mut egui::Ui) {
+        let status_line = match status::setup() {
+            status::Setup::Enabled => "Enabled".to_owned(),
+            status::Setup::NotSet => "Not enabled (Enable it in the Info tab, under Usage limits)".to_owned(),
+            status::Setup::Other(cmd) => format!("Your own status line is set (`{cmd}`)"),
+        };
+        let about = settings::About { status_line: &status_line };
+        if settings::ui(ui, &mut self.settings, &mut self.settings_filter, &about) {
+            self.apply_settings();
+            if let Err(e) = self.settings.save(&settings::path()) {
+                self.error = Some(format!("could not save settings: {e}"));
             }
         }
     }
@@ -832,7 +1525,6 @@ impl App {
         ui.horizontal(|ui| {
             ui.selectable_value(&mut self.right_tab, RightTab::Changes, RichText::new("Changes").heading());
             ui.selectable_value(&mut self.right_tab, RightTab::Info, RichText::new("Info").heading());
-            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| self.theme_switch(ui));
         });
         ui.separator();
         match self.right_tab {
@@ -990,21 +1682,18 @@ impl App {
         let i = match self.file_tabs.iter().position(|t| t.path == path) {
             Some(i) => i,
             None => {
-                let tab = FileTab { path: path.to_owned(), contents: diffview::read(path), rendered: markdown::is_markdown(path) };
-                self.file_tabs.push(tab);
+                let rendered = markdown::is_markdown(path) && self.settings.markdown_rendered;
+                self.file_tabs.push(FileTab { path: path.to_owned(), contents: diffview::read(path), rendered });
                 self.file_tabs.len() - 1
             }
         };
         self.main_tab = Some(i);
+        self.settings_active = false;
     }
 
     fn close_file(&mut self, i: usize) {
         drop(self.file_tabs.remove(i));
-        self.main_tab = match self.main_tab {
-            Some(t) if t == i => None,
-            Some(t) if t > i => Some(t - 1),
-            t => t,
-        };
+        self.main_tab = after_close(self.main_tab, i);
     }
 
     fn diffs(&mut self, ui: &mut egui::Ui) {
@@ -1063,36 +1752,227 @@ impl App {
         }
     }
 
-    /// "Main" plus one tab per open file, above the main area.
+    /// "Main" plus one tab per open file (and Settings), above the main area.
     fn main_tabs(&mut self, ui: &mut egui::Ui) {
         let mut close = None;
+        let mut close_settings = false;
         ui.horizontal_wrapped(|ui| {
-            if ui.selectable_label(self.main_tab.is_none(), RichText::new("Main").strong()).clicked() {
+            ui.spacing_mut().item_spacing.x = 4.0;
+            let main_active = self.main_tab.is_none() && !self.settings_active;
+            if ui.selectable_label(main_active, RichText::new("Main").strong()).clicked() {
                 self.main_tab = None;
+                self.settings_active = false;
             }
             for (i, t) in self.file_tabs.iter().enumerate() {
                 let (name, _) = diffview::split_path(&t.path);
-                let tab = ui.selectable_label(self.main_tab == Some(i), RichText::new(name).monospace()).on_hover_text(&t.path);
-                if tab.clicked() {
-                    self.main_tab = Some(i);
+                let active = self.main_tab == Some(i) && !self.settings_active;
+                match closable_tab(ui, ("file-tab", i), RichText::new(name).monospace(), active, &t.path) {
+                    TabClick::Select => {
+                        self.main_tab = Some(i);
+                        self.settings_active = false;
+                    }
+                    TabClick::Close => close = Some(i),
+                    TabClick::None => {}
                 }
-                if ui.small_button("x").on_hover_text("Close").clicked() {
-                    close = Some(i);
+            }
+            if self.settings_tab {
+                match closable_tab(ui, "settings-tab", RichText::new("⚙ Settings"), self.settings_active, "Settings") {
+                    TabClick::Select => self.settings_active = true,
+                    TabClick::Close => close_settings = true,
+                    TabClick::None => {}
                 }
-                ui.add_space(6.0);
             }
         });
         if let Some(i) = close {
             self.close_file(i);
         }
+        if close_settings {
+            self.settings_tab = false;
+            self.settings_active = false;
+        }
     }
+
+    /// The bar along the top of the window, under the macOS window buttons: drag it to move
+    /// the window, double-click to zoom.
+    fn title_bar(&mut self, ui: &mut egui::Ui) {
+        let rect = ui.max_rect();
+        let resp = ui.interact(rect, Id::new("title-bar"), Sense::click_and_drag());
+        if resp.drag_started_by(egui::PointerButton::Primary) {
+            ui.ctx().send_viewport_cmd(egui::ViewportCommand::StartDrag);
+        }
+        if resp.double_clicked() {
+            let zoomed = ui.input(|i| i.viewport().maximized.unwrap_or(false));
+            ui.ctx().send_viewport_cmd(egui::ViewportCommand::Maximized(!zoomed));
+        }
+    }
+
+    /// Ctrl+C (stop) and Cmd+, (settings), wherever the focus is.
+    fn global_keys(&mut self, ctx: &egui::Context) {
+        let ctrl_c = ctx.input_mut(|i| {
+            // On macOS Ctrl+C is free (copy is Cmd+C); elsewhere it stops only with nothing to copy.
+            let pressed = i.modifiers.ctrl && !i.modifiers.mac_cmd && !i.modifiers.shift && i.key_pressed(Key::C);
+            if pressed {
+                i.events.retain(|e| !matches!(e, egui::Event::Key { key: Key::C, .. } | egui::Event::Copy));
+            }
+            pressed
+        });
+        if ctrl_c && (cfg!(target_os = "macos") || self.input.is_empty()) {
+            self.stop_open();
+        }
+        if ctx.input_mut(|i| i.consume_key(Modifiers::COMMAND, Key::Comma)) {
+            self.open_settings();
+        }
+        // Esc cancels a refine that is still waiting (egui also uses Esc to drop focus, so
+        // this can't depend on the input being focused).
+        if self.refine.as_ref().is_some_and(|r| r.rx.is_some()) && ctx.input(|i| i.key_pressed(Key::Escape)) {
+            self.refine = None;
+            self.focus_prompt = true;
+        }
+    }
+}
+
+/// Claude Code's own record of a stopped run, saved as a user message.
+fn is_interrupt_marker(text: &str) -> bool {
+    text.contains("[Request interrupted by user")
+}
+
+/// What the pinned "You" shows for a message: a prompt the user typed, without Claude's stop
+/// marker; None for Claude's messages and for a marker on its own.
+fn pinned_text(m: &session::Message) -> Option<String> {
+    if m.role != Role::User {
+        return None;
+    }
+    let (before, after) = split_interrupt_marker(&m.text);
+    let text = if after.is_empty() { before } else { after };
+    (!text.is_empty()).then_some(text)
+}
+
+/// The text before and after Claude's stop marker (`[Request interrupted by user…]`).
+fn split_interrupt_marker(text: &str) -> (String, String) {
+    let Some(start) = text.find("[Request interrupted by user") else { return (text.trim().to_owned(), String::new()) };
+    let end = text[start..].find(']').map_or(text.len(), |e| start + e + 1);
+    (text[..start].trim().to_owned(), text[end..].trim().to_owned())
+}
+
+/// True once the session file holds the stop (Claude saved the partial reply and its marker),
+/// so sessman's own copy of the partial reply isn't shown twice.
+fn saved_interrupt(messages: &[session::Message]) -> bool {
+    messages.iter().rev().take_while(|m| !(m.role == Role::User && !is_interrupt_marker(&m.text))).any(|m| is_interrupt_marker(&m.text))
+}
+
+/// The input's (min, max) height: one row when collapsed, the dragged height, or growing with
+/// the text up to `max_lines`; never above `limit`.
+fn input_heights(row: f32, max_lines: usize, manual: Option<f32>, collapsed: bool, limit: f32) -> (f32, f32) {
+    let limit = limit.max(row);
+    match (collapsed, manual) {
+        (true, _) => (row, row),
+        (false, Some(h)) => {
+            let h = h.clamp(row, limit);
+            (h, h)
+        }
+        (false, None) => (row, (row * max_lines.max(1) as f32).min(limit)),
+    }
+}
+
+/// Active file tab after closing tab `closed`.
+fn after_close(active: Option<usize>, closed: usize) -> Option<usize> {
+    match active {
+        Some(t) if t == closed => None,
+        Some(t) if t > closed => Some(t - 1),
+        t => t,
+    }
+}
+
+enum TabClick {
+    None,
+    Select,
+    Close,
+}
+
+/// A tab with its close button inside it: one shape that highlights as a whole, with the `x`
+/// getting its own hover. Middle-click closes too.
+fn closable_tab(ui: &mut egui::Ui, id: impl std::hash::Hash + std::fmt::Debug, text: RichText, selected: bool, hover: &str) -> TabClick {
+    let galley = egui::WidgetText::from(text).into_galley(ui, Some(egui::TextWrapMode::Extend), f32::INFINITY, egui::TextStyle::Button);
+    let pad = egui::vec2(8.0, 4.0);
+    let x_size = 16.0;
+    let size = egui::vec2(pad.x + galley.size().x + 6.0 + x_size + 4.0, galley.size().y.max(x_size) + 2.0 * pad.y);
+    let (rect, tab) = ui.allocate_exact_size(size, Sense::click());
+    let x_rect = egui::Rect::from_center_size(egui::pos2(rect.right() - 4.0 - x_size / 2.0, rect.center().y), egui::vec2(x_size, x_size));
+    let x = ui.interact(x_rect, ui.id().with(&id).with("close"), Sense::click()).on_hover_text("Close");
+    let tab = tab.on_hover_text(hover);
+    let v = ui.visuals();
+    let fill = if selected {
+        v.selection.bg_fill
+    } else if tab.hovered() || x.hovered() {
+        v.widgets.hovered.weak_bg_fill
+    } else {
+        v.widgets.inactive.weak_bg_fill
+    };
+    let painter = ui.painter();
+    painter.rect(rect, 4.0, fill, Stroke::new(1.0, if selected { v.selection.stroke.color } else { v.widgets.noninteractive.bg_stroke.color }), StrokeKind::Inside);
+    let text_color = if selected { v.selection.stroke.color } else { v.text_color() };
+    painter.galley(egui::pos2(rect.left() + pad.x, rect.center().y - galley.size().y / 2.0), galley, text_color);
+    if x.hovered() {
+        painter.rect_filled(x_rect, 3.0, v.widgets.active.weak_bg_fill);
+    }
+    let x_color = if x.hovered() || tab.hovered() || selected { text_color } else { v.weak_text_color() };
+    let c = x_rect.center();
+    let d = 3.5;
+    painter.line_segment([c + egui::vec2(-d, -d), c + egui::vec2(d, d)], Stroke::new(1.4, x_color));
+    painter.line_segment([c + egui::vec2(-d, d), c + egui::vec2(d, -d)], Stroke::new(1.4, x_color));
+    if x.clicked() || tab.middle_clicked() {
+        TabClick::Close
+    } else if tab.clicked() {
+        TabClick::Select
+    } else {
+        TabClick::None
+    }
+}
+
+/// New sessions whose first prompt is running, before Claude has written their file (so the
+/// list doesn't have them yet): (id, first line of the prompt, folder). In a workspace tab,
+/// only the ones created there.
+fn pending_new(runs: &HashMap<String, Run>, listed: &[SessionMeta], members: Option<&[String]>) -> Vec<(String, String, String)> {
+    let mut out: Vec<_> = runs
+        .iter()
+        .filter(|(id, r)| r.new && !listed.iter().any(|s| &s.id == *id))
+        .filter(|(id, _)| members.is_none_or(|m| m.contains(id)))
+        .map(|(id, r)| {
+            let folder = r.cwd.as_ref().map(|d| d.display().to_string()).unwrap_or_default();
+            (id.clone(), r.prompt.lines().next().unwrap_or_default().chars().take(60).collect(), folder)
+        })
+        .collect();
+    out.sort();
+    out
+}
+
+/// "/Users/me/Desktop/proj" → "Desktop/proj"
+fn short_folder(dir: &str) -> String {
+    let home = std::env::var("HOME").unwrap_or_default();
+    dir.strip_prefix(&home).map(|s| s.trim_start_matches('/').to_owned()).unwrap_or_else(|| dir.to_owned())
 }
 
 /// One message as a card: role label and accent stripe, then its rendered Markdown.
 /// Messages that are only tool calls show as a single dimmed line.
 fn message(ui: &mut egui::Ui, cache: &mut CommonMarkCache, m: &session::Message, pal: &theme::Palette) {
+    if m.role == Role::User && is_interrupt_marker(&m.text) {
+        // Claude's record of a stop: alone, after the prompt it stopped, or (merged by the
+        // parser) before the next prompt. Each part shows in its place.
+        let (before, after) = split_interrupt_marker(&m.text);
+        if !before.is_empty() {
+            ui.push_id("before", |ui| message(ui, cache, &session::Message { role: Role::User, text: before }, pal));
+        }
+        ui.label(RichText::new("⏹ Interrupted").color(pal.note).monospace());
+        ui.add_space(6.0);
+        if !after.is_empty() {
+            ui.push_id("after", |ui| message(ui, cache, &session::Message { role: Role::User, text: after }, pal));
+        }
+        return;
+    }
     if m.role == Role::Assistant && m.text.lines().all(|l| l.starts_with("[tool:")) {
-        egui::Frame::new().inner_margin(egui::Margin { left: 14, right: 0, top: 0, bottom: 6 }).show(ui, |ui| markdown::show(ui, cache, &m.text));
+        if markdown::SHOW_TOOLS.load(std::sync::atomic::Ordering::Relaxed) {
+            egui::Frame::new().inner_margin(egui::Margin { left: 14, right: 0, top: 0, bottom: 6 }).show(ui, |ui| markdown::show(ui, cache, &m.text));
+        }
         return;
     }
     let (who, accent) = match m.role {
@@ -1234,33 +2114,140 @@ fn short_project(p: &str) -> String {
 
 impl eframe::App for App {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
+        let ctx = ui.ctx().clone();
         self.poll_runner();
-        self.poll_picker();
         self.poll_summary();
         self.poll_btw();
         self.poll_snapshots();
         self.poll_ai();
+        self.poll_refine();
+        self.poll_dictation();
+        self.global_keys(&ctx);
+        // First, so it spans the whole width above the side panels.
+        egui::Panel::top("title-bar").exact_size(TITLE_BAR_HEIGHT).resizable(false).show(ui, |ui| self.title_bar(ui));
         egui::Panel::left("sessions").default_size(260.0).resizable(true).show(ui, |ui| self.sidebar(ui));
         egui::Panel::right("diffs").default_size(420.0).resizable(true).show(ui, |ui| self.right_panel(ui));
         egui::CentralPanel::default().show(ui, |ui| {
-            if !self.file_tabs.is_empty() {
+            if !self.file_tabs.is_empty() || self.settings_tab {
                 egui::Panel::top("main-tabs").show_separator_line(true).resizable(false).show(ui, |ui| self.main_tabs(ui));
             }
+            if self.settings_active && self.settings_tab {
+                self.settings_page(ui);
+                return;
+            }
+            let area_height = ui.available_height();
             egui::Panel::bottom("prompt")
                 .frame(egui::Frame::new().inner_margin(egui::Margin::symmetric(0, 6)))
                 .show_separator_line(false)
                 .resizable(false)
-                .show(ui, |ui| self.prompt_bar(ui));
+                .show(ui, |ui| self.prompt_bar(ui, area_height));
             match self.main_tab.filter(|&i| i < self.file_tabs.len()) {
                 Some(i) => self.file_tab(ui, i),
                 None => self.conversation(ui),
             }
-            // A plain click anywhere in the main area goes to the input, like a terminal.
+            // A plain click anywhere in the main area goes to the input, like a terminal;
+            // unless it went to another text field (refine's "Other…"), which keeps the focus.
             let area = ui.max_rect();
-            if ui.input(|i| i.pointer.primary_clicked() && i.pointer.interact_pos().is_some_and(|p| area.contains(p))) {
+            let click = ui.input(|i| i.pointer.primary_clicked().then_some(i.pointer.interact_pos()).flatten());
+            let on_other_field = |p| {
+                let focused = ui.memory(|m| m.focused()).filter(|&f| f != Id::new("prompt-input"));
+                focused.and_then(|f| ui.ctx().read_response(f)).is_some_and(|r| r.rect.contains(p))
+            };
+            if click.is_some_and(|p| area.contains(p) && !on_other_field(p)) {
                 self.focus_prompt = true;
                 ui.ctx().request_repaint();
             }
         });
+        self.confirm_delete_modal(&ctx);
+    }
+
+    fn save(&mut self, _storage: &mut dyn eframe::Storage) {
+        if self.settings.restore_state {
+            self.save_state();
+        }
+    }
+
+    fn auto_save_interval(&self) -> std::time::Duration {
+        std::time::Duration::from_secs(2)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn input_grows_to_its_limit_or_keeps_the_dragged_height() {
+        // Automatic: one row, growing to max_lines rows.
+        assert_eq!(input_heights(10.0, 10, None, false, 500.0), (10.0, 100.0));
+        // Never taller than the area allows.
+        assert_eq!(input_heights(10.0, 10, None, false, 60.0), (10.0, 60.0));
+        // Dragged: exactly that height, clamped to one row .. limit.
+        assert_eq!(input_heights(10.0, 10, Some(150.0), false, 500.0), (150.0, 150.0));
+        assert_eq!(input_heights(10.0, 10, Some(2.0), false, 500.0), (10.0, 10.0));
+        assert_eq!(input_heights(10.0, 10, Some(900.0), false, 500.0), (500.0, 500.0));
+        // Collapsed: one line, whatever was dragged.
+        assert_eq!(input_heights(10.0, 10, Some(150.0), true, 500.0), (10.0, 10.0));
+    }
+
+    /// Regression: after Ctrl+C the partial reply showed twice (sessman's copy and Claude's).
+    #[test]
+    fn a_saved_stop_hides_sessmans_own_copy() {
+        let m = |role, text: &str| session::Message { role, text: text.into() };
+        let before = vec![m(Role::User, "write a story"), m(Role::Assistant, "Once upon")];
+        assert!(!saved_interrupt(&before));
+        let mut after = vec![m(Role::User, "write a story"), m(Role::Assistant, "Once upon")];
+        after.push(m(Role::User, "[Request interrupted by user]"));
+        assert!(saved_interrupt(&after));
+        // A new prompt after the stop: the old marker no longer counts.
+        after.push(m(Role::User, "try again"));
+        assert!(!saved_interrupt(&after));
+        assert!(is_interrupt_marker("[Request interrupted by user for tool use]"));
+        // Merged into the prompt it stopped, as the session file can hold it.
+        assert!(saved_interrupt(&[m(Role::User, "write it [Request interrupted by user]")]));
+        let split = |t| split_interrupt_marker(t);
+        assert_eq!(split("write it [Request interrupted by user]"), ("write it".into(), String::new()));
+        assert_eq!(split("[Request interrupted by user for tool use]"), (String::new(), String::new()));
+        // Regression: the next prompt merged after the marker must show after it, not before.
+        assert_eq!(split("[Request interrupted by user]\n\nReply five"), (String::new(), "Reply five".into()));
+        // Regression: the pinned "You" showed a lone marker as if it were a prompt.
+        assert_eq!(pinned_text(&m(Role::User, "[Request interrupted by user]")), None);
+        assert_eq!(pinned_text(&m(Role::User, "[Request interrupted by user]\nReply five")).as_deref(), Some("Reply five"));
+        assert_eq!(pinned_text(&m(Role::User, "write it")).as_deref(), Some("write it"));
+        assert_eq!(pinned_text(&m(Role::Assistant, "hi")), None);
+    }
+
+    /// Regression (item 5): a new session shows in the list as soon as its first prompt is
+    /// sent, not only once the indexer finds its file.
+    #[test]
+    fn new_sessions_are_listed_while_their_first_prompt_runs() {
+        let run = |new: bool, prompt: &str| Run {
+            rx: std::sync::mpsc::channel().1,
+            live: String::new(),
+            tool: None,
+            new,
+            cwd: Some(PathBuf::from("/tmp/play")),
+            prompt: prompt.into(),
+            stop: runner::Stop::default(),
+            poked: false,
+        };
+        let mut runs = HashMap::new();
+        runs.insert("n1".to_owned(), run(true, "build it\nwith details"));
+        runs.insert("old".to_owned(), run(false, "continue"));
+        runs.insert("n2".to_owned(), run(true, "listed already"));
+        let listed = vec![SessionMeta { id: "n2".into(), path: PathBuf::new(), project: String::new(), title: String::new(), modified: UNIX_EPOCH }];
+        let pending = pending_new(&runs, &listed, None);
+        assert_eq!(pending, vec![("n1".to_owned(), "build it".to_owned(), "/tmp/play".to_owned())]);
+        // In a workspace tab, only the sessions created there.
+        assert!(pending_new(&runs, &listed, Some(&["other".to_owned()])).is_empty());
+        assert_eq!(pending_new(&runs, &listed, Some(&["n1".to_owned()])).len(), 1);
+    }
+
+    #[test]
+    fn closing_a_tab_keeps_the_right_one_active() {
+        assert_eq!(after_close(Some(2), 2), None);
+        assert_eq!(after_close(Some(3), 1), Some(2));
+        assert_eq!(after_close(Some(0), 1), Some(0));
+        assert_eq!(after_close(None, 0), None);
     }
 }

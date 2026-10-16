@@ -7,12 +7,12 @@ pub struct Names(HashMap<String, String>);
 
 impl Names {
     pub fn path() -> PathBuf {
-        PathBuf::from(std::env::var("HOME").unwrap_or_default()).join(".config/sessman/names.json")
+        crate::settings::config_dir().join("names.json")
     }
 
     /// Same format, used for AI-written session goals (session id → goal).
     pub fn goals_path() -> PathBuf {
-        PathBuf::from(std::env::var("HOME").unwrap_or_default()).join(".config/sessman/goals.json")
+        crate::settings::config_dir().join("goals.json")
     }
 
     pub fn load(path: &Path) -> Self {

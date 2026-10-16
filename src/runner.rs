@@ -1,8 +1,87 @@
 use serde_json::Value;
 use std::io::{BufRead, BufReader, Read};
 use std::path::PathBuf;
+use std::os::unix::process::CommandExt;
 use std::process::{Command, Stdio};
 use std::sync::mpsc::{Receiver, channel};
+use std::sync::{Arc, Mutex, RwLock};
+
+/// How to run Claude Code, from the Settings page.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Claude {
+    pub bin: String,
+    /// For prompts; empty = Claude Code's default.
+    pub model: String,
+    /// For search, goals and refine.
+    pub helper: String,
+    pub extra: Vec<String>,
+}
+
+impl Default for Claude {
+    fn default() -> Self {
+        Self { bin: "claude".into(), model: String::new(), helper: "haiku".into(), extra: Vec::new() }
+    }
+}
+
+impl Claude {
+    pub fn from_settings(s: &crate::settings::Settings) -> Self {
+        let or = |v: &str, d: &str| if v.trim().is_empty() { d.to_owned() } else { v.trim().to_owned() };
+        Self {
+            bin: or(&s.claude_path, "claude"),
+            model: s.model.trim().to_owned(),
+            helper: or(&s.helper_model, "haiku"),
+            extra: s.extra_args.split_whitespace().map(str::to_owned).collect(),
+        }
+    }
+}
+
+static CLAUDE: RwLock<Option<Claude>> = RwLock::new(None);
+
+pub fn configure(c: Claude) {
+    *CLAUDE.write().unwrap() = Some(c);
+}
+
+fn claude() -> Claude {
+    CLAUDE.read().unwrap().clone().unwrap_or_default()
+}
+
+/// `claude -p` with the extra arguments from Settings.
+fn command(c: &Claude) -> Command {
+    let mut cmd = Command::new(&c.bin);
+    cmd.arg("-p").args(&c.extra);
+    cmd
+}
+
+/// The arguments of a prompt run, after `claude -p <extra>`.
+pub fn send_args(c: &Claude, id: &str, prompt: &str, new: bool) -> Vec<String> {
+    let mut args: Vec<String> = vec![if new { "--session-id" } else { "--resume" }.into(), id.into()];
+    if !c.model.is_empty() {
+        args.extend(["--model".into(), c.model.clone()]);
+    }
+    args.extend(["--output-format", "stream-json", "--verbose", "--include-partial-messages"].map(String::from));
+    args.push(prompt.into());
+    args
+}
+
+/// Stops a running prompt, like Ctrl+C in a terminal: SIGINT to claude and everything it
+/// started (its own process group), then SIGKILL if it is still there 2 s later.
+#[derive(Clone, Default)]
+pub struct Stop(Arc<Mutex<Option<u32>>>);
+
+impl Stop {
+    pub fn stop(&self) {
+        let Some(pid) = *self.0.lock().unwrap() else { return };
+        let group = -(pid as i32);
+        unsafe { libc::kill(group, libc::SIGINT) };
+        let me = self.clone();
+        std::thread::spawn(move || {
+            std::thread::sleep(std::time::Duration::from_secs(2));
+            if me.0.lock().unwrap().is_some() {
+                unsafe { libc::kill(group, libc::SIGKILL) };
+            }
+        });
+    }
+}
 
 /// What a running `claude -p` reports, as it happens.
 pub enum RunEvent {
@@ -17,28 +96,38 @@ pub enum RunEvent {
 
 /// Runs `claude -p` on a thread, streaming its progress: `--resume <id>` for an existing
 /// session, `--session-id <id>` to start a new one.
-pub fn send(ctx: eframe::egui::Context, id: String, cwd: Option<PathBuf>, prompt: String, new: bool) -> Receiver<RunEvent> {
-    let mut cmd = Command::new("claude");
-    cmd.args(["-p", if new { "--session-id" } else { "--resume" }, &id]);
-    cmd.args(["--output-format", "stream-json", "--verbose", "--include-partial-messages", &prompt]);
+pub fn send(ctx: eframe::egui::Context, id: String, cwd: Option<PathBuf>, prompt: String, new: bool) -> (Receiver<RunEvent>, Stop) {
+    let c = claude();
+    let mut cmd = command(&c);
+    cmd.args(send_args(&c, &id, &prompt, new));
     if let Some(dir) = cwd {
         cmd.current_dir(dir);
     }
-    cmd.stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped());
+    spawn_stream(ctx, cmd)
+}
+
+/// Runs `cmd` on a thread in its own process group (so Stop reaches its children too),
+/// streaming its events.
+fn spawn_stream(ctx: eframe::egui::Context, mut cmd: Command) -> (Receiver<RunEvent>, Stop) {
+    cmd.stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped()).process_group(0);
+    let stop = Stop::default();
+    let pid = stop.clone();
     let (tx, rx) = channel();
     std::thread::spawn(move || {
-        let done = stream(&mut cmd, |event| {
+        let done = stream(&mut cmd, &pid, |event| {
             let _ = tx.send(event);
             ctx.request_repaint();
         });
+        *pid.0.lock().unwrap() = None;
         let _ = tx.send(RunEvent::Done(done));
         ctx.request_repaint();
     });
-    rx
+    (rx, stop)
 }
 
-fn stream(cmd: &mut Command, mut emit: impl FnMut(RunEvent)) -> Result<(), String> {
+fn stream(cmd: &mut Command, pid: &Stop, mut emit: impl FnMut(RunEvent)) -> Result<(), String> {
     let mut child = cmd.spawn().map_err(|e| format!("failed to run claude: {e}"))?;
+    *pid.0.lock().unwrap() = Some(child.id());
     let mut stderr = child.stderr.take();
     let err_reader = std::thread::spawn(move || {
         let mut s = String::new();
@@ -94,8 +183,8 @@ fn event(v: &Value) -> Option<RunEvent> {
 /// A side question with the session's full context, like Claude Code's /btw: the session is
 /// forked and the fork isn't saved, so the original conversation is untouched.
 pub fn btw(ctx: eframe::egui::Context, id: String, cwd: Option<PathBuf>, question: String) -> Receiver<Result<String, String>> {
-    let mut cmd = Command::new("claude");
-    cmd.args(["-p", "--resume", &id, "--fork-session", "--no-session-persistence", &question]);
+    let mut cmd = command(&claude());
+    cmd.args(["--resume", &id, "--fork-session", "--no-session-persistence", &question]);
     if let Some(dir) = cwd {
         cmd.current_dir(dir);
     }
@@ -119,10 +208,11 @@ pub fn summarize_goal(ctx: eframe::egui::Context, digest: String) -> Receiver<Re
     ask_haiku(ctx, prompt)
 }
 
-/// A one-off question to a small, cheap model, outside any session.
+/// A one-off question to the helper model (Haiku by default), outside any session.
 pub fn ask_haiku(ctx: eframe::egui::Context, prompt: String) -> Receiver<Result<String, String>> {
-    let mut cmd = Command::new("claude");
-    cmd.args(["-p", "--model", "haiku", "--no-session-persistence", &prompt]).current_dir(std::env::temp_dir());
+    let c = claude();
+    let mut cmd = command(&c);
+    cmd.args(["--model", &c.helper, "--no-session-persistence", &prompt]).current_dir(std::env::temp_dir());
     run(ctx, cmd)
 }
 
@@ -143,25 +233,39 @@ fn run(ctx: eframe::egui::Context, mut cmd: Command) -> Receiver<Result<String, 
     rx
 }
 
-/// Opens the macOS folder picker on a thread. Yields None if the user cancels.
-pub fn pick_folder(ctx: eframe::egui::Context, start: Option<PathBuf>) -> Receiver<Option<PathBuf>> {
-    let (tx, rx) = channel();
-    std::thread::spawn(move || {
-        let mut script = String::from("POSIX path of (choose folder with prompt \"Folder for the new Claude session\"");
-        if let Some(dir) = start.filter(|d| d.is_dir()) {
-            let dir = dir.to_string_lossy().replace('\\', "\\\\").replace('"', "\\\"");
-            script.push_str(&format!(" default location POSIX file \"{dir}\""));
-        }
-        script.push(')');
-        let out = Command::new("osascript").args(["-e", "tell me to activate", "-e", &script]).output();
-        let dir = out
-            .ok()
-            .filter(|o| o.status.success())
-            .map(|o| PathBuf::from(String::from_utf8_lossy(&o.stdout).trim()));
-        let _ = tx.send(dir);
-        ctx.request_repaint();
-    });
-    rx
+/// The macOS folder picker, shown in-process (the old `osascript` picker took ~2 s just to
+/// come to the front). Blocks until the user picks a folder or cancels (None).
+#[cfg(target_os = "macos")]
+pub fn pick_folder(start: Option<PathBuf>) -> Option<PathBuf> {
+    use objc2_app_kit::{NSModalResponseOK, NSOpenPanel};
+    use objc2_foundation::{MainThreadMarker, NSString, NSURL};
+    let mtm = MainThreadMarker::new()?;
+    let panel = NSOpenPanel::openPanel(mtm);
+    panel.setCanChooseDirectories(true);
+    panel.setCanChooseFiles(false);
+    panel.setCanCreateDirectories(true);
+    panel.setMessage(Some(&NSString::from_str("Folder for the new Claude session")));
+    panel.setPrompt(Some(&NSString::from_str("Choose")));
+    if let Some(dir) = start.filter(|d| d.is_dir()) {
+        let url = NSURL::fileURLWithPath(&NSString::from_str(&dir.to_string_lossy()));
+        panel.setDirectoryURL(Some(&url));
+    }
+    if panel.runModal() != NSModalResponseOK {
+        return None;
+    }
+    panel.URL().and_then(|u| u.path()).map(|p| PathBuf::from(p.to_string()))
+}
+
+#[cfg(not(target_os = "macos"))]
+pub fn pick_folder(_start: Option<PathBuf>) -> Option<PathBuf> {
+    None
+}
+
+/// A system notification (macOS), e.g. when a run ends while sessman is in the background.
+pub fn notify(title: &str, body: &str) {
+    let quote = |s: &str| s.replace('\\', "\\\\").replace('"', "\\\"");
+    let script = format!("display notification \"{}\" with title \"{}\"", quote(body), quote(title));
+    let _ = Command::new("osascript").args(["-e", &script]).stdin(Stdio::null()).spawn();
 }
 
 /// Random UUID v4, as `claude --session-id` requires.
@@ -193,6 +297,47 @@ mod tests {
         assert!(ev(r#"{"type":"stream_event","event":{"type":"message_stop"}}"#).is_none());
         assert!(ev(r#"{"type":"system","subtype":"init"}"#).is_none());
         assert!(ev(r#"{"type":"assistant","parent_tool_use_id":"toolu_1","message":{"content":[]}}"#).is_none());
+    }
+
+    #[test]
+    fn send_args_follow_settings() {
+        let mut c = Claude::default();
+        let args = send_args(&c, "id1", "hello", false);
+        assert_eq!(args[..2], ["--resume", "id1"]);
+        assert!(!args.contains(&"--model".to_owned()));
+        assert_eq!(args.last().unwrap(), "hello");
+        c.model = "opus".into();
+        let args = send_args(&c, "id2", "hi", true);
+        assert_eq!(args[..4], ["--session-id", "id2", "--model", "opus"]);
+        let mut s = crate::settings::Settings::default();
+        s.extra_args = " --permission-mode  acceptEdits ".into();
+        s.claude_path = "".into();
+        let c = Claude::from_settings(&s);
+        assert_eq!(c.bin, "claude");
+        assert_eq!(c.extra, ["--permission-mode", "acceptEdits"]);
+    }
+
+    /// Regression: Ctrl+C must end a run at once, children included, not when it finishes.
+    #[test]
+    fn stop_ends_a_run_and_its_children_quickly() {
+        let mut cmd = Command::new("sh");
+        cmd.args(["-c", "sleep 30 & echo '{\"type\":\"assistant\",\"message\":{\"content\":[]}}'; wait"]);
+        let ctx = eframe::egui::Context::default();
+        let (rx, stop) = spawn_stream(ctx, cmd);
+        let first = rx.recv_timeout(std::time::Duration::from_secs(5)).expect("first line");
+        assert!(matches!(first, RunEvent::Line(_)));
+        let started = std::time::Instant::now();
+        stop.stop();
+        loop {
+            match rx.recv_timeout(std::time::Duration::from_secs(5)).expect("done after stop") {
+                RunEvent::Done(r) => {
+                    assert!(r.is_err(), "a stopped run reports how it ended");
+                    break;
+                }
+                _ => continue,
+            }
+        }
+        assert!(started.elapsed() < std::time::Duration::from_secs(3), "took {:?}", started.elapsed());
     }
 
     #[test]

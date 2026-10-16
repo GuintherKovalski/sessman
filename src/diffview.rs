@@ -175,7 +175,43 @@ fn diff_line(ui: &mut egui::Ui, line: &Line, lang: &str, pal: &Palette) {
 }
 
 /// Read-only file contents with line numbers and syntax highlighting.
-pub fn file_view(ui: &mut egui::Ui, path: &str, contents: &Result<String, String>) {
+/// How files are shown, from the Settings page.
+pub struct FileOptions {
+    pub line_numbers: bool,
+    pub wrap: bool,
+    pub tab_width: usize,
+    pub font_size: f32,
+}
+
+/// Tabs as spaces, so they line up with the tab width setting.
+pub fn expand_tabs(text: &str, width: usize) -> std::borrow::Cow<'_, str> {
+    if !text.contains('\t') {
+        return text.into();
+    }
+    let mut out = String::with_capacity(text.len());
+    let mut col = 0;
+    for c in text.chars() {
+        match c {
+            '\t' => {
+                let n = width.max(1) - col % width.max(1);
+                out.extend(std::iter::repeat_n(' ', n));
+                col += n;
+            }
+            '\n' => {
+                out.push(c);
+                col = 0;
+            }
+            _ => {
+                out.push(c);
+                col += 1;
+            }
+        }
+    }
+    out.into()
+}
+
+/// A read-only file with line numbers and syntax highlighting. `id` keeps its scroll position.
+pub fn file_view(ui: &mut egui::Ui, path: &str, contents: &Result<String, String>, opts: &FileOptions, id: impl std::hash::Hash + std::fmt::Debug) {
     let pal = theme::palette(ui.visuals());
     ui.label(RichText::new(path).weak().monospace());
     ui.add_space(4.0);
@@ -186,15 +222,21 @@ pub fn file_view(ui: &mut egui::Ui, path: &str, contents: &Result<String, String
             return;
         }
     };
-    let font = FontId::monospace(12.5);
+    let text = expand_tabs(text, opts.tab_width);
+    let font = FontId::monospace(opts.font_size);
     let theme = CodeTheme::from_memory(ui.ctx(), ui.style()).with_font_id(font.clone());
-    let job = highlight(ui.ctx(), ui.style(), &theme, text, language(path));
+    let job = highlight(ui.ctx(), ui.style(), &theme, &text, language(path));
     let count = text.lines().count().max(1);
     let numbers: String = (1..=count).map(|n| format!("{n:>5}\n")).collect();
-    egui::ScrollArea::both().auto_shrink(false).show(ui, |ui| {
+    let scroll = if opts.wrap { egui::ScrollArea::vertical() } else { egui::ScrollArea::both() };
+    scroll.id_salt(id).auto_shrink(false).show(ui, |ui| {
         ui.horizontal_top(|ui| {
-            ui.label(RichText::new(numbers).font(font).color(pal.line_number));
-            ui.add(egui::Label::new(job).wrap_mode(TextWrapMode::Extend).selectable(true));
+            // Line numbers only line up with unwrapped lines.
+            if opts.line_numbers && !opts.wrap {
+                ui.label(RichText::new(numbers).font(font).color(pal.line_number));
+            }
+            let mode = if opts.wrap { TextWrapMode::Wrap } else { TextWrapMode::Extend };
+            ui.add(egui::Label::new(job).wrap_mode(mode).selectable(true));
         });
     });
 }
@@ -214,6 +256,13 @@ mod tests {
 
     fn change(file: &str, old: &str, new: &str) -> Change {
         Change { file: file.into(), old: old.into(), new: new.into() }
+    }
+
+    #[test]
+    fn tabs_expand_to_the_next_stop() {
+        assert_eq!(expand_tabs("a\tb\n\tc", 4), "a   b\n    c");
+        assert_eq!(expand_tabs("ab\tc", 2), "ab  c");
+        assert!(matches!(expand_tabs("no tabs", 4), std::borrow::Cow::Borrowed(_)));
     }
 
     #[test]

@@ -11,7 +11,7 @@ fn home() -> PathBuf {
 }
 
 pub fn dir() -> PathBuf {
-    home().join(".config/sessman/status")
+    crate::settings::config_dir().join("status")
 }
 
 fn settings_path() -> PathBuf {

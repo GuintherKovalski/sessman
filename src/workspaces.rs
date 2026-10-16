@@ -8,6 +8,9 @@ pub struct Workspace {
     /// RGB. Optional so files from before colors existed still load; filled in on load.
     #[serde(default)]
     pub color: Option<[u8; 3]>,
+    /// Session last open in this workspace, opened again when the workspace is selected.
+    #[serde(default)]
+    pub last: Option<String>,
 }
 
 const PALETTE: [[u8; 3]; 10] = [
@@ -27,11 +30,14 @@ const PALETTE: [[u8; 3]; 10] = [
 #[derive(Serialize, Deserialize, Default, Debug, PartialEq)]
 pub struct Workspaces {
     pub list: Vec<Workspace>,
+    /// Session last open in "All sessions".
+    #[serde(default)]
+    pub last_all: Option<String>,
 }
 
 impl Workspaces {
     pub fn path() -> PathBuf {
-        PathBuf::from(std::env::var("HOME").unwrap_or_default()).join(".config/sessman/workspaces.json")
+        crate::settings::config_dir().join("workspaces.json")
     }
 
     pub fn load(path: &Path) -> Self {
@@ -75,7 +81,7 @@ impl Workspaces {
             return None;
         }
         let color = Some(self.free_color());
-        self.list.push(Workspace { name: name.to_owned(), sessions: Vec::new(), color });
+        self.list.push(Workspace { name: name.to_owned(), sessions: Vec::new(), color, last: None });
         Some(self.list.len() - 1)
     }
 
@@ -93,11 +99,41 @@ impl Workspaces {
         }
     }
 
+    /// The session last open in a tab (None = All sessions).
+    pub fn last(&self, tab: Option<usize>) -> Option<&str> {
+        match tab {
+            None => self.last_all.as_deref(),
+            Some(w) => self.list.get(w).and_then(|w| w.last.as_deref()),
+        }
+    }
+
+    /// Remembers the session open in a tab. True if that changed (so it needs saving).
+    pub fn set_last(&mut self, tab: Option<usize>, session: &str) -> bool {
+        let slot = match tab {
+            None => &mut self.last_all,
+            Some(w) => match self.list.get_mut(w) {
+                Some(w) => &mut w.last,
+                None => return false,
+            },
+        };
+        if slot.as_deref() == Some(session) {
+            return false;
+        }
+        *slot = Some(session.to_owned());
+        true
+    }
+
     pub fn delete(&mut self, ws: usize) {
         if ws < self.list.len() {
             self.list.remove(ws);
         }
     }
+}
+
+/// Which session to open when a tab is selected: the one last open there if it is still in
+/// the tab, else the most recent (`ids` is newest first). None for an empty tab.
+pub fn pick_session(last: Option<&str>, ids: &[&str]) -> Option<usize> {
+    last.and_then(|l| ids.iter().position(|id| *id == l)).or((!ids.is_empty()).then_some(0))
 }
 
 /// Saturated, medium-bright color for a hue in degrees.
@@ -119,6 +155,28 @@ fn hue_to_rgb(hue: f32) -> [u8; 3] {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn each_tab_remembers_its_last_session() {
+        let mut w = Workspaces::default();
+        let a = w.add("a").unwrap();
+        assert!(w.set_last(Some(a), "s1"));
+        assert!(!w.set_last(Some(a), "s1"), "unchanged: nothing to save");
+        assert!(w.set_last(None, "s9"));
+        assert!(!w.set_last(Some(7), "s1"));
+        assert_eq!((w.last(Some(a)), w.last(None), w.last(Some(7))), (Some("s1"), Some("s9"), None));
+        // Older files without `last` still load.
+        let old: Workspaces = serde_json::from_str(r#"{"list":[{"name":"x","sessions":[]}]}"#).unwrap();
+        assert_eq!(old.last(Some(0)), None);
+    }
+
+    #[test]
+    fn picks_last_session_else_newest_else_none() {
+        assert_eq!(pick_session(Some("b"), &["a", "b"]), Some(1));
+        assert_eq!(pick_session(Some("gone"), &["a", "b"]), Some(0));
+        assert_eq!(pick_session(None, &["a"]), Some(0));
+        assert_eq!(pick_session(Some("a"), &[]), None);
+    }
 
     #[test]
     fn move_keeps_session_in_one_workspace() {

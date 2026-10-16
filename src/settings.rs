@@ -1,0 +1,394 @@
+use eframe::egui::{self, RichText, ThemePreference};
+use serde::{Deserialize, Serialize};
+use std::path::{Path, PathBuf};
+
+/// sessman's own folder: `~/.config/sessman`, or `$SESSMAN_CONFIG` (used to run a test copy
+/// of the app next to the real one).
+pub fn config_dir() -> PathBuf {
+    match std::env::var_os("SESSMAN_CONFIG") {
+        Some(dir) => PathBuf::from(dir),
+        None => PathBuf::from(std::env::var("HOME").unwrap_or_default()).join(".config/sessman"),
+    }
+}
+
+pub fn path() -> PathBuf {
+    config_dir().join("settings.json")
+}
+
+/// Everything on the Settings page. Missing keys take their default, so older files (which
+/// only had `theme`) still load.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+#[serde(default)]
+pub struct Settings {
+    /// "dark", "light" or "system".
+    pub theme: String,
+    pub zoom: f32,
+    pub mono_size: f32,
+    /// Send with Cmd/Ctrl+Enter; plain Enter then adds a new line.
+    pub send_with_modifier: bool,
+    /// Lines the prompt input grows to before it scrolls.
+    pub input_max_lines: usize,
+    /// Keep what is typed in the input per session, when switching sessions.
+    pub drafts_per_session: bool,
+    pub show_tool_lines: bool,
+    pub line_numbers: bool,
+    pub wrap_file_lines: bool,
+    pub tab_width: usize,
+    pub markdown_rendered: bool,
+    pub claude_path: String,
+    /// Model for prompts; empty = Claude Code's default.
+    pub model: String,
+    /// Model for search, goals and refine.
+    pub helper_model: String,
+    /// Extra arguments for `claude -p`, split on spaces.
+    pub extra_args: String,
+    /// Where the New session folder picker starts; empty = the open session's folder.
+    pub default_folder: String,
+    pub confirm_delete_workspace: bool,
+    pub restore_state: bool,
+    pub notify_when_done: bool,
+}
+
+impl Default for Settings {
+    fn default() -> Self {
+        Self {
+            theme: "system".into(),
+            zoom: 0.6,
+            mono_size: 15.0,
+            send_with_modifier: false,
+            input_max_lines: 10,
+            drafts_per_session: true,
+            show_tool_lines: true,
+            line_numbers: true,
+            wrap_file_lines: false,
+            tab_width: 4,
+            markdown_rendered: true,
+            claude_path: "claude".into(),
+            model: String::new(),
+            helper_model: "haiku".into(),
+            extra_args: String::new(),
+            default_folder: String::new(),
+            confirm_delete_workspace: true,
+            restore_state: true,
+            notify_when_done: false,
+        }
+    }
+}
+
+impl Settings {
+    pub fn load(path: &Path) -> Self {
+        std::fs::read_to_string(path).ok().and_then(|s| serde_json::from_str(&s).ok()).unwrap_or_default()
+    }
+
+    pub fn save(&self, path: &Path) -> std::io::Result<()> {
+        if let Some(dir) = path.parent() {
+            std::fs::create_dir_all(dir)?;
+        }
+        std::fs::write(path, serde_json::to_string_pretty(self)?)
+    }
+
+    pub fn theme(&self) -> ThemePreference {
+        match self.theme.as_str() {
+            "dark" => ThemePreference::Dark,
+            "light" => ThemePreference::Light,
+            _ => ThemePreference::System,
+        }
+    }
+
+    /// Zoom, font size and theme, applied to egui.
+    pub fn apply(&self, ctx: &egui::Context) {
+        ctx.set_theme(self.theme());
+        ctx.set_zoom_factor(self.zoom.clamp(0.5, 3.0));
+        ctx.all_styles_mut(|style| {
+            if let Some(font) = style.text_styles.get_mut(&egui::TextStyle::Monospace) {
+                font.size = self.mono_size.clamp(8.0, 32.0);
+            }
+        });
+    }
+}
+
+/// Keyboard shortcuts, listed on the Settings page.
+pub fn shortcuts(s: &Settings) -> Vec<(&'static str, String)> {
+    let cmd = if cfg!(target_os = "macos") { "Cmd" } else { "Ctrl" };
+    let (send, newline, refine) = if s.send_with_modifier {
+        (format!("{cmd}+Enter"), "Enter / Shift+Enter".to_owned(), format!("{cmd}+Shift+Enter"))
+    } else {
+        ("Enter".to_owned(), "Shift+Enter".to_owned(), format!("{cmd}+Enter"))
+    };
+    vec![
+        ("Send the prompt (queued while Claude works)", send),
+        ("New line in the prompt", newline),
+        ("Refine the prompt", refine),
+        ("Stop Claude", "Ctrl+C".to_owned()),
+        ("Previous / next prompt (or pull back a queued one)", "Up / Down".to_owned()),
+        ("Open settings", format!("{cmd}+,")),
+        ("Undo refine", format!("{cmd}+Z")),
+        ("Close a file tab", "Middle-click".to_owned()),
+        ("Search sessions with Haiku", "Enter in the search field".to_owned()),
+    ]
+}
+
+/// What the Settings page shows besides the settings themselves.
+pub struct About<'a> {
+    pub status_line: &'a str,
+}
+
+/// True if `query` matches a setting's label or section (case-insensitive, every word).
+pub fn matches(query: &str, section: &str, label: &str) -> bool {
+    let hay = format!("{section} {label}").to_lowercase();
+    query.split_whitespace().all(|w| hay.contains(&w.to_lowercase()))
+}
+
+/// The Settings page. Returns true when a setting changed (to save and apply it).
+pub fn ui(ui: &mut egui::Ui, s: &mut Settings, filter: &mut String, about: &About) -> bool {
+    let before = s.clone();
+    let defaults = Settings::default();
+    ui.horizontal(|ui| {
+        ui.heading("Settings");
+        ui.add_space(12.0);
+        ui.add(egui::TextEdit::singleline(filter).hint_text("🔍 Search settings").desired_width(260.0));
+    });
+    ui.label(RichText::new(format!("Saved to {}", path().display())).weak().small());
+    ui.separator();
+    let q = filter.trim().to_owned();
+    egui::ScrollArea::vertical().id_salt("settings").auto_shrink(false).show(ui, |ui| {
+        let mut page = Page { ui, q: &q, section: "", headed: "", shown: false };
+
+        page.section("Appearance");
+        page.row("Theme", "Dark, light, or follow the system", s.theme != defaults.theme, |ui, reset| {
+            if reset {
+                s.theme = defaults.theme.clone();
+            }
+            for (v, label) in [("dark", "🌙 Dark"), ("light", "☀ Light"), ("system", "💻 System")] {
+                ui.selectable_value(&mut s.theme, v.to_owned(), label);
+            }
+        });
+        page.row("Zoom", "Size of everything in the window", s.zoom != defaults.zoom, |ui, reset| {
+            if reset {
+                s.zoom = defaults.zoom;
+            }
+            ui.add(egui::Slider::new(&mut s.zoom, 0.6..=2.0).step_by(0.05).fixed_decimals(2));
+        });
+        page.row("Monospace font size", "Prompt input, code and files", s.mono_size != defaults.mono_size, |ui, reset| {
+            if reset {
+                s.mono_size = defaults.mono_size;
+            }
+            ui.add(egui::Slider::new(&mut s.mono_size, 9.0..=20.0).step_by(0.5));
+        });
+
+        page.section("Prompt input");
+        page.row("Send with Cmd/Ctrl+Enter", "Off: Enter sends. On: Enter adds a new line", s.send_with_modifier != defaults.send_with_modifier, |ui, reset| {
+            if reset {
+                s.send_with_modifier = defaults.send_with_modifier;
+            }
+            ui.checkbox(&mut s.send_with_modifier, "");
+        });
+        page.row("Maximum height (lines)", "The input grows up to this, then scrolls", s.input_max_lines != defaults.input_max_lines, |ui, reset| {
+            if reset {
+                s.input_max_lines = defaults.input_max_lines;
+            }
+            ui.add(egui::Slider::new(&mut s.input_max_lines, 2..=40));
+        });
+        page.row("Keep a draft per session", "What you type stays with its session when you switch", s.drafts_per_session != defaults.drafts_per_session, |ui, reset| {
+            if reset {
+                s.drafts_per_session = defaults.drafts_per_session;
+            }
+            ui.checkbox(&mut s.drafts_per_session, "");
+        });
+
+        page.section("Conversation");
+        page.row("Show tool lines", "The dimmed ⚙ Read · Edit lines between messages", s.show_tool_lines != defaults.show_tool_lines, |ui, reset| {
+            if reset {
+                s.show_tool_lines = defaults.show_tool_lines;
+            }
+            ui.checkbox(&mut s.show_tool_lines, "");
+        });
+
+        page.section("Files");
+        page.row("Line numbers", "In open files", s.line_numbers != defaults.line_numbers, |ui, reset| {
+            if reset {
+                s.line_numbers = defaults.line_numbers;
+            }
+            ui.checkbox(&mut s.line_numbers, "");
+        });
+        page.row("Wrap long lines", "Off: scroll sideways", s.wrap_file_lines != defaults.wrap_file_lines, |ui, reset| {
+            if reset {
+                s.wrap_file_lines = defaults.wrap_file_lines;
+            }
+            ui.checkbox(&mut s.wrap_file_lines, "");
+        });
+        page.row("Tab width", "Spaces shown for a tab character", s.tab_width != defaults.tab_width, |ui, reset| {
+            if reset {
+                s.tab_width = defaults.tab_width;
+            }
+            ui.add(egui::Slider::new(&mut s.tab_width, 1..=8));
+        });
+        page.row("Open Markdown rendered", "Off: .md files open as source", s.markdown_rendered != defaults.markdown_rendered, |ui, reset| {
+            if reset {
+                s.markdown_rendered = defaults.markdown_rendered;
+            }
+            ui.checkbox(&mut s.markdown_rendered, "");
+        });
+
+        page.section("Claude");
+        page.row("claude command", "Path to the Claude Code CLI", s.claude_path != defaults.claude_path, |ui, reset| {
+            if reset {
+                s.claude_path = defaults.claude_path.clone();
+            }
+            ui.add(egui::TextEdit::singleline(&mut s.claude_path).desired_width(260.0));
+        });
+        page.row("Model for prompts", "e.g. opus, sonnet; empty = Claude Code's default", s.model != defaults.model, |ui, reset| {
+            if reset {
+                s.model = defaults.model.clone();
+            }
+            ui.add(egui::TextEdit::singleline(&mut s.model).hint_text("default").desired_width(260.0));
+        });
+        page.row("Helper model", "Search, goals and Refine", s.helper_model != defaults.helper_model, |ui, reset| {
+            if reset {
+                s.helper_model = defaults.helper_model.clone();
+            }
+            ui.add(egui::TextEdit::singleline(&mut s.helper_model).desired_width(260.0));
+        });
+        page.row("Extra arguments", "Added to every claude -p, e.g. --permission-mode acceptEdits", s.extra_args != defaults.extra_args, |ui, reset| {
+            if reset {
+                s.extra_args = defaults.extra_args.clone();
+            }
+            ui.add(egui::TextEdit::singleline(&mut s.extra_args).desired_width(260.0));
+        });
+        page.row("Default folder for new sessions", "Where the folder picker starts; empty = the open session's folder", s.default_folder != defaults.default_folder, |ui, reset| {
+            if reset {
+                s.default_folder = defaults.default_folder.clone();
+            }
+            ui.add(egui::TextEdit::singleline(&mut s.default_folder).desired_width(260.0));
+        });
+
+        page.section("Behaviour");
+        page.row("Confirm before deleting a workspace", "", s.confirm_delete_workspace != defaults.confirm_delete_workspace, |ui, reset| {
+            if reset {
+                s.confirm_delete_workspace = defaults.confirm_delete_workspace;
+            }
+            ui.checkbox(&mut s.confirm_delete_workspace, "");
+        });
+        page.row("Restore the previous state at start", "Open session, tabs, drafts and queues", s.restore_state != defaults.restore_state, |ui, reset| {
+            if reset {
+                s.restore_state = defaults.restore_state;
+            }
+            ui.checkbox(&mut s.restore_state, "");
+        });
+        page.row("Notify when a run finishes", "A system notification, while sessman is in the background", s.notify_when_done != defaults.notify_when_done, |ui, reset| {
+            if reset {
+                s.notify_when_done = defaults.notify_when_done;
+            }
+            ui.checkbox(&mut s.notify_when_done, "");
+        });
+
+        page.section("Keyboard shortcuts");
+        for (what, keys) in shortcuts(s) {
+            page.row(what, "", false, |ui, _| {
+                ui.label(RichText::new(&keys).monospace());
+            });
+        }
+
+        page.section("About");
+        page.row("Version", "", false, |ui, _| {
+            ui.label(env!("CARGO_PKG_VERSION"));
+        });
+        page.row("Config folder", "", false, |ui, _| {
+            let dir = config_dir();
+            ui.label(RichText::new(dir.display().to_string()).monospace());
+            if ui.small_button("Open in Finder").clicked() {
+                let _ = std::process::Command::new("open").arg(&dir).spawn();
+            }
+        });
+        page.row("Status line (usage limits)", "", false, |ui, _| {
+            ui.label(about.status_line);
+        });
+        if !page.shown {
+            page.ui.label("No setting matches.");
+        }
+    });
+    *s != before
+}
+
+/// Lays out sections and rows, skipping the ones the search filters out.
+struct Page<'a, 'q> {
+    ui: &'a mut egui::Ui,
+    q: &'q str,
+    section: &'static str,
+    /// Section whose heading was drawn last.
+    headed: &'static str,
+    shown: bool,
+}
+
+impl Page<'_, '_> {
+    fn section(&mut self, name: &'static str) {
+        self.section = name;
+    }
+
+    /// One setting: label, its control, a reset button when it differs from the default, help.
+    /// `add` is called again with `true` when reset is clicked.
+    fn row(&mut self, label: &str, help: &str, changed: bool, mut add: impl FnMut(&mut egui::Ui, bool)) {
+        if !matches(self.q, self.section, &format!("{label} {help}")) {
+            return;
+        }
+        if self.headed != self.section {
+            self.headed = self.section;
+            self.ui.add_space(12.0);
+            self.ui.label(RichText::new(self.section).strong().size(15.0));
+            self.ui.add_space(2.0);
+        }
+        self.shown = true;
+        // Wraps when the main area is narrow (side panels wide, or a big zoom).
+        self.ui.horizontal_wrapped(|ui| {
+            ui.allocate_ui_with_layout(egui::vec2(300.0, 20.0), egui::Layout::left_to_right(egui::Align::Center), |ui| {
+                ui.set_min_width(300.0);
+                ui.add(egui::Label::new(label).truncate());
+            });
+            add(ui, false);
+            if changed && ui.small_button("↺").on_hover_text("Reset to default").clicked() {
+                add(&mut ui.new_child(egui::UiBuilder::new().invisible()), true);
+            }
+            if !help.is_empty() {
+                ui.label(RichText::new(help).weak().small());
+            }
+        });
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn old_theme_only_file_loads_with_defaults() {
+        let path = std::env::temp_dir().join(format!("sessman-settings-{}.json", std::process::id()));
+        std::fs::write(&path, r#"{"theme":"dark"}"#).unwrap();
+        let s = Settings::load(&path);
+        assert_eq!(s.theme(), ThemePreference::Dark);
+        assert_eq!(s.helper_model, "haiku");
+        assert!(s.restore_state);
+        let mut s2 = s.clone();
+        s2.zoom = 1.25;
+        s2.save(&path).unwrap();
+        assert_eq!(Settings::load(&path), s2);
+        std::fs::write(&path, "not json").unwrap();
+        assert_eq!(Settings::load(&path), Settings::default());
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn search_matches_label_or_section_words() {
+        assert!(matches("", "Files", "Tab width"));
+        assert!(matches("tab", "Files", "Tab width"));
+        assert!(matches("files WIDTH", "Files", "Tab width"));
+        assert!(!matches("zoom", "Files", "Tab width"));
+    }
+
+    #[test]
+    fn shortcuts_follow_the_send_setting() {
+        let mut s = Settings::default();
+        assert!(shortcuts(&s).iter().any(|(_, k)| k == "Enter"));
+        s.send_with_modifier = true;
+        assert!(shortcuts(&s).iter().any(|(w, k)| w.starts_with("Refine") && k.ends_with("Shift+Enter")));
+    }
+}

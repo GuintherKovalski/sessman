@@ -2,16 +2,30 @@
 
 A small desktop app for browsing and continuing Claude Code sessions.
 
-- **Left**: a **+ New session** button, then your sessions from `~/.claude/projects`, newest first (refreshes on its own), with workspace tabs (+ to create, drag or right-click → Move to). **Search** at the bottom: type to filter by name, goal, then content; Enter asks Haiku
-- **Center bottom**: a terminal-style prompt input that grows as you type (Shift+Enter for a new line). Up/Down walks through this session's previous prompts; Enter sends the prompt via `claude -p --resume <id>`, and Claude's progress streams in live
-- **Center**: the conversation as Markdown cards, with real tables and highlighted code (click anywhere to focus the input); `.md` files open rendered
-- **Theme**: dark / light / system switch next to the right panel's tabs
+- **Top**: a thin bar that holds the macOS window buttons (drag to move, double-click to zoom)
+- **Left**: a **+ New session** button (native folder picker), then your sessions from `~/.claude/projects`, newest first (refreshes on its own), with workspace tabs (+ to create, drag or right-click → Move to). **Search** at the bottom: type to filter by name, goal, then content; Enter asks Haiku
+- **Center bottom**: a terminal-style prompt input that grows upwards as you type (Shift+Enter for a new line), with a drag handle to resize or collapse it. Up/Down walks through this session's previous prompts; Enter sends the prompt via `claude -p --resume <id>`, and Claude's progress streams in live. While Claude works, Enter queues prompts (shown above the input) and **Ctrl+C** stops it at once. **✨ / Cmd+Enter** refines the prompt with a helper model, asking skippable questions when it is ambiguous. **🎤** dictates: click to start, click again to stop, and the speech is transcribed locally with Whisper and inserted at the cursor
+- **Center**: the conversation as Markdown cards, with real tables, highlighted code and clickable links (bare URLs too); click anywhere to focus the input. Files open in tabs that belong to their session; `.md` files open rendered
+- **Settings** (⚙ or Cmd+,): appearance, prompt input, files, Claude command and models, behaviour, shortcuts
+- **Restart-proof**: the open workspace and session, tabs, drafts, queues and layout come back after a restart; each workspace reopens its last session
 - **Right**: tabs. **Changes**: code changes grouped by file with syntax highlighting, and a file list (click to filter, double-click to open the file read-only in a main-area tab). **Info**: session goal with a subgoal checklist and a field to ask about it, model, context usage, usage limits
 
 ```sh
 cargo run --release
 cargo test
 ```
+
+Dictation (the 🎤 button by the prompt) needs a few things on macOS, once:
+
+- `brew install cmake`, which builds the Whisper engine (whisper.cpp, with Metal) for `cargo build`
+- The Whisper model, about 150 MB, in `~/.config/sessman/models/`:
+
+  ```sh
+  mkdir -p ~/.config/sessman/models
+  curl -L -o ~/.config/sessman/models/ggml-base.bin https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-base.bin
+  ```
+
+The first recording asks for microphone access. Linux is not supported yet.
 
 Specs, plan, and tasks are in `specs/001-session-manager-ui/` (Spec Kit). The open questions to
 settle by using the app are in `research.md`.
@@ -44,5 +58,18 @@ Known shortcomings of what's already built, to pick up as Spec Kit features late
 - **Switching back to a running session can show a step twice** until the run ends (the step
   was already on disk when the session reloaded and then arrived from the stream too); the
   reload at the end of the run fixes it.
+
+### Roadmap rounds 1–4 (`specs/012-roadmap-rounds-1-4/`)
+
+- **Testing with synthetic key events**: modifier keys sent by System Events (e.g. Shift+Enter)
+  sometimes arrive without the modifier, so automated UI checks use CGEvents with explicit
+  flags. Real keyboards are not affected.
+- **A few symbols** (→, ▾) are missing from egui's default font and render as boxes; sessman
+  avoids them in its own text (the input's collapse triangle is drawn), but they still show
+  as boxes inside conversations that contain them.
+- **A stopped run may add a "No response requested." reply** the next time the session runs:
+  that comes from Claude Code itself, after its interrupt marker.
+- **Selecting a very long session briefly blocks the window** while it loads (sessions are
+  read on the UI thread).
 
 See [PROJECT.md](PROJECT.md) for a full explanation of the app, how it works, and how it is built.

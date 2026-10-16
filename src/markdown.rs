@@ -2,6 +2,11 @@ use eframe::egui::{self, Align, FontId, Sense, Stroke, TextFormat, TextStyle};
 use eframe::egui::text::LayoutJob;
 use egui_commonmark::{CommonMarkCache, CommonMarkViewer};
 use pulldown_cmark::{Alignment, Event, Options, Parser, Tag, TagEnd};
+use std::borrow::Cow;
+use std::sync::atomic::{AtomicBool, Ordering};
+
+/// The "Show tool lines" setting.
+pub static SHOW_TOOLS: AtomicBool = AtomicBool::new(true);
 
 /// A message split into what sessman draws itself (tables, tool calls) and plain Markdown.
 #[derive(Debug, PartialEq)]
@@ -97,13 +102,14 @@ pub fn show(ui: &mut egui::Ui, cache: &mut CommonMarkCache, text: &str) {
     for (i, block) in blocks(text).into_iter().enumerate() {
         ui.push_id(i, |ui| match block {
             Block::Markdown(src) => {
-                CommonMarkViewer::new().show(ui, cache, src);
+                CommonMarkViewer::new().show(ui, cache, &linkify(src));
             }
             Block::Table(t) => {
                 ui.add_space(4.0);
                 egui::ScrollArea::horizontal().auto_shrink([false, true]).show(ui, |ui| table(ui, &t));
                 ui.add_space(4.0);
             }
+            Block::Tools(_) if !SHOW_TOOLS.load(Ordering::Relaxed) => {}
             Block::Tools(names) => {
                 let text = format!("⚙ {}", names.join(" · "));
                 ui.label(egui::RichText::new(text).monospace().small().weak());
@@ -204,7 +210,8 @@ fn inline(ui: &egui::Ui, src: &str, header: bool) -> (std::sync::Arc<egui::Galle
         f.valign = Align::Center;
         f
     };
-    for event in Parser::new_ext(src, options()) {
+    let src = linkify(src);
+    for event in Parser::new_ext(&src, options()) {
         match event {
             Event::Start(Tag::Strong) => strong = true,
             Event::End(TagEnd::Strong) => strong = header,
@@ -229,6 +236,78 @@ fn inline(ui: &egui::Ui, src: &str, header: bool) -> (std::sync::Arc<egui::Galle
         job.append(" ", 0.0, fmt(false, false, false, false, false));
     }
     (ui.painter().layout_job(job), first_link)
+}
+
+/// Bare URLs (`https://…`, `http://…`, `www.…`) in plain text become Markdown autolinks, so
+/// they render as clickable links. Code, existing links and HTML are left alone; trailing
+/// punctuation stays outside the link.
+pub fn linkify(text: &str) -> Cow<'_, str> {
+    // Byte ranges of plain text, adjacent text events merged (the parser splits at `_`, `*`…).
+    let mut ranges: Vec<std::ops::Range<usize>> = Vec::new();
+    let mut skip = 0; // inside a link, image or code block
+    for (event, range) in Parser::new_ext(text, options()).into_offset_iter() {
+        match event {
+            Event::Start(Tag::Link { .. } | Tag::Image { .. } | Tag::CodeBlock(_)) => skip += 1,
+            Event::End(TagEnd::Link | TagEnd::Image | TagEnd::CodeBlock) => skip -= 1,
+            Event::Text(t) if skip == 0 && text.get(range.clone()) == Some(&*t) => match ranges.last_mut() {
+                Some(last) if last.end == range.start => last.end = range.end,
+                _ => ranges.push(range),
+            },
+            _ => {}
+        }
+    }
+    let mut out = String::new();
+    let mut done = 0;
+    for r in ranges {
+        let mut i = r.start;
+        while i < r.end {
+            let rest = &text[i..r.end];
+            let starts = ["https://", "http://", "www."].iter().any(|p| rest.len() > p.len() && rest.get(..p.len()).is_some_and(|h| h.eq_ignore_ascii_case(p)));
+            let boundary = text[..i].chars().next_back().is_none_or(|c| !c.is_alphanumeric() && c != '/' && c != '@' && c != '.');
+            if !(starts && boundary) {
+                i += rest.chars().next().map_or(1, char::len_utf8);
+                continue;
+            }
+            let len = url_len(rest);
+            if len == 0 {
+                i += 1;
+                continue;
+            }
+            let url = &rest[..len];
+            out.push_str(&text[done..i]);
+            if url.to_ascii_lowercase().starts_with("www.") {
+                out.push_str(&format!("[{url}](https://{url})"));
+            } else {
+                out.push_str(&format!("<{url}>"));
+            }
+            i += len;
+            done = i;
+        }
+    }
+    if done == 0 {
+        return Cow::Borrowed(text);
+    }
+    out.push_str(&text[done..]);
+    Cow::Owned(out)
+}
+
+/// Length of the URL at the start of `s`: up to whitespace or a delimiter, minus trailing
+/// punctuation and unbalanced closing brackets.
+fn url_len(s: &str) -> usize {
+    let mut end = s.find(|c: char| c.is_whitespace() || matches!(c, '<' | '>' | '"' | '`' | '|')).unwrap_or(s.len());
+    loop {
+        let url = &s[..end];
+        let Some(last) = url.chars().next_back() else { return 0 };
+        let unbalanced = |open: char, close: char| last == close && url.matches(open).count() < url.matches(close).count();
+        if matches!(last, '.' | ',' | ';' | ':' | '!' | '?' | '\'' | '*' | '_' | '~') || unbalanced('(', ')') || unbalanced('[', ']') {
+            end -= last.len_utf8();
+        } else {
+            break;
+        }
+    }
+    // Just a scheme or "www." is not a link.
+    let url = &s[..end];
+    if url.ends_with("://") || url.eq_ignore_ascii_case("www.") { 0 } else { end }
 }
 
 pub fn is_markdown(path: &str) -> bool {
@@ -258,6 +337,41 @@ mod tests {
         let b = blocks("| A |\n|---|\n| **bold** `x` |\n");
         let Block::Table(t) = &b[0] else { panic!() };
         assert_eq!(t.rows[0][0], "**bold** `x`");
+    }
+
+    #[test]
+    fn bare_urls_become_links() {
+        assert_eq!(linkify("See https://example.com/a_b?x=1."), "See <https://example.com/a_b?x=1>.");
+        assert_eq!(linkify("(docs at https://x.dev/page) ok"), "(docs at <https://x.dev/page>) ok");
+        assert_eq!(linkify("https://en.wikipedia.org/wiki/Rust_(language)"), "<https://en.wikipedia.org/wiki/Rust_(language)>");
+        assert_eq!(linkify("go to www.rust-lang.org, now"), "go to [www.rust-lang.org](https://www.rust-lang.org), now");
+        assert_eq!(linkify("- item http://a.io\n> quote https://b.io"), "- item <http://a.io>\n> quote <https://b.io>");
+        assert_eq!(linkify("| a | https://t.io |"), "| a | <https://t.io> |");
+    }
+
+    /// Regression: multi-byte characters near the start of text made linkify panic.
+    #[test]
+    fn non_ascii_text_is_safe() {
+        assert_eq!(linkify("a – b — c ✓ ünïcödé 日本語"), "a – b — c ✓ ünïcödé 日本語");
+        assert_eq!(linkify("é https://x.io é"), "é <https://x.io> é");
+        assert_eq!(linkify("–https://x.io"), "–<https://x.io>");
+        assert_eq!(linkify("see https://x.io/ü–path."), "see <https://x.io/ü–path>.");
+    }
+
+    #[test]
+    fn code_and_existing_links_stay_as_they_are() {
+        for text in [
+            "`https://in.code`",
+            "```\nhttps://in.fence\n```",
+            "[label](https://x.io)",
+            "[https://shown.io](https://x.io)",
+            "<https://already.io>",
+            "no links here",
+            "mailto:me@www.example.com",
+            "https:// alone",
+        ] {
+            assert_eq!(linkify(text), text, "{text}");
+        }
     }
 
     #[test]

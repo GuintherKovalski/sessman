@@ -1,31 +1,4 @@
-use crate::names::Names;
-use eframe::egui::{Color32, ThemePreference, Visuals};
-use std::path::PathBuf;
-
-/// sessman's own settings (currently just the theme), as a key → value map.
-pub fn settings_path() -> PathBuf {
-    PathBuf::from(std::env::var("HOME").unwrap_or_default()).join(".config/sessman/settings.json")
-}
-
-pub fn load() -> ThemePreference {
-    match Names::load(&settings_path()).get("theme") {
-        Some("dark") => ThemePreference::Dark,
-        Some("light") => ThemePreference::Light,
-        _ => ThemePreference::System,
-    }
-}
-
-pub fn save(theme: ThemePreference) -> std::io::Result<()> {
-    let path = settings_path();
-    let mut settings = Names::load(&path);
-    let value = match theme {
-        ThemePreference::Dark => "dark",
-        ThemePreference::Light => "light",
-        ThemePreference::System => "system",
-    };
-    settings.set("theme", value);
-    settings.save(&path)
-}
+use eframe::egui::{Color32, Visuals};
 
 /// Colors that egui's visuals don't cover, in a dark and a light variant.
 pub struct Palette {

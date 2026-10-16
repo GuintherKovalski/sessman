@@ -9,6 +9,11 @@ there. Each change is specified first with Spec Kit (see [How the project is bui
 
 ## The window
 
+A thin bar runs along the top of the window, above everything else. The macOS close /
+minimize / zoom buttons sit in it (the content runs under a transparent title bar), so they
+never cover the panels, also in full screen. Drag the bar to move the window; double-click
+it to zoom.
+
 ```
 ┌──────────────────┬──────────────────────────────────────┬─────────────────────┐
 │ All │ A │ B │ +  │ ┌──────────────────────────────────┐ │ Changes │ Info  ☾☀▣ │
@@ -25,13 +30,17 @@ there. Each change is specified first with Spec Kit (see [How the project is bui
 ```
 
 ### Left: sessions and workspaces
-- **+ New session** (below the tabs, above the list): pick the folder Claude should work in (macOS folder picker,
-  starting at the current session's folder). The main area shows an empty new session; your
-  first prompt creates it, and it then appears at the top of the list, selected. If a
-  workspace tab is open, the new session joins that workspace.
+- **+ New session** (below the tabs, above the list): pick the folder Claude should work in (the
+  native macOS folder picker, which opens at once, starting at the default folder from Settings
+  or else the current session's folder). The main area shows an empty new session; your first
+  prompt creates it. It is listed at once (with ⏳) and becomes a normal, selected session as
+  soon as Claude has written its file. If a workspace tab is open, the new session joins that
+  workspace.
 - Lists every Claude Code session, newest first. Each row shows the session title (Claude's
   generated title, or your first prompt) and its project folder. The list refreshes on its
   own (every 10 s and after each reply), so sessions started elsewhere show up by themselves.
+  A session that is working shows ⏳, and `+N queued` when prompts are waiting for it.
+- **⚙** (next to the search, or **Cmd+,**) opens the Settings page in the main area.
 - **Search** (bottom of the panel): typing filters the list (within the open tab). Name
   matches come first, then goal summaries, then the conversations' own text (with a snippet
   under the name). Close spellings still match names and goals. **Enter** asks Claude Haiku
@@ -42,27 +51,38 @@ there. Each change is specified first with Spec Kit (see [How the project is bui
 - **Double-click** a session name to rename it, like a folder: the name is selected, type the
   new one, **Enter** (or click elsewhere) saves, **Escape** cancels. Saving an empty name
   brings back the original one. Names are sessman's own; Claude Code keeps its own title.
-- **Tabs** at the top: "All sessions", one tab per workspace, and **+**.
+- **Tabs** at the top: "All sessions", one tab per workspace, and **+**. Selecting a tab opens
+  the session that was last open in it (or its newest session; an empty workspace shows an
+  empty main area). Each tab remembers its last session across restarts.
   - **+** asks for a name and creates a workspace tab.
   - Drag a session onto a workspace tab to put it there (the tab is outlined while you hover).
   - Or right-click a session → **Move to** → pick a workspace.
   - Inside a workspace tab, right-click a session → **Remove from workspace**.
-  - Right-click a workspace tab → **Delete workspace** (the sessions themselves are untouched).
+  - Right-click a workspace tab → **Delete workspace** (asks first, unless turned off in
+    Settings; the sessions themselves are untouched).
   - A session belongs to at most one workspace; "All sessions" always shows everything.
   - Every workspace has its own color (no two share one). Its tab is tinted with it, and in
     "All sessions" each session in a workspace gets a colored stripe and tint (the ▌ above).
 
 ### Middle: conversation and file tabs
 - When a file is open, a tab bar appears on top: **Main** (the conversation) and one tab per
-  open file, with the active one highlighted and an `x` to close. Files are **read-only**, with
-  line numbers and syntax highlighting; text can be selected and copied. They reload whenever
-  the session reloads, so they show Claude's latest changes. Markdown files (`.md`) open
-  **rendered**; **Rendered / Source** at the top switches to the raw text.
+  open file, with the active one highlighted. Each tab has its `×` inside it (middle-click
+  closes too). Files are **read-only**, with line numbers and syntax highlighting; text can be
+  selected and copied. They reload whenever the session reloads, so they show Claude's latest
+  changes. Markdown files (`.md`) open **rendered**; **Rendered / Source** at the top switches
+  to the raw text.
+- **File tabs belong to their session.** Opening another session shows only its own tabs;
+  coming back brings yours back as they were (active tab, scroll position, Rendered / Source,
+  the Changes filter, and what you were typing).
 - **Click anywhere** in the main area to put the cursor in the prompt input, like a terminal.
   Opening a session also focuses it.
-- **Prompt input** at the bottom, styled like a terminal line (`>` prompt, monospace, dark
-  background, no buttons). With it focused:
-  - It grows as you type, up to about 10 lines, then scrolls. **Shift+Enter** starts a new line.
+- **Prompt input** at the bottom, styled like a terminal line (`>` prompt, monospace). With it
+  focused:
+  - It grows **upwards** as you type, up to 10 lines (a setting), then scrolls; the
+    conversation above shrinks. **Shift+Enter** starts a new line.
+  - The short bar on its top edge is a drag handle, like the side panels': drag it to make the
+    input taller or shorter; double-click it for the automatic size. The ▾ at its right
+    collapses the input to one line (▴ expands it). The size is kept across restarts.
   - **Up / Down** step through the prompts you sent earlier in this session (like shell
     history) while the input is a single line. Going past the newest brings back what you
     were typing.
@@ -70,13 +90,30 @@ there. Each change is specified first with Spec Kit (see [How the project is bui
     Claude's progress follows live: the reply as it is written, a `⚙ Tool…` line when a tool
     starts, and each finished step (and its file changes, in the Changes tab) before the
     whole run ends.
+  - **While Claude works, the input stays usable** and Enter **queues** the prompt. Queued
+    prompts are listed right above the input; each is sent when the run before it ends. `x`
+    removes one, clicking one moves it back into the input to edit, and **Up** in an empty
+    input pulls back the newest. Queues belong to their session.
+  - **Ctrl+C** (or the ⏹ button next to the spinner) stops Claude at once, like in the
+    terminal: claude and everything it started get SIGINT (SIGKILL 2 s later if still there).
+    What it had written stays, marked **⏹ Interrupted**; the stopped prompt comes back into
+    the input to fix and resend; the queue **pauses** (with **Resume queue**) so nothing else
+    is sent unasked. A failed run pauses the queue the same way.
+  - **✨ Refine** (the button at the input's right, or **Cmd+Enter**) asks the helper model
+    (Haiku by default) to rewrite the prompt clearly, using the session's goal and recent
+    prompts as context. If the prompt is ambiguous it first asks up to 3 questions above the
+    input, each with suggested answers, an "Other…" field and **Skip**; **Skip all** refines
+    with what is known. The refined text replaces the input for review; it is never sent by
+    itself. **Undo refine** (or **Cmd+Z**) brings back your text; **Esc** cancels a refine
+    in progress.
   - Several sessions can run at once: while one works (⏳ next to its name in the list), you
     can open another, or start a new one, and send it a prompt. Switching back to a working
     session shows what it has done so far and keeps streaming.
 - **Pinned "You"**: the prompt that the reply at the top of your view answers stays pinned
   above the conversation, so you always know what a long reply is about.
 - The conversation itself: one card per message (blue accent for you, orange for Claude),
-  rendered as Markdown: headings, lists, bold/italic, links (click to open in the browser),
+  rendered as Markdown: headings, lists, bold/italic, links, including bare URLs like
+  `https://…` and `www.…` (highlighted, underlined on hover, click to open in the browser),
   quotes, code blocks with syntax highlighting, and **tables** as real tables (bold header,
   aligned columns, scroll sideways when wide). Tool calls are a small dimmed line
   (`⚙ Read · Edit`). Only messages near the visible area are drawn, so long sessions scroll
@@ -92,8 +129,6 @@ there. Each change is specified first with Spec Kit (see [How the project is bui
   - **double-click** to open it in the main area (see below).
   Only edits made with Claude's Edit / MultiEdit / Write tools are known; changes made through
   shell commands don't show up here.
-- **Theme** (right of the tabs): 🌙 dark, ☀ light, 💻 follow the macOS appearance.
-  Remembered between runs.
 - **Info** (top to bottom):
   - **Goal**: until you click **Summarize goal** it shows the start of the first prompt. The
     button asks Claude Haiku (a little of your usage) for the goal plus a **checklist of 3–7
@@ -111,6 +146,29 @@ there. Each change is specified first with Spec Kit (see [How the project is bui
     Claude Code's `/btw`: nothing is added to the session. The answer shows just above the field
     until you click Dismiss.
 
+### Settings
+**⚙ Settings** opens as a tab in the main area (close it with its `×`). A search field filters
+the settings; each changed setting has a ↺ to reset it. Changes apply and save at once.
+- **Appearance**: theme (dark / light / system), zoom, monospace font size.
+- **Prompt input**: send with Cmd/Ctrl+Enter instead of Enter (Refine then moves to
+  Cmd+Shift+Enter), maximum height in lines, keep a draft per session.
+- **Conversation**: show or hide the `⚙ Read · Edit` tool lines.
+- **Files**: line numbers, wrap long lines, tab width, open Markdown rendered.
+- **Claude**: path to `claude`, model for prompts, helper model (search, goals, refine),
+  extra arguments for every `claude -p` (e.g. `--permission-mode acceptEdits`), default
+  folder for new sessions.
+- **Behaviour**: confirm before deleting a workspace, restore the previous state at start,
+  notify when a run finishes while sessman is in the background.
+- **Keyboard shortcuts** (a list) and **About** (version, config folder with Open in Finder,
+  status line).
+
+### Restarting
+Closing and opening sessman brings everything back: window size and position, panel widths,
+the input's size, the workspace tab and open session, every session's file tabs, scroll
+positions, drafts and queued prompts (queues come back paused), the right panel tab and the
+search text. Sessions or files that no longer exist are skipped; a damaged state file is
+moved aside (`state.json.bad`) and the app starts fresh.
+
 ## How it works
 
 | What | Where it comes from |
@@ -119,23 +177,30 @@ there. Each change is specified first with Spec Kit (see [How the project is bui
 | Session title | The `ai-title` entry in the session file, else the first prompt. |
 | Prompt history | The prompts you typed in that session (tool results and slash-command wrappers are skipped). |
 | Diffs | The `Edit` / `MultiEdit` / `Write` tool calls recorded in the session, diffed line by line. |
-| Sending a prompt | Runs `claude -p --resume <session-id> --output-format stream-json --verbose --include-partial-messages "<prompt>"` in the session's folder, in the background; its streamed lines update the open conversation as they arrive. |
+| Sending a prompt | Runs `claude -p [extra args] --resume <session-id> [--model <m>] --output-format stream-json --verbose --include-partial-messages "<prompt>"` in the session's folder, in its own process group, in the background; its streamed lines update the open conversation as they arrive. |
+| Stopping (Ctrl+C) | SIGINT to that process group (SIGKILL after 2 s). Claude Code saves the partial reply and an `[Request interrupted by user]` marker, shown as ⏹ Interrupted. |
+| Queue | Kept per session in memory and in `state.json`; the next prompt is sent when a run ends normally. |
+| Refine | `claude -p --model <helper> --no-session-persistence` with the prompt, the goal and the last 3 prompts; it answers in JSON with either the refined prompt or up to 3 questions. |
 | New session | Runs `claude -p --session-id <new uuid> "<first prompt>"` in the chosen folder. |
 | Model, context tokens | The latest reply's `model` and `usage` in the session file. |
 | Context size, usage limits | Claude Code's status-line data, saved by `sessman statusline` to `~/.config/sessman/status/`. Without it, the size is inferred from the model. |
 | Search | An in-memory index (names, goals, conversation text) rebuilt in the background for changed files every 10 s. Enter-search: `claude -p --model haiku --no-session-persistence` with a numbered list of recent sessions (name, goal, first prompts). |
 | Goal and checklist | `claude -p --model haiku --no-session-persistence` with a digest of the conversation, on request; saved (with your ticks) to `~/.config/sessman/goals.json`. |
 | Goal questions | `claude -p --resume <id> --fork-session --no-session-persistence "<question>"`: full context, original session untouched, nothing saved. |
-| Theme | sessman's own file: `~/.config/sessman/settings.json`. |
+| Settings (theme included) | sessman's own file: `~/.config/sessman/settings.json`. |
+| App state | `~/.config/sessman/state.json` (sessions' tabs, drafts, queues, layout) and `window.ron` (window, panel sizes, scroll positions, saved by eframe). Saved every 2 s when changed and on quit. |
+| Bare URLs | Turned into Markdown autolinks before rendering (not inside code or existing links). |
 | Workspaces and their colors | sessman's own file: `~/.config/sessman/workspaces.json`. |
 | Custom session names | sessman's own file: `~/.config/sessman/names.json`. |
 
 sessman never writes to Claude's session files. Everything it adds (workspaces, names, goals,
-theme, status data) lives in its own config folder. The one exception is the opt-in **Enable** button,
+settings, app state, status data) lives in its own config folder (`$SESSMAN_CONFIG` overrides
+it, e.g. to run a test copy next to your own). The one exception is the opt-in **Enable** button,
 which sets `statusLine` in `~/.claude/settings.json` and nothing else.
 
 ### Current limitations
-- `claude -p` is non-interactive, so tools that need your approval are refused.
+- `claude -p` is non-interactive, so tools that need your approval are refused (Settings →
+  Extra arguments can pass a permission mode).
 - You can't rename or reorder workspaces (sessions can be renamed).
 
 Known gaps in the newer features are listed in [README.md](README.md#gaps).
@@ -146,15 +211,19 @@ Planned features for the next rounds are in [ROADMAP.md](ROADMAP.md).
 ```
 src/
 ├── main.rs        window setup
-├── app.rs         the three panels, tabs, drag-and-drop, context menus, pinned prompt
+├── app.rs         the panels, tabs, drag-and-drop, prompt input (queue, stop, refine), pinned prompt
 ├── session.rs     finds and parses Claude Code session files
 ├── history.rs     Up/Down prompt history
 ├── names.rs       custom session names and goals
 ├── goal.rs        goal + subgoal checklist format
 ├── diffview.rs    changes grouped by file, diff cards, read-only file viewer
 ├── markdown.rs    Markdown rendering: tables and tool lines drawn by sessman, the rest by egui_commonmark
-├── theme.rs       dark / light / system preference and the colors for each
-├── runner.rs      runs `claude -p` (streaming send, new session, Haiku questions), folder picker
+├── theme.rs       the colors for dark and light
+├── settings.rs    the Settings page, its file, and the config folder
+├── state.rs       what is restored after a restart; per-session views (file tabs, draft)
+├── queue.rs       prompts waiting for a session's run
+├── refine.rs      Refine prompt: the request to the helper model and its reply
+├── runner.rs      runs `claude -p` (streaming send, stop, helper questions), folder picker, notifications
 ├── search.rs      session search: background index, matching and ranking, Haiku search format
 ├── status.rs      `sessman statusline`: saves Claude Code's status data; usage limits
 └── workspaces.rs  workspaces: create, move, remove, delete, load/save
@@ -162,11 +231,12 @@ src/
 
 Built with [egui/eframe](https://github.com/emilk/egui) (GUI), `egui_extras` + `syntect`
 (syntax highlighting), `egui_commonmark` + `pulldown-cmark` (Markdown), `serde_json` (parsing),
-`similar` (diffs).
+`similar` (diffs), `objc2-app-kit` (the native folder picker; already used by the window
+library), `libc` (stopping a run's process group).
 
 ```sh
 cargo run --release   # start the app
-cargo test            # parsing, history and workspace tests
+cargo test            # parsing, history, workspaces, queue, state, refine, links, stop
 ```
 
 ## How the project is built
@@ -188,6 +258,7 @@ spec → plan → tasks → implementation, and the documents stay in the repo:
 | `specs/009-changes-by-file-file-tabs/` | Changes by file with highlighting, file list, read-only file tabs |
 | `specs/010-markdown-rendering-themes/` | Markdown and tables in the conversation, rendered `.md` files, message cards, themes |
 | `specs/011-search-live-progress-multiline/` | Session search (live + Haiku), live progress while Claude works, growing prompt input, no header |
+| `specs/012-roadmap-rounds-1-4/` | The 12 items of [ROADMAP.md](ROADMAP.md): links, tabs, input, top bar, per-session state, restore, Ctrl+C, queue, Settings, Refine |
 
 Each feature folder has `spec.md` (what and why), `plan.md` (how), and `tasks.md` (the
 checklist that was implemented). `specs/001-session-manager-ui/research.md` lists open

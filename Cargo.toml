@@ -4,10 +4,18 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
-eframe = "0.36"
+eframe = { version = "0.36", features = ["persistence"] }
 egui_commonmark = { version = "0.25", default-features = false, features = ["pulldown_cmark", "better_syntax_highlighting"] }
 egui_extras = { version = "0.36", features = ["syntect"] }
+libc = "0.2"
 pulldown-cmark = { version = "0.13", default-features = false }
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = { version = "1.0.154", features = ["preserve_order"] }
 similar = "3.2.0"
+
+[target.'cfg(target_os = "macos")'.dependencies]
+cpal = "0.16"
+whisper-rs = { version = "0.15", features = ["metal"] }
+objc2 = "0.6"
+objc2-foundation = { version = "0.3", features = ["NSString", "NSURL", "NSArray"] }
+objc2-app-kit = { version = "0.3", features = ["NSOpenPanel", "NSSavePanel", "NSPanel", "NSWindow", "NSResponder", "NSApplication"] }

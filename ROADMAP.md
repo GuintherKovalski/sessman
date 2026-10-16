@@ -4,7 +4,27 @@ Features for the next rounds. Each one is meant to go through Spec Kit like the 
 (`/speckit-specify` with the text under its heading as the starting description). The rounds
 are a suggested order: small UI fixes first, then the features that build on them.
 
-## Round 1: UI polish
+All 12 items are implemented (`specs/012-roadmap-rounds-1-4/`); PROJECT.md describes how they
+work now.
+
+## Overview
+
+| # | Round | Feature | In short | Depends on | Status |
+|---|-------|---------|----------|------------|--------|
+| 1 | 1 | [Clickable URLs in replies](#1-clickable-urls-in-replies) | Bare URLs highlighted and open in the browser | | Done |
+| 2 | 1 | [File tab close button](#2-file-tab-close-button-attached-to-its-tab) | The `x` is part of its tab | | Done |
+| 3 | 1 | [Prompt input grows up, resizable](#3-prompt-input-grows-upwards-and-can-be-resized) | Grows upwards; drag to resize or collapse | | Done |
+| 4 | 1 | [Top bar for macOS window buttons](#4-top-bar-clear-of-the-macos-window-buttons) | Empty bar so close / minimize don't cover the UI | | Done |
+| 5 | 1 | [Faster new workspace](#5-opening-a-new-workspace-is-faster) | Folder picker and new session ready at once | | Done |
+| 6 | 1 | [File tabs per session](#6-file-tabs-belong-to-their-session) | Each session shows only its own file tabs | | Done |
+| 7 | 1 | [Workspace opens its last session](#7-selecting-a-workspace-opens-its-last-session) | Selecting a workspace switches to its last session | 6 | Done |
+| 8 | 1 | [Save and restore state](#8-the-whole-state-is-saved-and-restored-on-restart) | Everything comes back after a restart | 3, 6, 7 | Done |
+| 9 | 2 | [Ctrl+C stops Claude](#9-ctrlc-stops-claude-immediately-like-in-the-terminal) | Kills the run at once, prompt back to the input | | Done |
+| 10 | 2 | [Prompt queue](#10-input-stays-usable-while-claude-works-enter-queues-the-prompt) | Input never blocked; Enter queues while Claude works | 9 | Done |
+| 11 | 3 | [Settings page](#11-settings-page) | IDE-style settings in the main area | 8 | Done (3 settings deferred, see item) |
+| 12 | 4 | [Refine prompt](#12-refine-prompt-before-sending) | Model rewrites the prompt, asks skippable questions | 11 | Done |
+
+## Round 1: UI polish and navigation
 
 ### 1. Clickable URLs in replies
 - Every URL in Claude's replies is highlighted like a hyperlink (link color, underline on
@@ -43,9 +63,69 @@ are a suggested order: small UI fixes first, then the features that build on the
   in both windowed and full-screen mode. On other systems it can be thinner.
 - Later it can hold things like the session name or a global search.
 
+### 5. Opening a new workspace is faster
+- Starting work in a new folder (**+ New session** → pick a folder → first prompt) takes
+  noticeably long before sessman is ready. It should feel instant: the folder picker opens
+  right away, and the new session is usable as soon as the folder is chosen.
+- Measure first where the time goes. Likely causes, from the current code:
+  - The folder picker runs through `osascript` (`runner::pick_folder`), which starts a new
+    AppleScript process each time; a native picker (e.g. the `rfd` crate) opens faster.
+  - After the first prompt, the session only appears in the list once `claude` has written
+    its file and the next list refresh picks it up; show it in the list (with ⏳) as soon as
+    the prompt is sent.
+  - Any full rescan of `~/.claude/projects` or search-index rebuild triggered by the new
+    folder should not block the UI.
+- If "workspace" here means switching workspace tabs, the same applies: check for slow
+  reloads on tab change.
+
+### 6. File tabs belong to their session
+- Every open file tab belongs to the session it was opened from. When another session is
+  selected, only that session's file tabs are shown; the other session's tabs disappear
+  from the tab bar.
+- Switching back to a session brings back its file tabs as they were: the same files, the
+  same active tab (or Main), scroll position and Rendered / Source choice.
+- Today the open file tabs are one list for the whole app (`file_tabs` in `src/app.rs`), so
+  files from one session stay visible in every other session.
+- A new, not yet created session starts with no file tabs. Closing a file tab only closes it
+  in the current session. Open tabs are saved and restored on restart (item 8).
+
+### 7. Selecting a workspace opens its last session
+- Clicking a workspace tab (or **All**) switches the main area to the session that was last
+  open in that workspace, instead of leaving the previous workspace's session on screen.
+- sessman remembers, per workspace, the last session opened there. If there is none yet (or
+  it was moved out or deleted), the most recently active session in the workspace opens.
+  An empty workspace shows the empty main area.
+- Coming back to a workspace restores that session as it was, with its file tabs (item 6),
+  and puts the cursor in the prompt input.
+- The remembered session per workspace is saved with the workspaces, so it survives a
+  restart.
+
+### 8. The whole state is saved and restored on restart
+- Closing sessman and opening it again brings everything back as it was, with no action
+  needed: saving happens automatically while the app is used (shortly after each change,
+  and on quit), and loading happens at start.
+- What is restored:
+  - window size and position (and full screen), widths of the left and right panels,
+    height of the prompt input (item 3) and which panels are collapsed;
+  - the selected workspace tab and the open session, and per workspace its last session
+    (item 7);
+  - per session: open file tabs, the active tab, scroll positions, Rendered / Source choice
+    (item 6), the text being typed in the prompt input (draft) and the queued prompts
+    (item 10);
+  - the right panel tab (Changes / Info) and its file filter;
+  - the session search text.
+- Saved in sessman's own config folder (e.g. `~/.config/sessman/state.json`), never in
+  Claude's files. Things that no longer exist (deleted sessions, missing files, removed
+  workspaces) are skipped quietly.
+- Prompts that were running when sessman closed can't continue (the `claude` process ends
+  with the app); their sessions open showing what was saved, and their queues come back
+  paused, with **Resume queue**, so nothing is sent without the user asking.
+- A broken or old-format state file never stops the app from starting: it starts fresh and
+  keeps the bad file aside.
+
 ## Round 2: Interrupt and queue while Claude works
 
-### 5. Ctrl+C stops Claude immediately, like in the terminal
+### 9. Ctrl+C stops Claude immediately, like in the terminal
 - While a session is working (⏳), **Ctrl+C** stops it at once, as in Claude Code in the
   terminal: the running `claude -p` process for that session is killed right away, without
   waiting for the current step or tool to finish, and the ⏳ goes away in the same frame.
@@ -59,13 +139,13 @@ are a suggested order: small UI fixes first, then the features that build on the
   if the input is empty; if something is already typed there, the prompt is left in the
   Up history instead. The next prompt continues the session from where it stopped
   (`--resume` picks up what was saved).
-- Stopping does not send the queued prompts (item 6); the queue pauses, the same as after a
+- Stopping does not send the queued prompts (item 10); the queue pauses, the same as after a
   failed run, so Ctrl+C means "stop", not "go to the next one".
 - Only the session in view is stopped; other sessions keep running.
 - Open question: the session file may end mid-step after a kill; check that `--resume`
   handles it, and what the conversation shows.
 
-### 6. Input stays usable while Claude works; Enter queues the prompt
+### 10. Input stays usable while Claude works; Enter queues the prompt
 - The prompt input is never blocked while a session is working (today it is disabled with
   "claude is working on this session…"). It can be typed in, edited, and use Up / Down
   history as usual.
@@ -81,14 +161,13 @@ are a suggested order: small UI fixes first, then the features that build on the
   then the next when that one finishes, and so on. It appears in the conversation as a
   normal "You" message at that point.
 - The queue belongs to the session: switching to another session shows that session's own
-  queue (or none). Queues are kept in memory only; quitting sessman drops them (with a
-  warning if any are waiting).
+  queue (or none). Queues are saved and restored on restart, paused (item 8).
 - If a run fails, the queue pauses (not sent) and shows why, with a **Resume queue**
   action.
 
 ## Round 3: Settings
 
-### 7. Settings page
+### 11. Settings page
 - A **⚙ Settings** button (bottom of the left panel, next to search, and **Cmd+,** on macOS
   / **Ctrl+,** elsewhere) opens the settings in the main area, as a tab like the file tabs.
 - Settings are grouped into sections with a search field on top, and saved immediately to
@@ -107,19 +186,22 @@ are a suggested order: small UI fixes first, then the features that build on the
     default); model for the helpers (search, goals, refine prompt; default Haiku); extra
     arguments for `claude -p` (e.g. permission mode, allowed tools); default folder for new
     sessions.
-  - **Behaviour**: confirm before deleting a workspace; restore the last open session and
-    file tabs at start; notify (system notification) when a run finishes while sessman is
-    in the background.
+  - **Behaviour**: confirm before deleting a workspace; restore the previous state at start
+    (item 8; on by default); notify (system notification) when a run
+    finishes while sessman is in the background.
   - **Keyboard shortcuts**: a read-only list of all shortcuts for now (rebinding later).
   - **About**: version, config folder (with **Open in Finder**), status-line integration
     state.
+- Deferred (not built yet): code highlighting theme, wrapping long lines in conversation code
+  blocks, and message timestamps. Each needs more than a setting (the session parser keeps no
+  timestamps; code blocks and their theme are drawn by egui_commonmark).
 
 ## Round 4: Refine prompt
 
-### 8. Refine prompt before sending
+### 12. Refine prompt before sending
 - A **Refine** button at the right edge of the prompt input, and a shortcut
   (**Cmd+Enter** on macOS, **Ctrl+Enter** elsewhere; if the "send with Cmd/Ctrl+Enter"
-  setting from item 7 is on, use **Cmd/Ctrl+Shift+Enter** instead).
+  setting from item 11 is on, use **Cmd/Ctrl+Shift+Enter** instead).
 - It takes the text in the input and asks a model (the helper model from Settings, Haiku by
   default, via `claude -p --no-session-persistence`, with the session's goal and recent
   prompts as context) to rewrite it as a clear, well-organized prompt: same intent, nothing
