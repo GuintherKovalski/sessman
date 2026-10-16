@@ -11,6 +11,9 @@ pub struct Workspace {
     /// Session last open in this workspace, opened again when the workspace is selected.
     #[serde(default)]
     pub last: Option<String>,
+    /// Folder new sessions in this workspace start in; picked once, for the first one.
+    #[serde(default)]
+    pub folder: Option<PathBuf>,
 }
 
 const PALETTE: [[u8; 3]; 10] = [
@@ -33,6 +36,9 @@ pub struct Workspaces {
     /// Session last open in "All sessions".
     #[serde(default)]
     pub last_all: Option<String>,
+    /// Folder last chosen in the picker, where it opens next time.
+    #[serde(default)]
+    pub last_folder: Option<PathBuf>,
 }
 
 impl Workspaces {
@@ -81,7 +87,7 @@ impl Workspaces {
             return None;
         }
         let color = Some(self.free_color());
-        self.list.push(Workspace { name: name.to_owned(), sessions: Vec::new(), color, last: None });
+        self.list.push(Workspace { name: name.to_owned(), sessions: Vec::new(), color, last: None, folder: None });
         Some(self.list.len() - 1)
     }
 
@@ -121,6 +127,15 @@ impl Workspaces {
         }
         *slot = Some(session.to_owned());
         true
+    }
+
+    /// Remembers a folder picked for a new session, for the picker and for the workspace
+    /// (None = All sessions) it was picked in.
+    pub fn chose_folder(&mut self, tab: Option<usize>, dir: &Path) {
+        self.last_folder = Some(dir.to_owned());
+        if let Some(w) = tab.and_then(|w| self.list.get_mut(w)) {
+            w.folder = Some(dir.to_owned());
+        }
     }
 
     pub fn delete(&mut self, ws: usize) {
@@ -168,6 +183,19 @@ mod tests {
         // Older files without `last` still load.
         let old: Workspaces = serde_json::from_str(r#"{"list":[{"name":"x","sessions":[]}]}"#).unwrap();
         assert_eq!(old.last(Some(0)), None);
+    }
+
+    #[test]
+    fn chosen_folder_is_kept_for_the_picker_and_the_workspace() {
+        let mut w = Workspaces::default();
+        let a = w.add("a").unwrap();
+        w.chose_folder(None, Path::new("/x"));
+        assert_eq!((w.last_folder.as_deref(), w.list[a].folder.as_deref()), (Some(Path::new("/x")), None));
+        w.chose_folder(Some(a), Path::new("/y"));
+        assert_eq!((w.last_folder.as_deref(), w.list[a].folder.as_deref()), (Some(Path::new("/y")), Some(Path::new("/y"))));
+        // Older files without folders still load.
+        let old: Workspaces = serde_json::from_str(r#"{"list":[{"name":"x","sessions":[]}]}"#).unwrap();
+        assert_eq!((old.last_folder, old.list[0].folder.clone()), (None, None));
     }
 
     #[test]

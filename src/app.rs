@@ -74,6 +74,8 @@ pub struct App {
     confirm_delete: Option<usize>,
     /// Index into the open session's messages of the "You" prompt pinned above the conversation.
     pinned: Option<usize>,
+    /// Whether a "You" prompt was on screen in the conversation last frame; the pinned one hides then.
+    inline_you: bool,
     names: Names,
     renaming: Option<Renaming>,
     /// Folder of a new session that has no prompt yet (nothing exists on disk until then).
@@ -208,6 +210,7 @@ impl App {
             new_workspace: None,
             confirm_delete: None,
             pinned: None,
+            inline_you: false,
             names: Names::load(&Names::path()),
             renaming: None,
             new_session: None,
@@ -433,7 +436,32 @@ impl App {
                 self.new_session = None;
                 self.history = History::default();
                 self.pinned = None;
+                self.inline_you = false;
             }
+        }
+    }
+
+    /// Folder new sessions in the open workspace go to without asking: the one picked for it,
+    /// else that of its open session. None in All sessions, or before the first is made.
+    fn workspace_folder(&self) -> Option<PathBuf> {
+        let w = self.workspaces.list.get(self.tab?)?;
+        let open = self.open_id().filter(|id| w.sessions.contains(id)).and_then(|_| self.open.as_ref()?.cwd.clone());
+        w.folder.clone().into_iter().chain(open).find(|d| d.is_dir())
+    }
+
+    /// Asks for a folder (starting at the last one chosen) and opens a new session there.
+    fn choose_new_session_folder(&mut self) {
+        let start = self
+            .workspaces
+            .last_folder
+            .clone()
+            .filter(|d| d.is_dir())
+            .or_else(|| Some(PathBuf::from(self.settings.default_folder.trim())).filter(|d| d.is_dir()))
+            .or_else(|| self.open.as_ref().and_then(|s| s.cwd.clone()));
+        if let Some(dir) = runner::pick_folder(start) {
+            self.workspaces.chose_folder(self.tab, &dir);
+            self.save_workspaces();
+            self.start_new_session(dir);
         }
     }
 
@@ -446,6 +474,7 @@ impl App {
         self.new_session = Some(dir);
         self.history = History::default();
         self.pinned = None;
+        self.inline_you = false;
         self.error = None;
         self.focus_prompt = true;
     }
@@ -461,6 +490,7 @@ impl App {
         self.open = Some(s);
         self.new_session = cwd.or_else(|| Some(PathBuf::from(".")));
         self.pinned = None;
+        self.inline_you = false;
         self.heights.clear();
     }
 
@@ -499,6 +529,7 @@ impl App {
                 self.history = History::new(s.prompts.clone());
                 self.open = Some(s);
                 self.pinned = None;
+                self.inline_you = false;
                 self.heights.clear();
                 self.error = None;
             }
@@ -765,7 +796,7 @@ impl App {
     fn insert_dictated(&mut self, text: &str) {
         let id = Id::new("prompt-input");
         let chars = self.input.chars().count();
-        let at = egui::TextEdit::load_state(&self.ctx, id).and_then(|s| s.cursor.char_range()).map_or(chars, |r| r.primary.index.min(chars));
+        let at = egui::TextEdit::load_state(&self.ctx, id).and_then(|s| s.cursor.char_range()).map_or(chars, |r| usize::from(r.primary.index).min(chars));
         let (input, end) = dictation::insert_at(&self.input, at, text);
         if input == self.input {
             return;
@@ -905,13 +936,25 @@ impl App {
         self.tabs(ui, &mut actions);
         ui.add_space(4.0);
         let new_button = egui::Button::new(RichText::new("+  New session").strong()).min_size(egui::vec2(ui.available_width(), 28.0));
-        if ui.add(new_button).clicked() {
-            let start = Some(PathBuf::from(self.settings.default_folder.trim()))
-                .filter(|d| d.is_dir())
-                .or_else(|| self.open.as_ref().and_then(|s| s.cwd.clone()));
-            if let Some(dir) = runner::pick_folder(start) {
-                self.start_new_session(dir);
+        let new_button = ui.add(new_button).on_hover_text(match self.workspace_folder() {
+            Some(dir) => format!("In {}\nRight-click to choose another folder", dir.display()),
+            None => "Choose a folder for the new session".to_owned(),
+        });
+        let mut choose = false;
+        new_button.context_menu(|ui| {
+            if ui.button("Choose folder…").clicked() {
+                choose = true;
+                ui.close();
             }
+        });
+        if new_button.clicked() {
+            match self.workspace_folder() {
+                Some(dir) => self.start_new_session(dir),
+                None => choose = true,
+            }
+        }
+        if choose {
+            self.choose_new_session_folder();
         }
         ui.separator();
         egui::Panel::bottom("search")
@@ -1404,9 +1447,10 @@ impl App {
             return;
         }
         let pal = theme::palette(ui.visuals());
-        // Pinned "You": the prompt of the turn at the top of the viewport (computed last frame).
+        // Pinned "You": the prompt of the turn at the top of the viewport (computed last frame),
+        // hidden while a "You" prompt is on screen in the conversation so it never shows twice.
         let pinned = self.pinned.or_else(|| s.messages.iter().position(|m| pinned_text(m).is_some()));
-        if let Some(text) = pinned.and_then(|i| s.messages.get(i)).and_then(pinned_text) {
+        if let Some(text) = pinned.filter(|_| !self.inline_you).and_then(|i| s.messages.get(i)).and_then(pinned_text) {
             egui::Frame::new().fill(ui.visuals().faint_bg_color).inner_margin(6.0).corner_radius(4.0).show(ui, |ui| {
                 ui.set_width(ui.available_width());
                 ui.label(RichText::new("You").strong().color(pal.user));
@@ -1425,6 +1469,7 @@ impl App {
         }
         self.heights.resize(s.messages.len(), 0.0);
         let mut top_prompt = None;
+        let mut inline_you = false;
         let open_id = self.open_id();
         let key = self.view_key();
         egui::ScrollArea::vertical().id_salt(("conversation", &key)).auto_shrink(false).stick_to_bottom(true).show_viewport(ui, |ui, viewport| {
@@ -1442,6 +1487,9 @@ impl App {
                 } else {
                     let rect = ui.push_id(i, |ui| message(ui, &mut self.md_cache, m, &pal)).response.rect;
                     self.heights[i] = rect.height().max(1.0);
+                }
+                if pinned_text(m).is_some() && y < viewport.max.y && y + self.heights[i] > viewport.min.y {
+                    inline_you = true;
                 }
             }
             if let Some(run) = open_id.as_ref().and_then(|id| self.runs.get(id)) {
@@ -1468,8 +1516,9 @@ impl App {
                 ui.label(RichText::new("⏹ Interrupted").color(pal.note).monospace());
             }
         });
-        if top_prompt != self.pinned {
+        if top_prompt != self.pinned || inline_you != self.inline_you {
             self.pinned = top_prompt;
+            self.inline_you = inline_you;
             ui.ctx().request_repaint();
         }
     }
@@ -1518,6 +1567,18 @@ impl App {
             if let Err(e) = self.settings.save(&settings::path()) {
                 self.error = Some(format!("could not save settings: {e}"));
             }
+        }
+    }
+
+    /// Zoom is changed with Cmd +/- (no slider); keep the one in use so the next launch has it.
+    fn keep_zoom(&mut self, ctx: &egui::Context) {
+        let zoom = ctx.zoom_factor();
+        if (zoom - self.settings.zoom).abs() < 0.001 {
+            return;
+        }
+        self.settings.zoom = zoom;
+        if let Err(e) = self.settings.save(&settings::path()) {
+            self.error = Some(format!("could not save settings: {e}"));
         }
     }
 
@@ -2123,6 +2184,7 @@ impl eframe::App for App {
         self.poll_refine();
         self.poll_dictation();
         self.global_keys(&ctx);
+        self.keep_zoom(&ctx);
         // First, so it spans the whole width above the side panels.
         egui::Panel::top("title-bar").exact_size(TITLE_BAR_HEIGHT).resizable(false).show(ui, |ui| self.title_bar(ui));
         egui::Panel::left("sessions").default_size(260.0).resizable(true).show(ui, |ui| self.sidebar(ui));

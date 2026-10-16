@@ -42,7 +42,8 @@ pub struct Settings {
     pub helper_model: String,
     /// Extra arguments for `claude -p`, split on spaces.
     pub extra_args: String,
-    /// Where the New session folder picker starts; empty = the open session's folder.
+    /// Where the New session folder picker starts before any folder has been chosen (after that,
+    /// the last one chosen); empty = the open session's folder.
     pub default_folder: String,
     pub confirm_delete_workspace: bool,
     pub restore_state: bool,
@@ -53,7 +54,7 @@ impl Default for Settings {
     fn default() -> Self {
         Self {
             theme: "system".into(),
-            zoom: 0.6,
+            zoom: 1.0,
             mono_size: 15.0,
             send_with_modifier: false,
             input_max_lines: 10,
@@ -122,6 +123,7 @@ pub fn shortcuts(s: &Settings) -> Vec<(&'static str, String)> {
         ("Stop Claude", "Ctrl+C".to_owned()),
         ("Previous / next prompt (or pull back a queued one)", "Up / Down".to_owned()),
         ("Open settings", format!("{cmd}+,")),
+        ("Zoom in / out / reset", format!("{cmd}+Plus / {cmd}+Minus / {cmd}+0")),
         ("Undo refine", format!("{cmd}+Z")),
         ("Close a file tab", "Middle-click".to_owned()),
         ("Search sessions with Haiku", "Enter in the search field".to_owned()),
@@ -162,12 +164,6 @@ pub fn ui(ui: &mut egui::Ui, s: &mut Settings, filter: &mut String, about: &Abou
             for (v, label) in [("dark", "🌙 Dark"), ("light", "☀ Light"), ("system", "💻 System")] {
                 ui.selectable_value(&mut s.theme, v.to_owned(), label);
             }
-        });
-        page.row("Zoom", "Size of everything in the window", s.zoom != defaults.zoom, |ui, reset| {
-            if reset {
-                s.zoom = defaults.zoom;
-            }
-            ui.add(egui::Slider::new(&mut s.zoom, 0.6..=2.0).step_by(0.05).fixed_decimals(2));
         });
         page.row("Monospace font size", "Prompt input, code and files", s.mono_size != defaults.mono_size, |ui, reset| {
             if reset {
@@ -255,7 +251,7 @@ pub fn ui(ui: &mut egui::Ui, s: &mut Settings, filter: &mut String, about: &Abou
             }
             ui.add(egui::TextEdit::singleline(&mut s.extra_args).desired_width(260.0));
         });
-        page.row("Default folder for new sessions", "Where the folder picker starts; empty = the open session's folder", s.default_folder != defaults.default_folder, |ui, reset| {
+        page.row("Default folder for new sessions", "Where the folder picker starts before any folder has been chosen; empty = the open session's folder", s.default_folder != defaults.default_folder, |ui, reset| {
             if reset {
                 s.default_folder = defaults.default_folder.clone();
             }

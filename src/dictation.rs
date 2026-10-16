@@ -58,7 +58,7 @@ mod tests {
     fn counts_characters_not_bytes() {
         // "ção" is 3 characters but 5 bytes; the cursor is after the 3rd character.
         assert_eq!(insert_at("ção", 3, "✨ x"), ("ção ✨ x".to_owned(), 7));
-        assert_eq!(insert_at("ção", 1, "ok"), ("c okão".to_owned(), 4));
+        assert_eq!(insert_at("ção", 1, "ok"), ("ç okão".to_owned(), 4));
     }
 
     #[test]
@@ -98,7 +98,7 @@ mod imp {
                 other => Err(format!("unsupported microphone format {other:?}")),
             }?;
             stream.play().map_err(|e| format!("microphone: {e}"))?;
-            Ok(Self { stream, samples, rate })
+            Ok(Self { stream, samples, rate: rate.0 })
         }
 
         /// Stops recording and returns the audio as 16 kHz mono.
