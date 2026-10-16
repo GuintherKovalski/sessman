@@ -1,5 +1,6 @@
 use crate::diffview::{self, CardEvent};
 use crate::dictation;
+use crate::find::{self, Find};
 use crate::goal;
 use crate::history::History;
 use crate::markdown;
@@ -135,6 +136,8 @@ pub struct App {
     ai: Option<AiSearch>,
     /// Last state written, to skip rewriting an unchanged file.
     saved_state: String,
+    /// Find in the main area (Ctrl+F): the conversation or the open file tab.
+    find: Find,
 }
 
 /// A running `claude -p` for one session: its events, the reply being written, the tool it
@@ -247,6 +250,7 @@ impl App {
             hits: None,
             ai: None,
             saved_state: String::new(),
+            find: Find::default(),
         };
         app.apply_settings();
         // Persist colors assigned on load to workspaces saved before colors existed.
@@ -975,9 +979,9 @@ impl App {
             });
         }
         egui::ScrollArea::vertical().show(ui, |ui| {
-            for (id, title, folder) in pending {
+            for (id, title, _) in pending {
                 let open = self.new_session.is_some() && self.new_id.as_ref() == Some(&id);
-                if ui.selectable_label(open, format!("{title}  ⏳\n{}", short_folder(&folder))).clicked() && !open {
+                if session_bubble(ui, open, &title, None, true, None).clicked() && !open {
                     actions.push(Action::OpenPending(id));
                 }
             }
@@ -988,22 +992,13 @@ impl App {
                     rename_field(ui, r, &s.project, &mut actions);
                     continue;
                 }
-                let working = if self.runs.contains_key(&s.id) { "  ⏳" } else { "" };
                 let queued = match self.queues.get(&s.id).map(|q| q.items.len()) {
                     Some(n) if n > 0 => format!("  +{n} queued"),
                     _ => String::new(),
                 };
-                let label = format!("{title}{working}{queued}\n{}", note.unwrap_or_else(|| short_project(&s.project)));
-                // One widget that senses both: a separate drag-source wrapper would swallow the click.
-                let bg = ui.painter().add(egui::Shape::Noop);
-                let row = ui.selectable_label(self.selected == Some(i), label).interact(Sense::click_and_drag());
-                if let Some(c) = self.tab.is_none().then(|| self.workspaces.color_of(&s.id)).flatten() {
-                    // Tint behind the row, stripe on its left edge.
-                    let full = egui::Rect::from_x_y_ranges(ui.max_rect().x_range(), row.rect.y_range());
-                    ui.painter().set(bg, egui::Shape::rect_filled(full, 3.0, tint(c, 45)));
-                    let stripe = egui::Rect::from_min_size(full.min, egui::vec2(3.0, full.height()));
-                    ui.painter().rect_filled(stripe, 1.0, rgb(c));
-                }
+                let label = format!("{title}{queued}");
+                let color = self.tab.is_none().then(|| self.workspaces.color_of(&s.id)).flatten();
+                let row = session_bubble(ui, self.selected == Some(i), &label, note.as_deref(), self.runs.contains_key(&s.id), color);
                 row.dnd_set_drag_payload(s.id.clone());
                 if row.dragged() {
                     if let Some(pos) = ui.ctx().pointer_interact_pos() {
@@ -1472,6 +1467,7 @@ impl App {
         let mut inline_you = false;
         let open_id = self.open_id();
         let key = self.view_key();
+        let mut find = self.find.open.then_some(&mut self.find);
         egui::ScrollArea::vertical().id_salt(("conversation", &key)).auto_shrink(false).stick_to_bottom(true).show_viewport(ui, |ui, viewport| {
             let origin = ui.cursor().top();
             // Render only messages near the viewport; the rest just take their remembered height.
@@ -1482,11 +1478,23 @@ impl App {
                     top_prompt = Some(i);
                 }
                 let h = self.heights[i];
-                if h > 0.0 && (y + h < near.min.y || y > near.max.y) {
-                    ui.allocate_space(egui::vec2(ui.available_width(), h));
+                let skip = h > 0.0 && (y + h < near.min.y || y > near.max.y);
+                let from = find::next_shape(ui);
+                let rect = if skip {
+                    ui.allocate_space(egui::vec2(ui.available_width(), h)).1
                 } else {
                     let rect = ui.push_id(i, |ui| message(ui, &mut self.md_cache, m, &pal)).response.rect;
                     self.heights[i] = rect.height().max(1.0);
+                    rect
+                };
+                if let Some(f) = find.as_deref_mut().filter(|f| f.matches.iter().any(|m| m.item == i)) {
+                    let (_, current) = f.in_item(i);
+                    let exact = if skip { None } else { find::highlight_painted(ui, from, &f.query, current, pal.find) };
+                    if current.is_some() {
+                        // The current match's message is outlined too, in case it is in something not shown (a link).
+                        ui.painter().rect_stroke(rect, 6.0, Stroke::new(1.5, pal.find.current_bg), StrokeKind::Outside);
+                    }
+                    scroll_to_match(ui, f, i, rect, m.text.len(), exact, !skip);
                 }
                 if pinned_text(m).is_some() && y < viewport.max.y && y + self.heights[i] > viewport.min.y {
                     inline_you = true;
@@ -1537,21 +1545,27 @@ impl App {
         let opts = self.file_options();
         let scroll_id = ("file", self.view_key(), self.file_tabs[i].path.clone());
         let tab = &mut self.file_tabs[i];
+        let find = self.find.open.then_some(&mut self.find);
         let text = match (&tab.contents, markdown::is_markdown(&tab.path)) {
             (Ok(text), true) => text,
-            _ => return diffview::file_view(ui, &tab.path, &tab.contents, &opts, scroll_id),
+            _ => return diffview::file_view(ui, &tab.path, &tab.contents, &opts, scroll_id, find),
         };
         ui.horizontal(|ui| {
             ui.selectable_value(&mut tab.rendered, true, "Rendered");
             ui.selectable_value(&mut tab.rendered, false, "Source");
         });
         if !tab.rendered {
-            return diffview::file_view(ui, &tab.path, &tab.contents, &opts, scroll_id);
+            return diffview::file_view(ui, &tab.path, &tab.contents, &opts, scroll_id, find);
         }
         ui.label(RichText::new(&tab.path).weak().monospace());
         ui.add_space(4.0);
         egui::ScrollArea::vertical().id_salt(("md", scroll_id)).auto_shrink(false).show(ui, |ui| {
-            egui::Frame::new().inner_margin(egui::Margin::symmetric(12, 4)).show(ui, |ui| markdown::show(ui, &mut self.md_cache, text));
+            let from = find::next_shape(ui);
+            let rect = egui::Frame::new().inner_margin(egui::Margin::symmetric(12, 4)).show(ui, |ui| markdown::show(ui, &mut self.md_cache, text)).response.rect;
+            if let Some(f) = find {
+                let exact = find::highlight_painted(ui, from, &f.query, f.in_item(0).1, theme::palette(ui.visuals()).find);
+                scroll_to_match(ui, f, 0, rect, text.len(), exact, true);
+            }
         });
     }
 
@@ -1814,6 +1828,72 @@ impl App {
     }
 
     /// "Main" plus one tab per open file (and Settings), above the main area.
+    /// Searches what the main area shows: the open file tab, or the conversation's messages
+    /// (tool-only ones only while tools are shown).
+    fn update_find(&mut self) {
+        if !self.find.open {
+            return;
+        }
+        if let Some(t) = self.main_tab.and_then(|i| self.file_tabs.get(i)) {
+            let Ok(text) = &t.contents else { return self.find.update(&t.path, &[]) };
+            // Files show tab-expanded (match ranges index what is drawn); rendered Markdown, its source.
+            if markdown::is_markdown(&t.path) && t.rendered {
+                return self.find.update(&format!("md:{}", t.path), &[text]);
+            }
+            let text = diffview::expand_tabs(text, self.settings.tab_width);
+            return self.find.update(&format!("file:{}", t.path), &[&text]);
+        }
+        let show_tools = markdown::SHOW_TOOLS.load(std::sync::atomic::Ordering::Relaxed);
+        let texts: Vec<&str> = match &self.open {
+            Some(s) => s
+                .messages
+                .iter()
+                .map(|m| if !show_tools && m.role == Role::Assistant && m.text.lines().all(|l| l.starts_with("[tool:")) { "" } else { m.text.as_str() })
+                .collect(),
+            None => Vec::new(),
+        };
+        let target = format!("conv:{}", self.view_key().unwrap_or_default());
+        self.find.update(&target, &texts);
+    }
+
+    /// The find bar at the top right of the main area: the query, "3 of 17", previous/next and
+    /// close. Enter / Shift+Enter step through the matches; Esc or a click elsewhere hides it (in `ui`).
+    fn find_bar(&mut self, ui: &mut egui::Ui) {
+        // Right to left, so the widgets are added from the close button back to the query.
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            if ui.small_button("✕").on_hover_text("Close (Esc)").clicked() {
+                self.find.close();
+                return;
+            }
+            let some = !self.find.matches.is_empty();
+            if ui.add_enabled(some, egui::Button::new("⏷").small()).on_hover_text("Next (Enter)").clicked() {
+                self.find.step(true);
+            }
+            if ui.add_enabled(some, egui::Button::new("⏶").small()).on_hover_text("Previous (Shift+Enter)").clicked() {
+                self.find.step(false);
+            }
+            ui.label(RichText::new(self.find.status()).weak());
+            let id = Id::new("find-input");
+            let mut out = egui::TextEdit::singleline(&mut self.find.query).id(id).hint_text("Find").desired_width(260.0).show(ui);
+            if self.find.focus {
+                self.find.focus = false;
+                out.response.request_focus();
+                let all = CCursorRange::two(CCursor::new(0), CCursor::new(self.find.query.chars().count()));
+                out.state.cursor.set_char_range(Some(all));
+                out.state.store(ui.ctx(), id);
+            }
+            let (enter, shift, esc) = ui.input(|i| (i.key_pressed(Key::Enter), i.modifiers.shift, i.key_pressed(Key::Escape)));
+            if out.response.lost_focus() && enter && !esc {
+                self.find.step(!shift);
+                out.response.request_focus();
+            }
+            // The count is drawn before the field; show the new one on the next frame.
+            if out.response.changed() || enter {
+                ui.ctx().request_repaint();
+            }
+        });
+    }
+
     fn main_tabs(&mut self, ui: &mut egui::Ui) {
         let mut close = None;
         let mut close_settings = false;
@@ -1883,6 +1963,9 @@ impl App {
         if ctx.input_mut(|i| i.consume_key(Modifiers::COMMAND, Key::Comma)) {
             self.open_settings();
         }
+        if ctx.input_mut(|i| i.consume_key(Modifiers::CTRL, Key::F) || i.consume_key(Modifiers::COMMAND, Key::F)) {
+            self.find.show();
+        }
         // Esc cancels a refine that is still waiting (egui also uses Esc to drop focus, so
         // this can't depend on the input being focused).
         if self.refine.as_ref().is_some_and(|r| r.rx.is_some()) && ctx.input(|i| i.key_pressed(Key::Escape)) {
@@ -1890,6 +1973,20 @@ impl App {
             self.focus_prompt = true;
         }
     }
+}
+
+/// Scrolls to the current find match once, if it is in `item`, drawn as `rect` from a text
+/// `len` bytes long: to `exact` (where it was painted) when known, or else to a spot estimated
+/// from how far into the text it is. An item that wasn't `drawn` (off screen) keeps the scroll
+/// pending, so the next frame, with it drawn, lands exactly.
+fn scroll_to_match(ui: &egui::Ui, f: &mut Find, item: usize, rect: egui::Rect, len: usize, exact: Option<egui::Rect>, drawn: bool) {
+    let Some(start) = f.current_match().filter(|m| f.scroll && m.item == item).map(|m| m.range.start) else { return };
+    f.scroll = !drawn;
+    let target = exact.map(|r| r.expand(20.0)).unwrap_or_else(|| {
+        let y = rect.top() + rect.height() * start as f32 / len.max(1) as f32;
+        egui::Rect::from_x_y_ranges(rect.x_range(), y - 20.0..=y + 20.0)
+    });
+    ui.scroll_to_rect(target, Some(egui::Align::Center));
 }
 
 /// Claude Code's own record of a stopped run, saved as a user message.
@@ -2008,9 +2105,53 @@ fn pending_new(runs: &HashMap<String, Run>, listed: &[SessionMeta], members: Opt
 }
 
 /// "/Users/me/Desktop/proj" → "Desktop/proj"
-fn short_folder(dir: &str) -> String {
-    let home = std::env::var("HOME").unwrap_or_default();
-    dir.strip_prefix(&home).map(|s| s.trim_start_matches('/').to_owned()).unwrap_or_else(|| dir.to_owned())
+/// A session in the list: its name in a rounded bubble, with a spinner on the right while
+/// Claude is working in it, and a search note under the name when there is one. Senses click
+/// and drag in one widget (a separate drag-source wrapper would swallow the click).
+fn session_bubble(ui: &mut egui::Ui, selected: bool, title: &str, note: Option<&str>, running: bool, color: Option<[u8; 3]>) -> egui::Response {
+    const PAD: egui::Vec2 = egui::vec2(10.0, 6.0);
+    const SPIN: f32 = 12.0;
+    let width = ui.available_width();
+    let text_width = (width - 2.0 * PAD.x - if running { SPIN + 6.0 } else { 0.0 }).max(10.0);
+    let mut job = egui::text::LayoutJob::simple(title.to_owned(), egui::TextStyle::Body.resolve(ui.style()), ui.visuals().text_color(), text_width);
+    job.wrap.max_rows = 2;
+    let galley = ui.painter().layout_job(job);
+    let note = note.map(|n| ui.painter().layout(n.to_owned(), egui::TextStyle::Small.resolve(ui.style()), ui.visuals().weak_text_color(), text_width));
+    let height = galley.size().y + note.as_ref().map_or(0.0, |n| n.size().y + 2.0) + 2.0 * PAD.y;
+    let (rect, row) = ui.allocate_exact_size(egui::vec2(width, height), Sense::click_and_drag());
+    if ui.is_rect_visible(rect) {
+        let v = ui.visuals();
+        let fill = if selected {
+            v.selection.bg_fill
+        } else if row.hovered() {
+            v.widgets.hovered.weak_bg_fill
+        } else if let Some(c) = color {
+            tint(c, 45)
+        } else {
+            v.faint_bg_color
+        };
+        let stroke = match color {
+            Some(c) => Stroke::new(1.0, rgb(c)),
+            None if selected => v.selection.stroke,
+            None => v.widgets.noninteractive.bg_stroke,
+        };
+        let radius = 10.0;
+        ui.painter().rect(rect, radius, fill, stroke, StrokeKind::Inside);
+        let text_color = if selected { v.selection.stroke.color } else { v.text_color() };
+        let mut pos = rect.min + PAD;
+        let galley_height = galley.size().y;
+        ui.painter().galley(pos, galley, text_color);
+        if let Some(n) = note {
+            pos.y += galley_height + 2.0;
+            ui.painter().galley(pos, n, v.weak_text_color());
+        }
+        if running {
+            let spin = egui::Rect::from_center_size(egui::pos2(rect.max.x - PAD.x - SPIN / 2.0, rect.center().y), egui::vec2(SPIN, SPIN));
+            egui::Spinner::new().size(SPIN).paint_at(ui, spin);
+        }
+    }
+    ui.add_space(2.0);
+    if running { row.on_hover_text_at_pointer("Claude is working in this session") } else { row }
 }
 
 /// One message as a card: role label and accent stripe, then its rendered Markdown.
@@ -2189,6 +2330,7 @@ impl eframe::App for App {
         egui::Panel::top("title-bar").exact_size(TITLE_BAR_HEIGHT).resizable(false).show(ui, |ui| self.title_bar(ui));
         egui::Panel::left("sessions").default_size(260.0).resizable(true).show(ui, |ui| self.sidebar(ui));
         egui::Panel::right("diffs").default_size(420.0).resizable(true).show(ui, |ui| self.right_panel(ui));
+        let mut find_bar = None;
         egui::CentralPanel::default().show(ui, |ui| {
             if !self.file_tabs.is_empty() || self.settings_tab {
                 egui::Panel::top("main-tabs").show_separator_line(true).resizable(false).show(ui, |ui| self.main_tabs(ui));
@@ -2197,6 +2339,10 @@ impl eframe::App for App {
                 self.settings_page(ui);
                 return;
             }
+            self.update_find();
+            find_bar = self.find.open.then(|| {
+                egui::Panel::top("find-bar").show_separator_line(true).resizable(false).show(ui, |ui| self.find_bar(ui)).response.rect
+            });
             let area_height = ui.available_height();
             egui::Panel::bottom("prompt")
                 .frame(egui::Frame::new().inner_margin(egui::Margin::symmetric(0, 6)))
@@ -2215,11 +2361,20 @@ impl eframe::App for App {
                 let focused = ui.memory(|m| m.focused()).filter(|&f| f != Id::new("prompt-input"));
                 focused.and_then(|f| ui.ctx().read_response(f)).is_some_and(|r| r.rect.contains(p))
             };
-            if click.is_some_and(|p| area.contains(p) && !on_other_field(p)) {
+            let on_find_bar = |p| find_bar.is_some_and(|r: egui::Rect| r.contains(p));
+            if click.is_some_and(|p| area.contains(p) && !on_other_field(p) && !on_find_bar(p)) {
                 self.focus_prompt = true;
                 ui.ctx().request_repaint();
             }
         });
+        // The find bar hides on Esc, or on a press anywhere but on it. On the press, not the
+        // click: its marks repaint the text and would hide a selection dragged from that press.
+        let (esc, click) = ctx.input(|i| (i.key_pressed(Key::Escape), i.pointer.any_pressed().then_some(i.pointer.interact_pos()).flatten()));
+        if self.find.open && (esc || click.is_some_and(|p| !find_bar.is_some_and(|r: egui::Rect| r.contains(p)))) {
+            self.find.close();
+            self.focus_prompt |= esc;
+            ctx.request_repaint();
+        }
         self.confirm_delete_modal(&ctx);
     }
 

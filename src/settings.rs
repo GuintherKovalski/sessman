@@ -123,6 +123,7 @@ pub fn shortcuts(s: &Settings) -> Vec<(&'static str, String)> {
         ("Stop Claude", "Ctrl+C".to_owned()),
         ("Previous / next prompt (or pull back a queued one)", "Up / Down".to_owned()),
         ("Open settings", format!("{cmd}+,")),
+        ("Find in the conversation or open file (Enter / Shift+Enter: next / previous)", format!("Ctrl+F / {cmd}+F")),
         ("Zoom in / out / reset", format!("{cmd}+Plus / {cmd}+Minus / {cmd}+0")),
         ("Undo refine", format!("{cmd}+Z")),
         ("Close a file tab", "Middle-click".to_owned()),

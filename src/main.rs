@@ -1,6 +1,7 @@
 mod app;
 mod diffview;
 mod dictation;
+mod find;
 mod goal;
 mod history;
 mod names;

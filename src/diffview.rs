@@ -1,4 +1,5 @@
 //! Changes grouped by file, rendered as diff cards; and a read-only file viewer.
+use crate::find::{self, Find};
 use crate::session::Change;
 use crate::theme::{self, Palette};
 use eframe::egui::text::{LayoutJob, TextFormat};
@@ -211,7 +212,9 @@ pub fn expand_tabs(text: &str, width: usize) -> std::borrow::Cow<'_, str> {
 }
 
 /// A read-only file with line numbers and syntax highlighting. `id` keeps its scroll position.
-pub fn file_view(ui: &mut egui::Ui, path: &str, contents: &Result<String, String>, opts: &FileOptions, id: impl std::hash::Hash + std::fmt::Debug) {
+/// With `find`, its matches (byte ranges in the tab-expanded text) are highlighted, and the
+/// view scrolls to the current one when `find.scroll` is set.
+pub fn file_view(ui: &mut egui::Ui, path: &str, contents: &Result<String, String>, opts: &FileOptions, id: impl std::hash::Hash + std::fmt::Debug, find: Option<&mut Find>) {
     let pal = theme::palette(ui.visuals());
     ui.label(RichText::new(path).weak().monospace());
     ui.add_space(4.0);
@@ -225,7 +228,9 @@ pub fn file_view(ui: &mut egui::Ui, path: &str, contents: &Result<String, String
     let text = expand_tabs(text, opts.tab_width);
     let font = FontId::monospace(opts.font_size);
     let theme = CodeTheme::from_memory(ui.ctx(), ui.style()).with_font_id(font.clone());
-    let job = highlight(ui.ctx(), ui.style(), &theme, &text, language(path));
+    let mut job = highlight(ui.ctx(), ui.style(), &theme, &text, language(path));
+    let (ranges, current) = find.as_ref().map(|f| f.in_item(0)).unwrap_or_default();
+    find::mark(&mut job, &ranges, current, pal.find);
     let count = text.lines().count().max(1);
     let numbers: String = (1..=count).map(|n| format!("{n:>5}\n")).collect();
     let scroll = if opts.wrap { egui::ScrollArea::vertical() } else { egui::ScrollArea::both() };
@@ -235,8 +240,21 @@ pub fn file_view(ui: &mut egui::Ui, path: &str, contents: &Result<String, String
             if opts.line_numbers && !opts.wrap {
                 ui.label(RichText::new(numbers).font(font).color(pal.line_number));
             }
+            // Laid out here (not by the label) so the current match can be located in it.
+            job.wrap.max_width = if opts.wrap { ui.available_width() } else { f32::INFINITY };
+            let galley = ui.painter().layout_job(job);
+            let target = current.map(|k| {
+                let start = text[..ranges[k].start].chars().count();
+                galley.pos_from_cursor(egui::text::CCursor::new(start))
+            });
             let mode = if opts.wrap { TextWrapMode::Wrap } else { TextWrapMode::Extend };
-            ui.add(egui::Label::new(job).wrap_mode(mode).selectable(true));
+            let label = ui.add(egui::Label::new(galley).wrap_mode(mode).selectable(true));
+            if let (Some(f), Some(r)) = (find, target)
+                && f.scroll
+            {
+                f.scroll = false;
+                ui.scroll_to_rect(r.translate(label.rect.min.to_vec2()).expand(8.0), Some(egui::Align::Center));
+            }
         });
     });
 }

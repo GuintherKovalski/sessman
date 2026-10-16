@@ -16,7 +16,16 @@ pub struct Palette {
     pub del_bg: Color32,
     pub context: Color32,
     pub note: Color32,
+    /// Find (Ctrl+F) matches: yellow, the current one orange, black text on both (in either
+    /// theme, so they never look like the selection).
+    pub find: crate::find::Colors,
 }
+
+const FIND: crate::find::Colors = crate::find::Colors {
+    bg: Color32::from_rgb(255, 225, 0),
+    current_bg: Color32::from_rgb(255, 150, 40),
+    text: Color32::BLACK,
+};
 
 pub fn palette(v: &Visuals) -> Palette {
     if v.dark_mode {
@@ -35,6 +44,7 @@ pub fn palette(v: &Visuals) -> Palette {
             del_bg: Color32::from_rgb(56, 28, 30),
             context: Color32::GRAY,
             note: Color32::from_rgb(200, 170, 90),
+            find: FIND,
         }
     } else {
         Palette {
@@ -52,6 +62,7 @@ pub fn palette(v: &Visuals) -> Palette {
             del_bg: Color32::from_rgb(252, 225, 225),
             context: Color32::from_gray(110),
             note: Color32::from_rgb(170, 130, 30),
+            find: FIND,
         }
     }
 }
