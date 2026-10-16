@@ -1,2 +1,21 @@
 /target
 .DS_Store
+
+# Secrets and local config
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.p12
+*.pfx
+*.keystore
+*.local.json
+secrets/
+credentials*.json
+
+# Editor / OS
+.idea/
+.vscode/
+*.swp
+*~
