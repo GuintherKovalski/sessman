@@ -124,6 +124,10 @@ pub struct App {
     refine_undo: Option<(String, String)>,
     /// Microphone dictation into the input (the mic button).
     dictation: Dictation,
+    /// The "download the Whisper model?" modal, shown when the mic is used without the model.
+    model_prompt: Option<ModelPrompt>,
+    /// Recent microphone levels (0..1, oldest first) for the meter shown while recording.
+    mic_levels: std::collections::VecDeque<f32>,
     /// Background indexer: fresh session lists + content index, and a channel to poke it.
     snapshots: Receiver<search::Snapshot>,
     poke_index: std::sync::mpsc::Sender<()>,
@@ -193,6 +197,63 @@ enum Dictation {
     Transcribing(Receiver<Result<String, String>>),
 }
 
+/// Bars in the microphone level meter, and the width of the meter with its dot and timer.
+const MIC_BARS: usize = 14;
+const MIC_METER_WIDTH: f32 = 120.0;
+
+/// What shows while recording: a pulsing red dot, the time so far, and a level meter that
+/// scrolls right to left, so it is clear the microphone is on and hearing something.
+fn recording_meter(ui: &mut egui::Ui, recorder: &dictation::Recorder, levels: &mut std::collections::VecDeque<f32>, red: Color32) {
+    // A new bar every 60 ms, holding the loudest sample since the last one.
+    let now = ui.input(|i| i.time);
+    let last = ui.data(|d| d.get_temp::<f64>(Id::new("mic-sampled"))).unwrap_or(0.0);
+    if now - last >= 0.06 {
+        levels.push_back(recorder.take_level());
+        while levels.len() > MIC_BARS {
+            levels.pop_front();
+        }
+        ui.data_mut(|d| d.insert_temp(Id::new("mic-sampled"), now));
+    }
+    ui.ctx().request_repaint_after(std::time::Duration::from_millis(33));
+
+    let row = ui.text_style_height(&egui::TextStyle::Body);
+    let (rect, _) = ui.allocate_exact_size(egui::vec2(MIC_METER_WIDTH, row), Sense::hover());
+    let painter = ui.painter_at(rect);
+    let mid = rect.center().y;
+    // Dot: breathes in size and brightness.
+    let pulse = 0.5 + 0.5 * (now * std::f64::consts::TAU / 1.2).sin() as f32;
+    let dot = egui::pos2(rect.left() + 6.0, mid);
+    painter.circle_filled(dot, 5.0 + 2.5 * pulse, red.gamma_multiply(0.25 * pulse));
+    painter.circle_filled(dot, 4.0, red.gamma_multiply(0.7 + 0.3 * pulse));
+    // Timer.
+    let secs = recorder.elapsed().as_secs();
+    let timer = painter.text(
+        egui::pos2(dot.x + 10.0, mid),
+        Align2::LEFT_CENTER,
+        format!("{}:{:02}", secs / 60, secs % 60),
+        egui::FontId::monospace(row * 0.8),
+        red,
+    );
+    // Meter: thin rounded bars, centered vertically, the newest on the right.
+    let (left, right) = (timer.right() + 8.0, rect.right() - 4.0);
+    let step = (right - left) / MIC_BARS as f32;
+    let width = (step * 0.55).max(1.5);
+    for (i, &level) in levels.iter().enumerate() {
+        let height = 2.0 + (row - 4.0) * level;
+        let x = left + step * (i as f32 + 0.5);
+        let bar = egui::Rect::from_center_size(egui::pos2(x, mid), egui::vec2(width, height));
+        painter.rect_filled(bar, width / 2.0, red.gamma_multiply(0.45 + 0.55 * level));
+    }
+}
+
+/// The Whisper model modal: asking first, downloading, then done or failed.
+enum ModelPrompt {
+    Ask,
+    Downloading(std::process::Child),
+    Done,
+    Failed(String),
+}
+
 impl App {
     pub fn new(ctx: &egui::Context) -> Self {
         let (snapshots, poke_index) = search::spawn_indexer(ctx.clone());
@@ -242,6 +303,8 @@ impl App {
             refine: None,
             refine_undo: None,
             dictation: Dictation::Idle,
+            model_prompt: None,
+            mic_levels: std::collections::VecDeque::new(),
             snapshots,
             poke_index,
             index: search::Index::new(),
@@ -767,12 +830,13 @@ impl App {
             Dictation::Idle => {
                 let model = dictation::model_path();
                 if !model.exists() {
-                    self.error = Some(format!("Dictation needs the Whisper model: download {} to {}", dictation::MODEL_URL, model.display()));
+                    self.model_prompt.get_or_insert(ModelPrompt::Ask);
                     return;
                 }
                 match dictation::Recorder::start() {
                     Ok(recorder) => {
                         self.error = None;
+                        self.mic_levels = std::iter::repeat_n(0.0, MIC_BARS).collect();
                         self.dictation = Dictation::Recording(recorder);
                     }
                     Err(e) => self.error = Some(e),
@@ -1107,6 +1171,92 @@ impl App {
         }
     }
 
+    /// Offers to download the Whisper model that dictation needs, and shows the download.
+    fn model_prompt_modal(&mut self, ctx: &egui::Context) {
+        let Some(prompt) = &mut self.model_prompt else { return };
+        if let ModelPrompt::Downloading(child) = prompt {
+            match child.try_wait() {
+                Ok(None) => ctx.request_repaint_after(std::time::Duration::from_millis(250)),
+                Ok(Some(status)) => {
+                    let ModelPrompt::Downloading(child) = std::mem::replace(prompt, ModelPrompt::Done) else { unreachable!() };
+                    if let Err(e) = dictation::finish_model_download(child, status) {
+                        *prompt = ModelPrompt::Failed(e);
+                    }
+                }
+                Err(e) => {
+                    let _ = child.kill();
+                    *prompt = ModelPrompt::Failed(format!("download failed: {e}"));
+                }
+            }
+        }
+        let mb = |bytes: u64| bytes as f32 / 1_000_000.0;
+        let (mut download, mut cancel, mut close, mut dictate) = (false, false, false, false);
+        let modal = egui::Modal::new(Id::new("model-prompt")).show(ctx, |ui| {
+            ui.set_max_width(420.0);
+            match &*prompt {
+                ModelPrompt::Ask => {
+                    ui.label(RichText::new("Download the speech model?").strong());
+                    ui.label(format!(
+                        "Dictation transcribes on this Mac with the Whisper base model ({:.0} MB, from Hugging Face). Audio never leaves your machine.",
+                        mb(dictation::MODEL_BYTES)
+                    ));
+                    ui.label(RichText::new(format!("It is saved to {}", dictation::model_path().display())).small().weak());
+                    ui.add_space(8.0);
+                    ui.horizontal(|ui| {
+                        download = ui.button("Download").clicked();
+                        close = ui.button("Not now").clicked();
+                    });
+                }
+                ModelPrompt::Downloading(_) => {
+                    let got = std::fs::metadata(dictation::model_part_path()).map_or(0, |m| m.len());
+                    let fraction = got as f32 / dictation::MODEL_BYTES as f32;
+                    ui.label(RichText::new("Downloading the speech model…").strong());
+                    ui.add(egui::ProgressBar::new(fraction.min(1.0)).text(format!("{:.0} of {:.0} MB", mb(got), mb(dictation::MODEL_BYTES))));
+                    ui.add_space(8.0);
+                    cancel = ui.button("Cancel").clicked();
+                }
+                ModelPrompt::Done => {
+                    ui.label(RichText::new("Speech model installed").strong());
+                    ui.label("Dictation is ready: click the mic to start, click again to stop.");
+                    ui.add_space(8.0);
+                    ui.horizontal(|ui| {
+                        dictate = ui.button("Start dictating").clicked();
+                        close = ui.button("Close").clicked();
+                    });
+                }
+                ModelPrompt::Failed(e) => {
+                    ui.label(RichText::new("Couldn't download the speech model").strong());
+                    ui.label(e);
+                    ui.add_space(8.0);
+                    ui.horizontal(|ui| {
+                        download = ui.button("Retry").clicked();
+                        close = ui.button("Close").clicked();
+                    });
+                }
+            }
+        });
+        // Clicking outside or Esc closes it, except mid-download, where only Cancel stops it.
+        let downloading = matches!(prompt, ModelPrompt::Downloading(_));
+        if download {
+            *prompt = match dictation::start_model_download() {
+                Ok(child) => ModelPrompt::Downloading(child),
+                Err(e) => ModelPrompt::Failed(e),
+            };
+        } else if cancel {
+            if let ModelPrompt::Downloading(child) = prompt {
+                let _ = child.kill();
+                let _ = child.wait();
+            }
+            let _ = std::fs::remove_file(dictation::model_part_path());
+            self.model_prompt = None;
+        } else if close || dictate || (!downloading && modal.should_close()) {
+            self.model_prompt = None;
+            if dictate {
+                self.toggle_dictation();
+            }
+        }
+    }
+
     /// Prompts waiting for the open session's run, right above the input.
     fn queue_list(&mut self, ui: &mut egui::Ui) {
         let Some(id) = self.open_id() else { return };
@@ -1325,9 +1475,18 @@ impl App {
         let mut stop = false;
         let mut refine_click = false;
         let mut dictate_click = false;
+        let recording = matches!(self.dictation, Dictation::Recording(_));
+        let time = ui.input(|i| i.time);
+        // While recording, the input's border turns red and breathes, about once a second.
+        let border = if recording {
+            let pulse = 0.5 + 0.5 * (time * std::f64::consts::TAU / 1.2).sin() as f32;
+            Stroke::new(1.5, pal.error.gamma_multiply(0.35 + 0.65 * pulse))
+        } else {
+            Stroke::new(1.0, pal.border)
+        };
         egui::Frame::new()
             .fill(pal.prompt_bg)
-            .stroke(Stroke::new(1.0, pal.border))
+            .stroke(border)
             .inner_margin(egui::Margin::symmetric(10, 8))
             .corner_radius(4.0)
             .show(ui, |ui| {
@@ -1335,6 +1494,7 @@ impl App {
                     ui.label(RichText::new(">").monospace().strong().color(pal.prompt_sign));
                     let send_key = if self.settings.send_with_modifier { "cmd+enter" } else { "enter" };
                     let hint = match (&self.open, running) {
+                        _ if recording => "listening… click ⏹ to stop and transcribe".to_owned(),
                         (None, _) => "select a session".to_owned(),
                         (_, true) => format!("claude is working… {send_key} queues a prompt · ctrl+c stops"),
                         _ => format!("type a prompt · {send_key} to send · cmd+enter refines · up/down for history"),
@@ -1345,7 +1505,13 @@ impl App {
                     // frame), within min..max. The bottom edge stays put, so it grows upwards.
                     let height = self.prompt_text_height.clamp(min, max);
                     // Room for the buttons on the right: refine, stop, and the mic with its spinner.
-                    let buttons = (if running { 84.0 } else { 40.0 }) + if dictation::AVAILABLE { 48.0 } else { 0.0 };
+                    let buttons = (if running { 84.0 } else { 40.0 })
+                        + if dictation::AVAILABLE { 48.0 } else { 0.0 }
+                        + match self.dictation {
+                            Dictation::Recording(_) => MIC_METER_WIDTH,
+                            Dictation::Transcribing(_) => 90.0,
+                            Dictation::Idle => 0.0,
+                        };
                     let width = ui.available_width() - buttons;
                     let out = egui::ScrollArea::vertical()
                         .id_salt("prompt-scroll")
@@ -1390,7 +1556,6 @@ impl App {
                             .clicked();
                         // Added after refine, so it sits to the left of it.
                         if dictation::AVAILABLE {
-                            let recording = matches!(self.dictation, Dictation::Recording(_));
                             let transcribing = matches!(self.dictation, Dictation::Transcribing(_));
                             let (icon, color) = if recording { ("⏹", pal.error) } else { ("🎤", ui.visuals().text_color()) };
                             let mic = egui::Button::new(RichText::new(icon).color(color)).frame(false);
@@ -1402,6 +1567,10 @@ impl App {
                                 .clicked();
                             if transcribing {
                                 ui.spinner();
+                                ui.label(RichText::new("transcribing…").small().weak());
+                            }
+                            if let Dictation::Recording(recorder) = &self.dictation {
+                                recording_meter(ui, recorder, &mut self.mic_levels, pal.error);
                             }
                         }
                         if running {
@@ -2376,6 +2545,7 @@ impl eframe::App for App {
             ctx.request_repaint();
         }
         self.confirm_delete_modal(&ctx);
+        self.model_prompt_modal(&ctx);
     }
 
     fn save(&mut self, _storage: &mut dyn eframe::Storage) {

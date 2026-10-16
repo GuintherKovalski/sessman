@@ -5,13 +5,54 @@ use std::path::PathBuf;
 /// Whether dictation works on this platform; the mic button is hidden where it doesn't.
 pub const AVAILABLE: bool = cfg!(target_os = "macos");
 
-/// The Whisper model file. It is not bundled: download `ggml-base.bin` into this path.
+/// The Whisper model file. It is not bundled: the app offers to download it on first use.
 pub fn model_path() -> PathBuf {
     crate::settings::config_dir().join("models").join("ggml-base.bin")
 }
 
-/// Where to get the model, for the error shown when it is missing.
+/// Where the model goes while it downloads, so a cut-off download is never taken for the model.
+pub fn model_part_path() -> PathBuf {
+    model_path().with_extension("bin.part")
+}
+
+/// Where to get the model.
 pub const MODEL_URL: &str = "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-base.bin";
+
+/// Size of the model, for the download prompt and its progress.
+pub const MODEL_BYTES: u64 = 147_951_465;
+
+/// Starts downloading the model with curl into [`model_part_path`]; poll the child, then
+/// call [`finish_model_download`] once it exits.
+pub fn start_model_download() -> Result<std::process::Child, String> {
+    let part = model_part_path();
+    if let Some(dir) = part.parent() {
+        std::fs::create_dir_all(dir).map_err(|e| format!("can't create {}: {e}", dir.display()))?;
+    }
+    std::process::Command::new("curl")
+        .args(["--location", "--fail", "--silent", "--show-error", "--output"])
+        .arg(&part)
+        .arg(MODEL_URL)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .map_err(|e| format!("can't start curl: {e}"))
+}
+
+/// After curl exits: moves the finished download into place, or cleans up and says why it failed.
+pub fn finish_model_download(mut child: std::process::Child, status: std::process::ExitStatus) -> Result<(), String> {
+    let part = model_part_path();
+    if !status.success() {
+        let mut stderr = String::new();
+        if let Some(mut e) = child.stderr.take() {
+            let _ = std::io::Read::read_to_string(&mut e, &mut stderr);
+        }
+        let _ = std::fs::remove_file(&part);
+        let reason = stderr.trim();
+        return Err(if reason.is_empty() { format!("download failed ({status})") } else { format!("download failed: {reason}") });
+    }
+    std::fs::rename(&part, model_path()).map_err(|e| format!("can't install the model: {e}"))
+}
 
 /// Puts dictated text into the input at a character index, with a space before it when the text
 /// before it doesn't end in whitespace. Returns the new input and the cursor after the text.
@@ -27,9 +68,26 @@ pub fn insert_at(input: &str, cursor: usize, text: &str) -> (String, usize) {
     (out, before.chars().count() + space.chars().count() + text.chars().count())
 }
 
+/// Maps a sample peak (0..1) to a meter level (0..1) on a decibel scale, -50 dB to 0 dB.
+pub fn level_from_peak(peak: f32) -> f32 {
+    if peak <= 0.0 {
+        return 0.0;
+    }
+    ((20.0 * peak.log10() + 50.0) / 50.0).clamp(0.0, 1.0)
+}
+
 #[cfg(test)]
 mod tests {
-    use super::insert_at;
+    use super::{insert_at, level_from_peak};
+
+    #[test]
+    fn levels_are_on_a_decibel_scale() {
+        assert_eq!(level_from_peak(0.0), 0.0);
+        assert_eq!(level_from_peak(0.001), 0.0);
+        assert!((level_from_peak(0.1) - 0.6).abs() < 1e-5);
+        assert_eq!(level_from_peak(1.0), 1.0);
+        assert_eq!(level_from_peak(4.0), 1.0);
+    }
 
     #[test]
     fn inserts_into_empty_input_without_a_space() {
@@ -72,7 +130,9 @@ mod imp {
     use super::model_path;
     use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
     use cpal::{FromSample, SampleFormat, SizedSample};
+    use std::sync::atomic::{AtomicU32, Ordering};
     use std::sync::{Arc, Mutex};
+    use std::time::{Duration, Instant};
 
     /// Whisper expects 16 kHz mono samples.
     const WHISPER_RATE: u32 = 16_000;
@@ -82,6 +142,10 @@ mod imp {
         stream: cpal::Stream,
         samples: Arc<Mutex<Vec<f32>>>,
         rate: u32,
+        /// Loudest sample since the last [`Recorder::take_level`], as f32 bits. Non-negative
+        /// floats order like their bits, so the callback can `fetch_max` it.
+        peak: Arc<AtomicU32>,
+        started: Instant,
     }
 
     impl Recorder {
@@ -91,14 +155,26 @@ mod imp {
             let (rate, channels) = (supported.sample_rate(), supported.channels() as usize);
             let config = supported.config();
             let samples = Arc::new(Mutex::new(Vec::new()));
+            let peak = Arc::new(AtomicU32::new(0));
             let stream = match supported.sample_format() {
-                SampleFormat::F32 => input_stream::<f32>(&device, &config, channels, &samples),
-                SampleFormat::I16 => input_stream::<i16>(&device, &config, channels, &samples),
-                SampleFormat::U16 => input_stream::<u16>(&device, &config, channels, &samples),
+                SampleFormat::F32 => input_stream::<f32>(&device, &config, channels, &samples, &peak),
+                SampleFormat::I16 => input_stream::<i16>(&device, &config, channels, &samples, &peak),
+                SampleFormat::U16 => input_stream::<u16>(&device, &config, channels, &samples, &peak),
                 other => Err(format!("unsupported microphone format {other:?}")),
             }?;
             stream.play().map_err(|e| format!("microphone: {e}"))?;
-            Ok(Self { stream, samples, rate: rate.0 })
+            Ok(Self { stream, samples, rate: rate.0, peak, started: Instant::now() })
+        }
+
+        /// How loud the microphone has been since the last call, 0..1 on a decibel scale
+        /// (-50 dB and below is 0), and resets it.
+        pub fn take_level(&self) -> f32 {
+            let peak = f32::from_bits(self.peak.swap(0, Ordering::Relaxed));
+            super::level_from_peak(peak)
+        }
+
+        pub fn elapsed(&self) -> Duration {
+            self.started.elapsed()
         }
 
         /// Stops recording and returns the audio as 16 kHz mono.
@@ -115,21 +191,26 @@ mod imp {
         config: &cpal::StreamConfig,
         channels: usize,
         samples: &Arc<Mutex<Vec<f32>>>,
+        peak: &Arc<AtomicU32>,
     ) -> Result<cpal::Stream, String>
     where
         f32: FromSample<T>,
     {
-        let samples = samples.clone();
+        let (samples, peak) = (samples.clone(), peak.clone());
         device
             .build_input_stream(
                 config,
                 move |data: &[T], _: &cpal::InputCallbackInfo| {
+                    let mut loudest = 0.0f32;
                     if let Ok(mut out) = samples.lock() {
                         for frame in data.chunks(channels) {
                             let sum: f32 = frame.iter().map(|&s| f32::from_sample_(s)).sum();
-                            out.push(sum / channels as f32);
+                            let sample = sum / channels as f32;
+                            loudest = loudest.max(sample.abs());
+                            out.push(sample);
                         }
                     }
+                    peak.fetch_max(loudest.to_bits(), Ordering::Relaxed);
                 },
                 |e| eprintln!("microphone error: {e}"),
                 None,
@@ -203,6 +284,14 @@ impl Recorder {
 
     pub fn finish(self) -> Vec<f32> {
         Vec::new()
+    }
+
+    pub fn take_level(&self) -> f32 {
+        0.0
+    }
+
+    pub fn elapsed(&self) -> std::time::Duration {
+        std::time::Duration::ZERO
     }
 }
 
