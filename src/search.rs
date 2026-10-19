@@ -208,14 +208,19 @@ pub fn rank(query: &str, candidates: &[Candidate]) -> Vec<Hit> {
     hits.into_iter().map(|h| h.3).collect()
 }
 
-/// A numbered catalog of sessions for the model: name, goal and first prompts.
-pub fn ai_prompt(query: &str, catalog: &[(String, Option<String>, Vec<String>)]) -> String {
+/// What the model is told when finding sessions, editable in Settings → Harness. The query,
+/// the reply format and the catalog are added after it.
+pub const DEFAULT_HARNESS: &str =
+    "Below is a numbered list of a user's recent Claude Code sessions. Which ones match what the user is looking for?";
+
+/// A numbered catalog of sessions for the model: name, goal and first prompts, after the harness.
+pub fn ai_prompt(harness: &str, query: &str, catalog: &[(String, Option<String>, Vec<String>)]) -> String {
     let mut out = format!(
-        "Below is a numbered list of a user's recent Claude Code sessions. Which ones match \
-         what the user is looking for?\n\nLooking for: {query}\n\n\
+        "{}\n\nLooking for: {query}\n\n\
          Reply with up to 8 lines, best match first, each exactly `N: reason` where N is the \
          session number and reason is at most 12 words. Reply NONE if nothing matches. \
-         No other text.\n\nSessions:\n"
+         No other text.\n\nSessions:\n",
+        harness.trim()
     );
     for (i, (name, goal, prompts)) in catalog.iter().enumerate() {
         out.push_str(&format!("{}. {name}", i + 1));
@@ -304,7 +309,8 @@ mod tests {
 
     #[test]
     fn ai_prompt_numbers_sessions() {
-        let p = ai_prompt("login", &[("A".into(), Some("GOAL: x".into()), vec!["p1".into()]), ("B".into(), None, vec![])]);
+        let p = ai_prompt(DEFAULT_HARNESS, "login", &[("A".into(), Some("GOAL: x".into()), vec!["p1".into()]), ("B".into(), None, vec![])]);
+        assert!(p.starts_with(DEFAULT_HARNESS) && p.contains("Looking for: login"));
         assert!(p.contains("1. A | goal: GOAL: x | prompts: p1\n2. B\n"));
     }
 }

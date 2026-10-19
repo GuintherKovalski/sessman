@@ -48,6 +48,17 @@ pub struct Settings {
     pub confirm_delete_workspace: bool,
     pub restore_state: bool,
     pub notify_when_done: bool,
+    /// Jira site the overview's ticket keys link to, e.g. https://acme.atlassian.net.
+    pub jira_url: String,
+    /// Harness: the instructions each helper starts from (Settings → Harness). Empty = default.
+    pub orchestration_harness: String,
+    pub question_harness: String,
+    pub search_harness: String,
+    /// Model for workspace orchestration; empty = the helper model.
+    pub orchestration_model: String,
+    /// Minutes between automatic orchestration updates while there is new activity; 0 = only
+    /// when asked.
+    pub orchestration_every: u32,
 }
 
 impl Default for Settings {
@@ -72,6 +83,12 @@ impl Default for Settings {
             confirm_delete_workspace: true,
             restore_state: true,
             notify_when_done: false,
+            jira_url: String::new(),
+            orchestration_harness: crate::orchestration::DEFAULT_HARNESS.into(),
+            question_harness: crate::goal::QUESTION_HARNESS.into(),
+            search_harness: crate::search::DEFAULT_HARNESS.into(),
+            orchestration_model: String::new(),
+            orchestration_every: 10,
         }
     }
 }
@@ -86,6 +103,11 @@ impl Settings {
             std::fs::create_dir_all(dir)?;
         }
         std::fs::write(path, serde_json::to_string_pretty(self)?)
+    }
+
+    /// The harness text, or `default` when it was emptied.
+    pub fn harness<'a>(text: &'a str, default: &'a str) -> &'a str {
+        if text.trim().is_empty() { default } else { text }
     }
 
     pub fn theme(&self) -> ThemePreference {
@@ -279,6 +301,46 @@ pub fn ui(ui: &mut egui::Ui, s: &mut Settings, filter: &mut String, about: &Abou
             ui.checkbox(&mut s.notify_when_done, "");
         });
 
+        page.section("Overview");
+        page.row("Jira URL", "Ticket keys in the workspaces overview link here, e.g. https://acme.atlassian.net", s.jira_url != defaults.jira_url, |ui, reset| {
+            if reset {
+                s.jira_url = defaults.jira_url.clone();
+            }
+            ui.add(egui::TextEdit::singleline(&mut s.jira_url).hint_text("https://…atlassian.net").desired_width(260.0));
+        });
+
+        page.section("Harness");
+        page.row("Workspace orchestration", "What the orchestrator of each workspace is told to do; the reply format and the sessions are added after it", s.orchestration_harness != defaults.orchestration_harness, |ui, reset| {
+            if reset {
+                s.orchestration_harness = defaults.orchestration_harness.clone();
+            }
+            harness_field(ui, &mut s.orchestration_harness);
+        });
+        page.row("Orchestration model", "e.g. sonnet, opus; empty = the helper model", s.orchestration_model != defaults.orchestration_model, |ui, reset| {
+            if reset {
+                s.orchestration_model = defaults.orchestration_model.clone();
+            }
+            ui.add(egui::TextEdit::singleline(&mut s.orchestration_model).hint_text("helper model").desired_width(260.0));
+        });
+        page.row("Update orchestration every (minutes)", "While its sessions have new activity and its page is open; 0 = only when asked", s.orchestration_every != defaults.orchestration_every, |ui, reset| {
+            if reset {
+                s.orchestration_every = defaults.orchestration_every;
+            }
+            ui.add(egui::Slider::new(&mut s.orchestration_every, 0..=120));
+        });
+        page.row("Questions (right panel)", "How a question in Info → Ask about this goal starts; the goal, its checklist and the question follow", s.question_harness != defaults.question_harness, |ui, reset| {
+            if reset {
+                s.question_harness = defaults.question_harness.clone();
+            }
+            harness_field(ui, &mut s.question_harness);
+        });
+        page.row("Finding sessions (left panel)", "What the helper model is told when Enter in the search asks it; the query, reply format and session list follow", s.search_harness != defaults.search_harness, |ui, reset| {
+            if reset {
+                s.search_harness = defaults.search_harness.clone();
+            }
+            harness_field(ui, &mut s.search_harness);
+        });
+
         page.section("Keyboard shortcuts");
         for (what, keys) in shortcuts(s) {
             page.row(what, "", false, |ui, _| {
@@ -305,6 +367,13 @@ pub fn ui(ui: &mut egui::Ui, s: &mut Settings, filter: &mut String, about: &Abou
         }
     });
     *s != before
+}
+
+/// A harness's text: several lines, wide enough to read and edit as a paragraph. Emptying it
+/// brings back the default (shown as the hint).
+fn harness_field(ui: &mut egui::Ui, text: &mut String) {
+    let width = ui.available_width().clamp(260.0, 640.0);
+    ui.add(egui::TextEdit::multiline(text).desired_rows(4).desired_width(width).hint_text("empty = the default"));
 }
 
 /// Lays out sections and rows, skipping the ones the search filters out.
@@ -371,6 +440,15 @@ mod tests {
         std::fs::write(&path, "not json").unwrap();
         assert_eq!(Settings::load(&path), Settings::default());
         std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn harness_falls_back_to_its_default_when_emptied() {
+        let s = Settings::default();
+        assert_eq!(s.search_harness, crate::search::DEFAULT_HARNESS);
+        assert_eq!(Settings::harness("  \n", "D"), "D");
+        assert_eq!(Settings::harness("mine", "D"), "mine");
+        assert!(matches("harness", "Harness", "Workspace orchestration"));
     }
 
     #[test]

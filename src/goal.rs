@@ -8,6 +8,10 @@
 //!
 //! Stored as that raw text, so ticking a box just rewrites its `[ ]` / `[x]`.
 
+/// What a side question about a session (Info → Ask about this goal) starts with, editable in
+/// Settings → Harness. The goal, its checklist and the question follow it.
+pub const QUESTION_HARNESS: &str = "Side question about this session (answer briefly; do not change any files).";
+
 pub struct Goal {
     pub text: String,
     pub items: Vec<(bool, String)>,

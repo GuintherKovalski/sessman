@@ -1,6 +1,6 @@
 use serde_json::Value;
 use std::io::{BufRead, BufReader, Read};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::os::unix::process::CommandExt;
 use std::process::{Command, Stdio};
 use std::sync::mpsc::{Receiver, channel};
@@ -35,6 +35,88 @@ impl Claude {
     }
 }
 
+/// Where CLIs like `claude` usually live but a Finder-launched app's PATH
+/// (`/usr/bin:/bin:/usr/sbin:/sbin`) does not reach.
+const EXTRA_DIRS: [&str; 8] = [
+    "~/.local/bin",
+    "~/.claude/local",
+    "~/.npm-global/bin",
+    "~/.bun/bin",
+    "~/.volta/bin",
+    "/opt/homebrew/bin",
+    "/usr/local/bin",
+    "~/.cargo/bin",
+];
+
+fn expand_home(p: &str, home: &str) -> String {
+    match p.strip_prefix('~') {
+        Some(rest) if !home.is_empty() && (rest.is_empty() || rest.starts_with('/')) => format!("{home}{rest}"),
+        _ => p.to_owned(),
+    }
+}
+
+/// `current`, then the login shell's PATH, then [`EXTRA_DIRS`], without repeats.
+pub fn merged_path(current: &str, login: &str, home: &str) -> String {
+    let mut out: Vec<String> = Vec::new();
+    let extra = EXTRA_DIRS.iter().map(|d| expand_home(d, home));
+    for dir in current.split(':').chain(login.split(':')).map(str::to_owned).chain(extra) {
+        if !dir.is_empty() && !out.contains(&dir) {
+            out.push(dir);
+        }
+    }
+    out.join(":")
+}
+
+/// The command to spawn for `bin`: a path as is (with `~` expanded), a bare name as the first
+/// executable of that name on `path`, or the name unchanged when there is none.
+pub fn resolve_bin(bin: &str, path: &str, home: &str) -> PathBuf {
+    let bin = expand_home(bin.trim(), home);
+    if bin.contains('/') {
+        return PathBuf::from(bin);
+    }
+    use std::os::unix::fs::PermissionsExt;
+    path.split(':')
+        .filter(|d| !d.is_empty())
+        .map(|d| PathBuf::from(expand_home(d, home)).join(&bin))
+        .find(|p| p.metadata().is_ok_and(|m| m.is_file() && m.permissions().mode() & 0o111 != 0))
+        .unwrap_or_else(|| PathBuf::from(bin))
+}
+
+/// PATH as the user's login shell sets it, or empty if it does not answer within 3 s.
+fn login_shell_path() -> String {
+    let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/zsh".into());
+    let Ok(mut child) = Command::new(shell)
+        .args(["-ilc", "printf '\\n__SESSMAN_PATH__%s\\n' \"$PATH\""])
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+    else {
+        return String::new();
+    };
+    let mut stdout = child.stdout.take().unwrap();
+    let (tx, rx) = channel();
+    std::thread::spawn(move || {
+        let mut s = String::new();
+        let _ = stdout.read_to_string(&mut s);
+        let _ = tx.send(s);
+    });
+    let out = rx.recv_timeout(std::time::Duration::from_secs(3)).unwrap_or_default();
+    let _ = child.kill();
+    let _ = child.wait();
+    out.lines().find_map(|l| l.strip_prefix("__SESSMAN_PATH__")).unwrap_or_default().to_owned()
+}
+
+/// Gives this process (and so every `claude` run and the tools it starts) the PATH a terminal
+/// would have. Call first thing in `main`, before any thread starts.
+pub fn fix_path() {
+    let current = std::env::var("PATH").unwrap_or_default();
+    let home = std::env::var("HOME").unwrap_or_default();
+    let path = merged_path(&current, &login_shell_path(), &home);
+    // SAFETY: called at the start of main, while this is the only thread.
+    unsafe { std::env::set_var("PATH", path) };
+}
+
 static CLAUDE: RwLock<Option<Claude>> = RwLock::new(None);
 
 pub fn configure(c: Claude) {
@@ -47,7 +129,9 @@ fn claude() -> Claude {
 
 /// `claude -p` with the extra arguments from Settings.
 fn command(c: &Claude) -> Command {
-    let mut cmd = Command::new(&c.bin);
+    let path = std::env::var("PATH").unwrap_or_default();
+    let home = std::env::var("HOME").unwrap_or_default();
+    let mut cmd = Command::new(resolve_bin(&c.bin, &path, &home));
     cmd.arg("-p").args(&c.extra);
     cmd
 }
@@ -210,9 +294,15 @@ pub fn summarize_goal(ctx: eframe::egui::Context, digest: String) -> Receiver<Re
 
 /// A one-off question to the helper model (Haiku by default), outside any session.
 pub fn ask_haiku(ctx: eframe::egui::Context, prompt: String) -> Receiver<Result<String, String>> {
+    ask_model(ctx, "", prompt)
+}
+
+/// A one-off question to `model` (the helper model when empty), outside any session.
+pub fn ask_model(ctx: eframe::egui::Context, model: &str, prompt: String) -> Receiver<Result<String, String>> {
     let c = claude();
+    let model = if model.trim().is_empty() { c.helper.clone() } else { model.trim().to_owned() };
     let mut cmd = command(&c);
-    cmd.args(["--model", &c.helper, "--no-session-persistence", &prompt]).current_dir(std::env::temp_dir());
+    cmd.args(["--model", &model, "--no-session-persistence", &prompt]).current_dir(std::env::temp_dir());
     run(ctx, cmd)
 }
 
@@ -259,6 +349,21 @@ pub fn pick_folder(start: Option<PathBuf>) -> Option<PathBuf> {
 #[cfg(not(target_os = "macos"))]
 pub fn pick_folder(_start: Option<PathBuf>) -> Option<PathBuf> {
     None
+}
+
+/// Moves a file or folder to the Trash (Finder's Put Back can restore it).
+#[cfg(target_os = "macos")]
+pub fn trash(path: &Path) -> Result<(), String> {
+    use objc2_foundation::{NSFileManager, NSString, NSURL};
+    let url = NSURL::fileURLWithPath(&NSString::from_str(&path.to_string_lossy()));
+    NSFileManager::defaultManager()
+        .trashItemAtURL_resultingItemURL_error(&url, None)
+        .map_err(|e| e.localizedDescription().to_string())
+}
+
+#[cfg(not(target_os = "macos"))]
+pub fn trash(path: &Path) -> Result<(), String> {
+    if path.is_dir() { std::fs::remove_dir_all(path) } else { std::fs::remove_file(path) }.map_err(|e| e.to_string())
 }
 
 /// A system notification (macOS), e.g. when a run ends while sessman is in the background.
@@ -338,6 +443,52 @@ mod tests {
             }
         }
         assert!(started.elapsed() < std::time::Duration::from_secs(3), "took {:?}", started.elapsed());
+    }
+
+    /// Regression: launched from Finder, PATH lacks ~/.local/bin, so spawning a bare `claude`
+    /// failed with "No such file or directory (os error 2)".
+    #[test]
+    fn merged_path_adds_user_dirs_to_a_finder_path() {
+        let p = merged_path("/usr/bin:/bin:/usr/sbin:/sbin", "", "/Users/me");
+        let dirs: Vec<&str> = p.split(':').collect();
+        assert_eq!(dirs[..4], ["/usr/bin", "/bin", "/usr/sbin", "/sbin"]);
+        assert!(dirs.contains(&"/Users/me/.local/bin"));
+        assert!(dirs.contains(&"/opt/homebrew/bin"));
+        let p = merged_path("/usr/bin:/opt/homebrew/bin", "/custom/bin:/usr/bin", "/Users/me");
+        let dirs: Vec<&str> = p.split(':').collect();
+        assert_eq!(dirs[..3], ["/usr/bin", "/opt/homebrew/bin", "/custom/bin"]);
+        assert_eq!(dirs.iter().filter(|d| **d == "/usr/bin").count(), 1);
+        assert_eq!(dirs.iter().filter(|d| **d == "/opt/homebrew/bin").count(), 1);
+    }
+
+    #[test]
+    fn resolve_bin_finds_claude_outside_the_finder_path() {
+        use std::os::unix::fs::PermissionsExt;
+        let home = std::env::temp_dir().join(format!("sessman-resolve-{}", std::process::id()));
+        let bin_dir = home.join(".local/bin");
+        std::fs::create_dir_all(&bin_dir).unwrap();
+        let claude = bin_dir.join("claude");
+        std::fs::write(&claude, "#!/bin/sh\n").unwrap();
+        std::fs::set_permissions(&claude, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let home_s = home.to_str().unwrap();
+
+        // Not on the bare Finder PATH, found once the user dirs are merged in.
+        assert_eq!(resolve_bin("claude", "/usr/bin:/bin", home_s), PathBuf::from("claude"));
+        let path = merged_path("/usr/bin:/bin", "", home_s);
+        assert_eq!(resolve_bin("claude", &path, home_s), claude);
+        // Paths are kept, with ~ expanded.
+        assert_eq!(resolve_bin("~/.local/bin/claude", "", home_s), claude);
+        assert_eq!(resolve_bin("/opt/x/claude", "", home_s), PathBuf::from("/opt/x/claude"));
+        // A non-executable file of that name is skipped.
+        std::fs::set_permissions(&claude, std::fs::Permissions::from_mode(0o644)).unwrap();
+        assert_eq!(resolve_bin("claude", &path, home_s), PathBuf::from("claude"));
+        std::fs::remove_dir_all(&home).unwrap();
+    }
+
+    /// The bundled app gets this PATH; the real `claude` must be reachable through it.
+    #[test]
+    fn login_shell_path_is_nonempty() {
+        assert!(!login_shell_path().is_empty());
     }
 
     #[test]

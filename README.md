@@ -3,17 +3,22 @@
 A small desktop app for browsing and continuing Claude Code sessions.
 
 - **Top**: a thin bar that holds the macOS window buttons (drag to move, double-click to zoom)
-- **Left**: a **+ New session** button (native folder picker), then your sessions from `~/.claude/projects`, newest first (refreshes on its own), with workspace tabs (+ to create, drag or right-click → Move to). **Search** at the bottom: type to filter by name, goal, then content; Enter asks Haiku
+- **Left**: a **+ New session** button (native folder picker), then your sessions from `~/.claude/projects`, newest first (refreshes on its own), with workspace tabs (+ to create, drag or right-click → Move to). Shift-click (range), Cmd-click, or drag a box from an unselected row to pick several sessions; drag the picked ones onto a tab, or right-click them to move, remove or move to the Trash (Esc clears the picks). **Search** at the bottom: type to filter by name, goal, then content; Enter asks Haiku
+- **Orchestration**: in each workspace tab, a bubble above its sessions (filled with the workspace color, with a ◆ mark and a progress line) opens the workspace's orchestration page: overall progress, what needs you, next steps, and a card per session (live state, what it is doing, its next step, goal checklist). The helper model writes the report and updates it with only the new activity; **Clear & re-summarize** starts it over from scratch. Ask the orchestrator questions at the bottom of the page
 - **Center bottom**: a terminal-style prompt input that grows upwards as you type (Shift+Enter for a new line), with a drag handle to resize or collapse it. Up/Down walks through this session's previous prompts; Enter sends the prompt via `claude -p --resume <id>`, and Claude's progress streams in live. While Claude works, Enter queues prompts (shown above the input) and **Ctrl+C** stops it at once. **✨ / Cmd+Enter** refines the prompt with a helper model, asking skippable questions when it is ambiguous. **🎤** dictates: click to start, click again to stop, and the speech is transcribed locally with Whisper and inserted at the cursor
 - **Center**: the conversation as Markdown cards, with real tables, highlighted code and clickable links (bare URLs too); click anywhere to focus the input. Files open in tabs that belong to their session; `.md` files open rendered. **Ctrl+F** (or Cmd+F) finds text in whatever is on screen, the conversation or the open file: Enter / Shift+Enter step through the matches, Esc closes
-- **Settings** (⚙ or Cmd+,): appearance, prompt input, files, Claude command and models, behaviour, shortcuts
+- **Settings** (⚙ or Cmd+,): appearance, prompt input, files, Claude command and models, behaviour, **harness** (editable instructions for workspace orchestration, the Info panel's questions and the session search, plus the orchestration model and update interval), shortcuts
 - **Restart-proof**: the open workspace and session, tabs, drafts, queues and layout come back after a restart; each workspace reopens its last session
 - **Right**: tabs. **Changes**: code changes grouped by file with syntax highlighting, and a file list (click to filter, double-click to open the file read-only in a main-area tab). **Info**: session goal with a subgoal checklist and a field to ask about it, model, context usage, usage limits
 
 ```sh
 cargo run --release
 cargo test
+scripts/bundle.sh     # builds sessman.app with its icon into ~/Applications (or a dir you pass)
 ```
+
+Pin `~/Applications/sessman.app` in the Dock, not `target/release/sessman`: a bare binary shows
+the generic executable icon whenever the app isn't running.
 
 Dictation (the 🎤 button by the prompt) needs a few things on macOS, once:
 

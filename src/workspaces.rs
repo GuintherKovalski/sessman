@@ -30,7 +30,7 @@ const PALETTE: [[u8; 3]; 10] = [
 ];
 
 /// User-defined groups of sessions. A session lives in at most one workspace.
-#[derive(Serialize, Deserialize, Default, Debug, PartialEq)]
+#[derive(Serialize, Deserialize, Default, Debug)]
 pub struct Workspaces {
     pub list: Vec<Workspace>,
     /// Session last open in "All sessions".
@@ -39,6 +39,15 @@ pub struct Workspaces {
     /// Folder last chosen in the picker, where it opens next time.
     #[serde(default)]
     pub last_folder: Option<PathBuf>,
+    /// The file as last read or written here, to notice when another sessman changed it.
+    #[serde(skip)]
+    disk: String,
+}
+
+impl PartialEq for Workspaces {
+    fn eq(&self, other: &Self) -> bool {
+        (&self.list, &self.last_all, &self.last_folder) == (&other.list, &other.last_all, &other.last_folder)
+    }
 }
 
 impl Workspaces {
@@ -47,14 +56,35 @@ impl Workspaces {
     }
 
     pub fn load(path: &Path) -> Self {
-        let mut w: Self =
-            std::fs::read_to_string(path).ok().and_then(|s| serde_json::from_str(&s).ok()).unwrap_or_default();
+        let disk = std::fs::read_to_string(path).unwrap_or_default();
+        let mut w = Self::parse(&disk).unwrap_or_default();
+        w.disk = disk;
+        w
+    }
+
+    fn parse(json: &str) -> Option<Self> {
+        let mut w: Self = serde_json::from_str(json).ok()?;
         for i in 0..w.list.len() {
             if w.list[i].color.is_none() {
                 w.list[i].color = Some(w.free_color());
             }
         }
-        w
+        Some(w)
+    }
+
+    /// Takes the file's contents if another sessman changed it since it was last read or
+    /// written here, so a change is made on top of theirs instead of overwriting it.
+    /// True if anything was taken.
+    pub fn refresh(&mut self, path: &Path) -> bool {
+        let Ok(disk) = std::fs::read_to_string(path) else { return false };
+        if disk == self.disk {
+            return false;
+        }
+        let Some(mut w) = Self::parse(&disk) else { return false };
+        w.disk = disk;
+        let changed = w != *self;
+        *self = w;
+        changed
     }
 
     /// First palette color no workspace uses; past the palette, a golden-angle hue.
@@ -74,11 +104,17 @@ impl Workspaces {
         self.list.iter().find(|w| w.sessions.iter().any(|s| s == session)).and_then(|w| w.color)
     }
 
-    pub fn save(&self, path: &Path) -> std::io::Result<()> {
+    /// Writes through a temporary file, so a reader never sees a half-written file.
+    pub fn save(&mut self, path: &Path) -> std::io::Result<()> {
         if let Some(dir) = path.parent() {
             std::fs::create_dir_all(dir)?;
         }
-        std::fs::write(path, serde_json::to_string_pretty(self)?)
+        let json = serde_json::to_string_pretty(self)?;
+        let tmp = path.with_extension(format!("json.{}.tmp", std::process::id()));
+        std::fs::write(&tmp, &json)?;
+        std::fs::rename(&tmp, path)?;
+        self.disk = json;
+        Ok(())
     }
 
     pub fn add(&mut self, name: &str) -> Option<usize> {
@@ -249,6 +285,28 @@ mod tests {
         let w = Workspaces::load(&path);
         std::fs::remove_file(path).unwrap();
         assert!(w.list[0].color.is_some() && w.list[0].color != w.list[1].color);
+    }
+
+    #[test]
+    fn a_change_from_another_instance_is_kept() {
+        let path = std::env::temp_dir().join(format!("sessman-two-{}.json", std::process::id()));
+        let mut a = Workspaces::default();
+        a.add("x");
+        a.save(&path).unwrap();
+        let mut b = Workspaces::load(&path);
+        b.move_to("from-b", 0);
+        b.save(&path).unwrap();
+        assert!(!b.refresh(&path), "its own write is not news");
+        // `a` still has the old list in memory; it refreshes before changing anything.
+        assert!(a.refresh(&path));
+        a.move_to("from-a", 0);
+        a.save(&path).unwrap();
+        assert_eq!(Workspaces::load(&path).list[0].sessions, vec!["from-b", "from-a"]);
+        // A broken file is not taken.
+        std::fs::write(&path, "{").unwrap();
+        assert!(!a.refresh(&path));
+        assert_eq!(a.list[0].sessions.len(), 2);
+        std::fs::remove_file(path).unwrap();
     }
 
     #[test]

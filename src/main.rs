@@ -5,6 +5,8 @@ mod find;
 mod goal;
 mod history;
 mod names;
+mod orchestration;
+mod overview;
 mod queue;
 mod refine;
 mod runner;
@@ -22,6 +24,7 @@ fn main() -> eframe::Result {
         status::run();
         return Ok(());
     }
+    runner::fix_path();
     let options = eframe::NativeOptions {
         viewport: viewport(),
         // Window size and position, panel widths and scroll positions (egui's own memory).
@@ -41,6 +44,8 @@ fn viewport() -> eframe::egui::ViewportBuilder {
     eframe::egui::ViewportBuilder::default()
         .with_inner_size([1400.0, 850.0])
         .with_title("sessman")
+        // The same image scripts/bundle.sh puts in sessman.app, so running and quit look alike.
+        .with_icon(eframe::icon_data::from_png_bytes(include_bytes!("../assets/icon.png")).expect("valid icon"))
         .with_fullsize_content_view(true)
         .with_titlebar_shown(false)
         .with_title_shown(false)

@@ -5,6 +5,8 @@ use crate::goal;
 use crate::history::History;
 use crate::markdown;
 use crate::names::Names;
+use crate::orchestration;
+use crate::overview::{self, Overviews};
 use crate::queue::Queue;
 use crate::refine;
 use crate::runner::{self, RunEvent};
@@ -18,7 +20,7 @@ use crate::workspaces::{self, Workspaces};
 use eframe::egui::text::{CCursor, CCursorRange};
 use eframe::egui::{self, Align2, Color32, Id, Key, LayerId, Modifiers, Order, RichText, Sense, Stroke, StrokeKind};
 use egui_commonmark::CommonMarkCache;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::mpsc::{self, Receiver, TryRecvError};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -30,13 +32,20 @@ pub const TITLE_BAR_HEIGHT: f32 = 28.0;
 enum Action {
     Select(usize),
     Tab(Option<usize>),
-    MoveTo(String, usize),
-    Remove(String),
+    MoveTo(Vec<String>, usize),
+    Remove(Vec<String>),
+    /// The sessions picked for moving or deleting together (Shift/Cmd-click), replacing the
+    /// picked ones; the session clicked becomes where a Shift-click range starts.
+    Pick(HashSet<String>, String),
+    /// Ask to move these sessions to the Trash.
+    Trash(Vec<String>),
     DeleteWorkspace(usize),
     Rename(String, String),
     CancelRename,
     /// Back to a new session whose first prompt is running (it isn't on disk yet).
     OpenPending(String),
+    /// The open workspace's orchestration page.
+    Orchestrate,
 }
 
 #[derive(PartialEq)]
@@ -73,6 +82,15 @@ pub struct App {
     new_workspace: Option<String>,
     /// Workspace waiting for "Delete?" to be confirmed.
     confirm_delete: Option<usize>,
+    /// Sessions picked with Shift/Cmd-click or a drawn box, to move or delete together.
+    picked: HashSet<String>,
+    /// Session a Shift-click range starts from: the one last clicked.
+    pick_anchor: Option<String>,
+    /// A box being drawn over the session list: its start, from the list's top-left (so it
+    /// scrolls with the list), and what was picked before (Shift adds to it).
+    lasso: Option<(egui::Vec2, HashSet<String>)>,
+    /// Sessions waiting for "Move to Trash?" to be confirmed.
+    confirm_trash: Vec<String>,
     /// Index into the open session's messages of the "You" prompt pinned above the conversation.
     pinned: Option<usize>,
     /// Whether a "You" prompt was on screen in the conversation last frame; the pinned one hides then.
@@ -90,9 +108,14 @@ pub struct App {
     goals: Names,
     /// Session id whose goal is being summarized, and the pending result.
     summarizing: Option<(String, Receiver<Result<String, String>>)>,
-    btw: Option<Btw>,
+    /// Side questions per session id, oldest first; kept until closed with their ×.
+    btw: HashMap<String, Vec<Btw>>,
     /// Text in the Info tab's "ask about this goal" field.
     goal_question: String,
+    /// Heights measured last frame: the Info sections, and the question field. The questions
+    /// area grows upwards until it meets the sections.
+    info_height: f32,
+    goal_field_height: f32,
     /// Changes tab shows only this file, when set.
     changes_filter: Option<String>,
     /// Files open read-only in the main area, for the open session.
@@ -124,6 +147,10 @@ pub struct App {
     refine_undo: Option<(String, String)>,
     /// Microphone dictation into the input (the mic button).
     dictation: Dictation,
+    /// The "download the Whisper model?" modal, shown when the mic is used without the model.
+    model_prompt: Option<ModelPrompt>,
+    /// Recent microphone levels (0..1, oldest first) for the meter shown while recording.
+    mic_levels: std::collections::VecDeque<f32>,
     /// Background indexer: fresh session lists + content index, and a channel to poke it.
     snapshots: Receiver<search::Snapshot>,
     poke_index: std::sync::mpsc::Sender<()>,
@@ -138,6 +165,16 @@ pub struct App {
     saved_state: String,
     /// Find in the main area (Ctrl+F): the conversation or the open file tab.
     find: Find,
+    /// Workspace summaries for the overview in All sessions, those being written (by
+    /// workspace name), and the last failure of each (not retried until asked).
+    overviews: Overviews,
+    overview_jobs: HashMap<String, Receiver<Result<overview::Summary, String>>>,
+    overview_errors: HashMap<String, String>,
+    /// The main area shows the open workspace's orchestration page (with no session open).
+    orchestrating: bool,
+    /// Each workspace's orchestration report and questions (by name), and those in flight.
+    orchestrations: orchestration::Store,
+    orch: orchestration::Jobs,
 }
 
 /// A running `claude -p` for one session: its events, the reply being written, the tool it
@@ -193,6 +230,63 @@ enum Dictation {
     Transcribing(Receiver<Result<String, String>>),
 }
 
+/// Bars in the microphone level meter, and the width of the meter with its dot and timer.
+const MIC_BARS: usize = 14;
+const MIC_METER_WIDTH: f32 = 120.0;
+
+/// What shows while recording: a pulsing red dot, the time so far, and a level meter that
+/// scrolls right to left, so it is clear the microphone is on and hearing something.
+fn recording_meter(ui: &mut egui::Ui, recorder: &dictation::Recorder, levels: &mut std::collections::VecDeque<f32>, red: Color32) {
+    // A new bar every 60 ms, holding the loudest sample since the last one.
+    let now = ui.input(|i| i.time);
+    let last = ui.data(|d| d.get_temp::<f64>(Id::new("mic-sampled"))).unwrap_or(0.0);
+    if now - last >= 0.06 {
+        levels.push_back(recorder.take_level());
+        while levels.len() > MIC_BARS {
+            levels.pop_front();
+        }
+        ui.data_mut(|d| d.insert_temp(Id::new("mic-sampled"), now));
+    }
+    ui.ctx().request_repaint_after(std::time::Duration::from_millis(33));
+
+    let row = ui.text_style_height(&egui::TextStyle::Body);
+    let (rect, _) = ui.allocate_exact_size(egui::vec2(MIC_METER_WIDTH, row), Sense::hover());
+    let painter = ui.painter_at(rect);
+    let mid = rect.center().y;
+    // Dot: breathes in size and brightness.
+    let pulse = 0.5 + 0.5 * (now * std::f64::consts::TAU / 1.2).sin() as f32;
+    let dot = egui::pos2(rect.left() + 6.0, mid);
+    painter.circle_filled(dot, 5.0 + 2.5 * pulse, red.gamma_multiply(0.25 * pulse));
+    painter.circle_filled(dot, 4.0, red.gamma_multiply(0.7 + 0.3 * pulse));
+    // Timer.
+    let secs = recorder.elapsed().as_secs();
+    let timer = painter.text(
+        egui::pos2(dot.x + 10.0, mid),
+        Align2::LEFT_CENTER,
+        format!("{}:{:02}", secs / 60, secs % 60),
+        egui::FontId::monospace(row * 0.8),
+        red,
+    );
+    // Meter: thin rounded bars, centered vertically, the newest on the right.
+    let (left, right) = (timer.right() + 8.0, rect.right() - 4.0);
+    let step = (right - left) / MIC_BARS as f32;
+    let width = (step * 0.55).max(1.5);
+    for (i, &level) in levels.iter().enumerate() {
+        let height = 2.0 + (row - 4.0) * level;
+        let x = left + step * (i as f32 + 0.5);
+        let bar = egui::Rect::from_center_size(egui::pos2(x, mid), egui::vec2(width, height));
+        painter.rect_filled(bar, width / 2.0, red.gamma_multiply(0.45 + 0.55 * level));
+    }
+}
+
+/// The Whisper model modal: asking first, downloading, then done or failed.
+enum ModelPrompt {
+    Ask,
+    Downloading(std::process::Child),
+    Done,
+    Failed(String),
+}
+
 impl App {
     pub fn new(ctx: &egui::Context) -> Self {
         let (snapshots, poke_index) = search::spawn_indexer(ctx.clone());
@@ -212,6 +306,10 @@ impl App {
             tab: None,
             new_workspace: None,
             confirm_delete: None,
+            picked: HashSet::new(),
+            pick_anchor: None,
+            lasso: None,
+            confirm_trash: Vec::new(),
             pinned: None,
             inline_you: false,
             names: Names::load(&Names::path()),
@@ -222,8 +320,10 @@ impl App {
             right_tab: RightTab::Changes,
             goals: Names::load(&Names::goals_path()),
             summarizing: None,
-            btw: None,
+            btw: HashMap::new(),
             goal_question: String::new(),
+            info_height: 0.0,
+            goal_field_height: 0.0,
             changes_filter: None,
             file_tabs: Vec::new(),
             main_tab: None,
@@ -242,6 +342,8 @@ impl App {
             refine: None,
             refine_undo: None,
             dictation: Dictation::Idle,
+            model_prompt: None,
+            mic_levels: std::collections::VecDeque::new(),
             snapshots,
             poke_index,
             index: search::Index::new(),
@@ -251,6 +353,12 @@ impl App {
             ai: None,
             saved_state: String::new(),
             find: Find::default(),
+            overviews: Overviews::load(&Overviews::path()),
+            overview_jobs: HashMap::new(),
+            overview_errors: HashMap::new(),
+            orchestrating: false,
+            orchestrations: orchestration::Store::load(&orchestration::Store::path()),
+            orch: orchestration::Jobs::default(),
         };
         app.apply_settings();
         // Persist colors assigned on load to workspaces saved before colors existed.
@@ -273,8 +381,11 @@ impl App {
         self.search = st.search;
         self.prompt_height = st.prompt_height;
         self.prompt_collapsed = st.prompt_collapsed;
-        if let Some(i) = st.open.and_then(|id| self.sessions.iter().position(|s| s.id == id)) {
-            self.select(i);
+        match st.open.and_then(|id| self.sessions.iter().position(|s| s.id == id)) {
+            Some(i) => self.select(i),
+            // A workspace that was on its orchestration page (or empty) opens on it again.
+            None if self.tab.is_some() => self.open_tab(),
+            None => {}
         }
     }
 
@@ -318,6 +429,21 @@ impl App {
         markdown::SHOW_TOOLS.store(self.settings.show_tool_lines, std::sync::atomic::Ordering::Relaxed);
     }
 
+    /// Takes workspace changes another sessman saved, so a change made here doesn't overwrite
+    /// them. `w`, a workspace index from before, comes back for the same workspace (None if
+    /// it is gone); the open tab follows its workspace the same way.
+    fn sync_workspaces(&mut self, w: Option<usize>) -> Option<usize> {
+        let name = |ws: &Workspaces, i: Option<usize>| i.and_then(|i| ws.list.get(i)).map(|w| w.name.clone());
+        let (tab, w_name) = (name(&self.workspaces, self.tab), name(&self.workspaces, w));
+        if !self.workspaces.refresh(&Workspaces::path()) {
+            return w;
+        }
+        let list = &self.workspaces.list;
+        let find = |n: Option<String>| n.and_then(|n| list.iter().position(|x| x.name == n));
+        self.tab = find(tab);
+        find(w_name)
+    }
+
     fn save_workspaces(&mut self) {
         if let Err(e) = self.workspaces.save(&Workspaces::path()) {
             self.error = Some(format!("could not save workspaces: {e}"));
@@ -326,16 +452,32 @@ impl App {
 
     fn apply(&mut self, action: Action) {
         match action {
-            Action::Select(i) => self.select(i),
+            Action::Select(i) => {
+                self.picked.clear();
+                self.pick_anchor = Some(self.sessions[i].id.clone());
+                self.select(i);
+            }
             Action::Tab(t) => self.switch_tab(t),
-            Action::MoveTo(id, w) => {
-                self.workspaces.move_to(&id, w);
+            Action::MoveTo(ids, w) => {
+                if let Some(w) = self.sync_workspaces(Some(w)) {
+                    for id in &ids {
+                        self.workspaces.move_to(id, w);
+                    }
+                    self.save_workspaces();
+                }
+            }
+            Action::Remove(ids) => {
+                self.sync_workspaces(None);
+                for id in &ids {
+                    self.workspaces.remove(id);
+                }
                 self.save_workspaces();
             }
-            Action::Remove(id) => {
-                self.workspaces.remove(&id);
-                self.save_workspaces();
+            Action::Pick(ids, anchor) => {
+                self.picked = ids;
+                self.pick_anchor = Some(anchor);
             }
+            Action::Trash(ids) => self.confirm_trash = ids,
             Action::Rename(id, name) => {
                 self.renaming = None;
                 self.names.set(&id, &name);
@@ -347,10 +489,12 @@ impl App {
             Action::DeleteWorkspace(w) if self.settings.confirm_delete_workspace => self.confirm_delete = Some(w),
             Action::DeleteWorkspace(w) => self.delete_workspace(w),
             Action::OpenPending(id) => self.open_pending(&id),
+            Action::Orchestrate => self.show_orchestration(),
         }
     }
 
     fn delete_workspace(&mut self, w: usize) {
+        let Some(w) = self.sync_workspaces(Some(w)) else { return };
         let showing = self.tab == Some(w);
         self.workspaces.delete(w);
         self.save_workspaces();
@@ -360,6 +504,51 @@ impl App {
         } else if let Some(t) = self.tab.filter(|&t| t > w) {
             self.tab = Some(t - 1);
         }
+    }
+
+    /// Moves sessions' files to the Trash and drops them from the list and the workspaces.
+    /// Sessions Claude is working in are skipped.
+    fn trash_sessions(&mut self, ids: &[String]) {
+        let mut trashed = HashSet::new();
+        let mut failed = Vec::new();
+        for id in ids {
+            let Some(i) = self.sessions.iter().position(|s| &s.id == id) else { continue };
+            if self.runs.contains_key(id) {
+                failed.push(format!("\"{}\": Claude is working in it", self.title(i)));
+                continue;
+            }
+            let path = &self.sessions[i].path;
+            if let Err(e) = runner::trash(path) {
+                failed.push(format!("\"{}\": {e}", self.title(i)));
+                continue;
+            }
+            // Claude keeps a session's subagent and tool output in a folder named like its file.
+            let dir = path.with_extension("");
+            if dir.is_dir() {
+                let _ = runner::trash(&dir);
+            }
+            trashed.insert(id.clone());
+        }
+        if !failed.is_empty() {
+            self.error = Some(format!("could not move to the Trash: {}", failed.join("; ")));
+        }
+        if trashed.is_empty() {
+            return;
+        }
+        let open = self.selected.map(|i| self.sessions[i].id.clone());
+        self.sessions.retain(|s| !trashed.contains(&s.id));
+        self.selected = open.as_ref().and_then(|id| self.sessions.iter().position(|s| &s.id == id));
+        self.generation += 1;
+        self.picked.retain(|id| !trashed.contains(id));
+        self.sync_workspaces(None);
+        for id in &trashed {
+            self.workspaces.remove(id);
+        }
+        self.save_workspaces();
+        if open.is_some_and(|id| trashed.contains(&id)) {
+            self.open_tab();
+        }
+        let _ = self.poke_index.send(());
     }
 
     /// Key of the session in the main area, for its view: its id, or the folder of a new
@@ -408,9 +597,10 @@ impl App {
         let id = self.sessions[i].id.clone();
         self.switch_view(Some(id.clone()));
         self.selected = Some(i);
-        self.btw = None;
         self.new_session = None;
+        self.orchestrating = false;
         self.focus_prompt = true;
+        self.sync_workspaces(None);
         if self.workspaces.set_last(self.tab, &id) {
             self.save_workspaces();
         }
@@ -420,28 +610,342 @@ impl App {
     /// A workspace tab (or All) was clicked: it shows the session last open there.
     fn switch_tab(&mut self, t: Option<usize>) {
         if self.tab == t {
+            if t.is_none() {
+                self.show_overview();
+            }
             return;
         }
         self.tab = t;
+        self.picked.clear();
         self.open_tab();
     }
 
-    /// Opens the session last open in the current tab (or its newest; nothing if empty).
+    /// Opens what was last open in the current workspace: a session (else its newest), or its
+    /// orchestration page, which an empty workspace also opens on. All sessions opens on the
+    /// overview.
     fn open_tab(&mut self) {
-        let t = self.tab;
+        let Some(t) = self.tab else { return self.show_overview() };
+        if self.workspaces.last(Some(t)) == Some(orchestration::LAST_KEY) {
+            return self.show_orchestration();
+        }
         let visible = self.visible();
         let ids: Vec<&str> = visible.iter().map(|&i| self.sessions[i].id.as_str()).collect();
-        match workspaces::pick_session(self.workspaces.last(t), &ids) {
+        match workspaces::pick_session(self.workspaces.last(Some(t)), &ids) {
             Some(k) => self.select(visible[k]),
-            None => {
-                self.switch_view(None);
-                self.selected = None;
-                self.open = None;
-                self.new_session = None;
-                self.history = History::default();
-                self.pinned = None;
-                self.inline_you = false;
+            None => self.show_orchestration(),
+        }
+    }
+
+    /// Nothing open in the main area: an empty workspace, or the overview in All sessions.
+    fn close_session(&mut self) {
+        self.switch_view(None);
+        self.selected = None;
+        self.open = None;
+        self.new_session = None;
+        self.history = History::default();
+        self.pinned = None;
+        self.inline_you = false;
+    }
+
+    fn show_overview(&mut self) {
+        self.close_session();
+        self.orchestrating = false;
+        self.main_tab = None;
+        self.settings_active = false;
+    }
+
+    /// The open workspace's orchestration page in the main area; the tab reopens on it.
+    fn show_orchestration(&mut self) {
+        let Some(t) = self.tab else { return };
+        self.close_session();
+        self.orchestrating = true;
+        self.main_tab = None;
+        self.settings_active = false;
+        self.sync_workspaces(None);
+        if self.workspaces.set_last(Some(t), orchestration::LAST_KEY) {
+            self.save_workspaces();
+        }
+    }
+
+    fn showing_orchestration(&self) -> bool {
+        self.orchestrating && self.tab.is_some() && self.open.is_none() && !(self.settings_active && self.settings_tab)
+    }
+
+    /// Workspace `w`'s sessions as the orchestrator reads them, newest first.
+    fn orchestration_members(&self, w: usize) -> Vec<orchestration::Member> {
+        self.workspace_sessions(w)
+            .into_iter()
+            .map(|i| {
+                let s = &self.sessions[i];
+                orchestration::Member {
+                    id: s.id.clone(),
+                    title: self.title(i).to_owned(),
+                    goal: self.goals.get(&s.id).map(str::to_owned),
+                    path: s.path.clone(),
+                    modified: overview::secs(s.modified),
+                    running: self.runs.contains_key(&s.id),
+                    queued: self.queues.get(&s.id).map_or(0, |q| q.items.len()),
+                }
+            })
+            .collect()
+    }
+
+    /// Updates workspace `w`'s report with what is new, or (`fresh`, or no report yet) writes
+    /// it from scratch. Nothing if one is already being written.
+    fn update_orchestration(&mut self, w: usize, fresh: bool) {
+        let name = self.workspaces.list[w].name.clone();
+        let members = self.orchestration_members(w);
+        if members.is_empty() || self.orch.updating.contains_key(&name) {
+            return;
+        }
+        let previous = if fresh { None } else { self.orchestrations.get(&name).cloned() };
+        let harness = Settings::harness(&self.settings.orchestration_harness, orchestration::DEFAULT_HARNESS).to_owned();
+        let rx = orchestration::update(self.ctx.clone(), harness, self.settings.orchestration_model.clone(), members, previous);
+        self.orch.errors.remove(&name);
+        self.orch.updating.insert(name, rx);
+    }
+
+    fn save_orchestrations(&mut self) {
+        if let Err(e) = self.orchestrations.save(&orchestration::Store::path()) {
+            self.error = Some(format!("could not save the orchestration: {e}"));
+        }
+    }
+
+    /// Takes finished orchestration updates and answers, for every workspace.
+    fn poll_orchestration(&mut self) {
+        let now = overview::secs(SystemTime::now());
+        let mut changed = false;
+        let mut done = Vec::new();
+        for (name, rx) in &self.orch.updating {
+            match rx.try_recv() {
+                Ok(result) => done.push((name.clone(), result)),
+                Err(TryRecvError::Empty) => {}
+                Err(TryRecvError::Disconnected) => done.push((name.clone(), Err("stopped unexpectedly".into()))),
             }
+        }
+        for (name, result) in done {
+            self.orch.updating.remove(&name);
+            match result {
+                Ok(u) => {
+                    self.orchestrations.entry(&name).apply(u, now);
+                    changed = true;
+                }
+                Err(e) => {
+                    self.orch.errors.insert(name, e);
+                }
+            }
+        }
+        let mut answered = Vec::new();
+        for (name, (_, rx)) in &self.orch.asking {
+            match rx.try_recv() {
+                Ok(result) => answered.push((name.clone(), result)),
+                Err(TryRecvError::Empty) => {}
+                Err(TryRecvError::Disconnected) => answered.push((name.clone(), Err("stopped unexpectedly".into()))),
+            }
+        }
+        for (name, result) in answered {
+            let Some((question, _)) = self.orch.asking.remove(&name) else { continue };
+            match result {
+                Ok(answer) => {
+                    self.orchestrations.entry(&name).answered(question, answer, now);
+                    changed = true;
+                }
+                Err(e) => {
+                    // The question goes back to the field to try again.
+                    if self.orch.question.trim().is_empty() {
+                        self.orch.question = question;
+                    }
+                    self.orch.ask_errors.insert(name, e);
+                }
+            }
+        }
+        if changed {
+            self.save_orchestrations();
+        }
+    }
+
+    /// The open workspace's orchestration page. The report updates on its own when it is
+    /// missing, or when there is news and the last update is old enough (Settings).
+    fn orchestration(&mut self, ui: &mut egui::Ui) {
+        let Some(w) = self.tab.filter(|&w| w < self.workspaces.list.len()) else { return };
+        let name = self.workspaces.list[w].name.clone();
+        let members = self.orchestration_members(w);
+        let now = overview::secs(SystemTime::now());
+        if !self.orch.updating.contains_key(&name)
+            && !self.orch.errors.contains_key(&name)
+            && orchestration::due(self.orchestrations.get(&name), &members, self.settings.orchestration_every, now)
+        {
+            self.update_orchestration(w, false);
+        }
+        // Checked again every minute while the page is open, for news to report.
+        ui.ctx().request_repaint_after(std::time::Duration::from_secs(60));
+        let live: Vec<orchestration::Live> = members
+            .iter()
+            .map(|m| {
+                let checklist = self.goals.get(&m.id).map(goal::parse).map(|g| (g.items.iter().filter(|(d, _)| *d).count(), g.items.len()));
+                orchestration::Live {
+                    id: &m.id,
+                    title: &m.title,
+                    running: m.running,
+                    tool: self.runs.get(&m.id).and_then(|r| r.tool.as_deref()),
+                    queued: m.queued,
+                    modified: m.modified,
+                    checklist,
+                }
+            })
+            .collect();
+        let model = match self.settings.orchestration_model.trim() {
+            "" => format!("{} (helper model)", Settings::harness(&self.settings.helper_model, "haiku")),
+            m => m.to_owned(),
+        };
+        let page = orchestration::Page {
+            name: &name,
+            color: self.workspaces.list[w].color.unwrap_or([128, 128, 128]),
+            sessions: &live,
+            orch: self.orchestrations.get(&name),
+            busy: self.orch.updating.contains_key(&name),
+            error: self.orch.errors.get(&name).map(String::as_str),
+            asking: self.orch.asking.get(&name).map(|(q, _)| q.as_str()),
+            ask_error: self.orch.ask_errors.get(&name).map(String::as_str),
+            model: &model,
+        };
+        let event = orchestration::ui(ui, &page, &mut self.orch.question, &mut self.md_cache);
+        match event {
+            Some(orchestration::Event::Open(id)) => {
+                if let Some(i) = self.sessions.iter().position(|s| s.id == id) {
+                    self.select(i);
+                }
+            }
+            Some(orchestration::Event::Update) => self.update_orchestration(w, false),
+            Some(orchestration::Event::Clear) => {
+                self.orchestrations.clear(&name);
+                self.orch.ask_errors.remove(&name);
+                self.save_orchestrations();
+                self.update_orchestration(w, true);
+            }
+            Some(orchestration::Event::Ask(question)) if !question.is_empty() => {
+                let harness = Settings::harness(&self.settings.orchestration_harness, orchestration::DEFAULT_HARNESS).to_owned();
+                let orch = self.orchestrations.get(&name).cloned();
+                let rx = orchestration::ask(self.ctx.clone(), harness, self.settings.orchestration_model.clone(), members, orch, question.clone());
+                self.orch.ask_errors.remove(&name);
+                self.orch.asking.insert(name, (question, rx));
+            }
+            Some(orchestration::Event::Forget(i)) => {
+                let log = &mut self.orchestrations.entry(&name).log;
+                if i < log.len() {
+                    log.remove(i);
+                }
+                self.save_orchestrations();
+            }
+            Some(orchestration::Event::Ask(_)) | None => {}
+        }
+    }
+
+    /// The main area shows the workspaces overview: All sessions with no session open.
+    fn showing_overview(&self) -> bool {
+        self.tab.is_none() && self.open.is_none() && !(self.settings_active && self.settings_tab)
+    }
+
+    fn poll_overviews(&mut self) {
+        let mut done = Vec::new();
+        for (name, rx) in &self.overview_jobs {
+            match rx.try_recv() {
+                Ok(result) => done.push((name.clone(), result)),
+                Err(TryRecvError::Empty) => {}
+                Err(TryRecvError::Disconnected) => done.push((name.clone(), Err("stopped unexpectedly".into()))),
+            }
+        }
+        for (name, result) in done {
+            self.overview_jobs.remove(&name);
+            match result {
+                Ok(s) => {
+                    self.overview_errors.remove(&name);
+                    self.overviews.set(&name, s);
+                    if let Err(e) = self.overviews.save(&Overviews::path()) {
+                        self.error = Some(format!("could not save the overview: {e}"));
+                    }
+                }
+                Err(e) => {
+                    self.overview_errors.insert(name, e);
+                }
+            }
+        }
+    }
+
+    /// A workspace's sessions, newest first, as indices into `sessions`.
+    fn workspace_sessions(&self, w: usize) -> Vec<usize> {
+        let ws = &self.workspaces.list[w];
+        (0..self.sessions.len()).filter(|&i| ws.sessions.contains(&self.sessions[i].id)).collect()
+    }
+
+    /// Starts summarizing workspace `w` with the helper model, unless it already is.
+    fn summarize_workspace(&mut self, w: usize) {
+        let name = self.workspaces.list[w].name.clone();
+        let members = self.workspace_sessions(w);
+        if members.is_empty() || self.overview_jobs.contains_key(&name) {
+            return;
+        }
+        let newest = overview::secs(self.sessions[members[0]].modified);
+        let sources = members
+            .iter()
+            .map(|&i| overview::Source {
+                title: self.title(i).to_owned(),
+                goal: self.goals.get(&self.sessions[i].id).map(str::to_owned),
+                path: self.sessions[i].path.clone(),
+            })
+            .collect();
+        self.overview_errors.remove(&name);
+        self.overview_jobs.insert(name, overview::start(self.ctx.clone(), sources, newest));
+    }
+
+    /// The overview in the main area. Missing or stale summaries are written as it shows,
+    /// a few at a time.
+    fn overview(&mut self, ui: &mut egui::Ui) {
+        const AT_ONCE: usize = 3;
+        let now = overview::secs(std::time::SystemTime::now());
+        let members: Vec<Vec<usize>> = (0..self.workspaces.list.len()).map(|w| self.workspace_sessions(w)).collect();
+        for (w, m) in members.iter().enumerate() {
+            let name = &self.workspaces.list[w].name;
+            let newest = m.first().map_or(0, |&i| overview::secs(self.sessions[i].modified));
+            let wanted = !m.is_empty()
+                && !self.overview_errors.contains_key(name)
+                && overview::needs_summary(self.overviews.get(name), newest, now);
+            if wanted && self.overview_jobs.len() < AT_ONCE {
+                self.summarize_workspace(w);
+            }
+        }
+        let cards: Vec<overview::Card> = self
+            .workspaces
+            .list
+            .iter()
+            .zip(&members)
+            .map(|(ws, m)| {
+                let ids = || m.iter().map(|&i| &self.sessions[i].id);
+                overview::Card {
+                    name: &ws.name,
+                    color: ws.color.unwrap_or([128, 128, 128]),
+                    sessions: m.len(),
+                    running: ids().filter(|id| self.runs.contains_key(*id)).count(),
+                    queued: ids().filter_map(|id| self.queues.get(id)).map(|q| q.items.len()).sum(),
+                    newest: m.first().map_or(0, |&i| overview::secs(self.sessions[i].modified)),
+                    summary: self.overviews.get(&ws.name),
+                    busy: self.overview_jobs.contains_key(&ws.name),
+                    error: self.overview_errors.get(&ws.name).map(String::as_str),
+                }
+            })
+            .collect();
+        let grouped: HashSet<&String> = self.workspaces.list.iter().flat_map(|w| &w.sessions).collect();
+        let loose = self.sessions.iter().filter(|s| !grouped.contains(&s.id)).count();
+        let event = overview::ui(ui, &cards, loose, &self.settings.jira_url);
+        match event {
+            Some(overview::Event::Open(w)) => self.switch_tab(Some(w)),
+            Some(overview::Event::Refresh(w)) => self.summarize_workspace(w),
+            Some(overview::Event::RefreshAll) => {
+                for w in 0..self.workspaces.list.len() {
+                    self.summarize_workspace(w);
+                }
+            }
+            None => {}
         }
     }
 
@@ -463,6 +967,7 @@ impl App {
             .or_else(|| Some(PathBuf::from(self.settings.default_folder.trim())).filter(|d| d.is_dir()))
             .or_else(|| self.open.as_ref().and_then(|s| s.cwd.clone()));
         if let Some(dir) = runner::pick_folder(start) {
+            self.sync_workspaces(None);
             self.workspaces.chose_folder(self.tab, &dir);
             self.save_workspaces();
             self.start_new_session(dir);
@@ -473,6 +978,7 @@ impl App {
     fn start_new_session(&mut self, dir: PathBuf) {
         self.switch_view(Some(format!("new:{}", dir.display())));
         self.selected = None;
+        self.orchestrating = false;
         self.new_id = None;
         self.open = Some(Session { cwd: Some(dir.clone()), ..Default::default() });
         self.new_session = Some(dir);
@@ -488,6 +994,7 @@ impl App {
         let (cwd, prompt) = (run.cwd.clone(), run.prompt.clone());
         self.switch_view(Some(id.to_owned()));
         self.selected = None;
+        self.orchestrating = false;
         self.new_id = Some(id.to_owned());
         let mut s = Session { cwd: cwd.clone(), ..Default::default() };
         s.push_prompt(prompt);
@@ -498,11 +1005,13 @@ impl App {
         self.heights.clear();
     }
 
+    /// Every session's pending answers, so one asked before switching away still arrives.
     fn poll_btw(&mut self) {
-        let Some(b) = &mut self.btw else { return };
-        if let Some(Ok(result)) = b.rx.as_ref().map(|rx| rx.try_recv()) {
-            b.answer = Some(result);
-            b.rx = None;
+        for b in self.btw.values_mut().flatten() {
+            if let Some(Ok(result)) = b.rx.as_ref().map(|rx| rx.try_recv()) {
+                b.answer = Some(result);
+                b.rx = None;
+            }
         }
     }
 
@@ -545,6 +1054,7 @@ impl App {
     /// The open session reloads if its file changed elsewhere (e.g. a terminal session).
     fn poll_snapshots(&mut self) {
         let Some(snap) = self.snapshots.try_iter().last() else { return };
+        self.sync_workspaces(None);
         let current = self.selected.map(|i| (self.sessions[i].id.clone(), self.sessions[i].modified));
         self.sessions = snap.sessions;
         self.index = snap.index;
@@ -592,6 +1102,7 @@ impl App {
         };
         if new {
             self.new_id = Some(id.clone());
+            self.sync_workspaces(None);
             if let Some(w) = self.tab {
                 self.workspaces.move_to(&id, w);
                 self.save_workspaces();
@@ -767,12 +1278,13 @@ impl App {
             Dictation::Idle => {
                 let model = dictation::model_path();
                 if !model.exists() {
-                    self.error = Some(format!("Dictation needs the Whisper model: download {} to {}", dictation::MODEL_URL, model.display()));
+                    self.model_prompt.get_or_insert(ModelPrompt::Ask);
                     return;
                 }
                 match dictation::Recorder::start() {
                     Ok(recorder) => {
                         self.error = None;
+                        self.mic_levels = std::iter::repeat_n(0.0, MIC_BARS).collect();
                         self.dictation = Dictation::Recording(recorder);
                     }
                     Err(e) => self.error = Some(e),
@@ -882,7 +1394,8 @@ impl App {
                 (self.title(i).to_owned(), self.goals.get(id).map(str::to_owned), prompts)
             })
             .collect();
-        let rx = runner::ask_haiku(ctx.clone(), search::ai_prompt(&query, &catalog));
+        let harness = Settings::harness(&self.settings.search_harness, search::DEFAULT_HARNESS);
+        let rx = runner::ask_haiku(ctx.clone(), search::ai_prompt(harness, &query, &catalog));
         let ids = recent.iter().map(|&i| self.sessions[i].id.clone()).collect();
         self.ai = Some(AiSearch { query, ids, rx: Some(rx), result: None });
     }
@@ -978,7 +1491,37 @@ impl App {
                 "No sessions found in ~/.claude/projects"
             });
         }
+        let order: Vec<String> = rows.iter().map(|&(i, _)| self.sessions[i].id.clone()).collect();
+        // Rows picked, in list order: what a drag or the context menu acts on.
+        let picked: Vec<String> = order.iter().filter(|id| self.picked.contains(*id)).cloned().collect();
+        let open_id = self.selected.map(|i| self.sessions[i].id.clone());
+        let (modifiers, press, pointer, primary_down) =
+            ui.input(|i| (i.modifiers, i.pointer.press_origin(), i.pointer.interact_pos(), i.pointer.primary_down()));
         egui::ScrollArea::vertical().show(ui, |ui| {
+            // The list's top-left, which moves with the scroll.
+            let top = ui.min_rect().min;
+            let mut rects = Vec::new();
+            // The workspace's own bubble, above its sessions: its orchestration page.
+            if let Some(ws) = self.tab.and_then(|w| self.workspaces.list.get(w)) {
+                let ids = self.workspace_sessions(self.tab.unwrap_or_default());
+                let working = ids.iter().filter(|&&i| self.runs.contains_key(&self.sessions[i].id)).count();
+                let mut line = format!("{} session{}", ids.len(), if ids.len() == 1 { "" } else { "s" });
+                if working > 0 {
+                    line.push_str(&format!(" · {working} working"));
+                }
+                let report = self.orchestrations.get(&ws.name).and_then(|o| o.report.as_ref());
+                if let Some(r) = report {
+                    line.push_str(&format!(" · {}%", r.progress));
+                    let waiting = r.sessions.iter().filter(|s| s.state == "waiting" || s.state == "blocked").count();
+                    if waiting > 0 {
+                        line.push_str(&format!(" · {waiting} need{} you", if waiting == 1 { "s" } else { "" }));
+                    }
+                }
+                let busy = working > 0 || self.orch.updating.contains_key(&ws.name);
+                if orchestration::bubble(ui, self.showing_orchestration(), &line, busy).clicked() {
+                    actions.push(Action::Orchestrate);
+                }
+            }
             for (id, title, _) in pending {
                 let open = self.new_session.is_some() && self.new_id.as_ref() == Some(&id);
                 if session_bubble(ui, open, &title, None, true, None).clicked() && !open {
@@ -998,36 +1541,116 @@ impl App {
                 };
                 let label = format!("{title}{queued}");
                 let color = self.tab.is_none().then(|| self.workspaces.color_of(&s.id)).flatten();
-                let row = session_bubble(ui, self.selected == Some(i), &label, note.as_deref(), self.runs.contains_key(&s.id), color);
-                row.dnd_set_drag_payload(s.id.clone());
-                if row.dragged() {
+                let is_picked = self.picked.contains(&s.id);
+                let highlighted = is_picked || (self.picked.is_empty() && self.selected == Some(i));
+                let row = session_bubble(ui, highlighted, &label, note.as_deref(), self.runs.contains_key(&s.id), color);
+                rects.push((s.id.clone(), row.rect));
+                // Dragging highlighted rows moves them; a drag from any other row draws a box.
+                let dragging = if is_picked { picked.clone() } else { vec![s.id.clone()] };
+                if row.drag_started() {
+                    if highlighted {
+                        row.dnd_set_drag_payload(dragging.clone());
+                    } else if let Some(p) = press {
+                        let base = if modifiers.shift || modifiers.command { self.picked.clone() } else { HashSet::new() };
+                        self.lasso = Some((p - top, base));
+                    }
+                }
+                if row.dragged() && self.lasso.is_none() {
                     if let Some(pos) = ui.ctx().pointer_interact_pos() {
                         let painter = ui.ctx().layer_painter(LayerId::new(Order::Tooltip, Id::new("drag-ghost")));
                         let font = egui::FontId::proportional(14.0);
-                        painter.text(pos + egui::vec2(14.0, 0.0), Align2::LEFT_CENTER, title, font, theme::palette(ui.visuals()).user);
+                        let text = if dragging.len() > 1 { format!("{} sessions", dragging.len()) } else { title.to_owned() };
+                        painter.text(pos + egui::vec2(14.0, 0.0), Align2::LEFT_CENTER, text, font, theme::palette(ui.visuals()).user);
                     }
                 }
                 if row.clicked() {
-                    actions.push(Action::Select(i));
+                    if modifiers.shift {
+                        // A range from the session last clicked (or the open one) to this one.
+                        let from = self.pick_anchor.as_ref().or(open_id.as_ref()).and_then(|a| order.iter().position(|id| id == a));
+                        let to = order.iter().position(|id| id == &s.id).unwrap_or(0);
+                        let (a, b) = from.map_or((to, to), |f| (f.min(to), f.max(to)));
+                        let anchor = self.pick_anchor.clone().unwrap_or_else(|| s.id.clone());
+                        actions.push(Action::Pick(order[a..=b].iter().cloned().collect(), anchor));
+                    } else if modifiers.command {
+                        let mut ids = self.picked.clone();
+                        if ids.is_empty() {
+                            ids.extend(open_id.iter().filter(|id| order.contains(id)).cloned());
+                        }
+                        if !ids.remove(&s.id) {
+                            ids.insert(s.id.clone());
+                        }
+                        actions.push(Action::Pick(ids, s.id.clone()));
+                    } else {
+                        actions.push(Action::Select(i));
+                    }
                 }
-                if row.double_clicked() {
+                if row.double_clicked() && !modifiers.shift && !modifiers.command {
                     self.renaming = Some(Renaming { id: s.id.clone(), text: title.to_owned(), fresh: true });
                 }
                 row.context_menu(|ui| {
+                    let n = dragging.len();
+                    if n > 1 {
+                        ui.label(RichText::new(format!("{n} sessions")).weak());
+                    }
                     ui.menu_button("Move to", |ui| {
                         if self.workspaces.list.is_empty() {
                             ui.label("No workspaces yet. Create one with +");
                         }
                         for (w, ws) in self.workspaces.list.iter().enumerate() {
                             if ui.button(&ws.name).clicked() {
-                                actions.push(Action::MoveTo(s.id.clone(), w));
+                                actions.push(Action::MoveTo(dragging.clone(), w));
                             }
                         }
                     });
                     if self.tab.is_some() && ui.button("Remove from workspace").clicked() {
-                        actions.push(Action::Remove(s.id.clone()));
+                        actions.push(Action::Remove(dragging.clone()));
+                    }
+                    ui.separator();
+                    let delete = if n > 1 { format!("Move {n} sessions to Trash…") } else { "Move to Trash…".to_owned() };
+                    if ui.button(delete).clicked() {
+                        actions.push(Action::Trash(dragging.clone()));
                     }
                 });
+            }
+            // The space under the rows: a drag there draws a box, a click drops the picks.
+            let below = egui::Rect::from_min_max(ui.cursor().min, egui::pos2(ui.max_rect().right(), ui.clip_rect().bottom()));
+            if below.height() > 0.0 {
+                let space = ui.interact(below, Id::new("session-list-space"), Sense::click_and_drag());
+                if space.drag_started()
+                    && let Some(p) = press
+                {
+                    let base = if modifiers.shift || modifiers.command { self.picked.clone() } else { HashSet::new() };
+                    self.lasso = Some((p - top, base));
+                }
+                if space.clicked() && !modifiers.shift && !modifiers.command {
+                    self.picked.clear();
+                }
+            }
+            if let Some((start, base)) = &self.lasso {
+                match pointer.filter(|_| primary_down) {
+                    None => self.lasso = None,
+                    Some(pos) => {
+                        let rect = egui::Rect::from_two_pos(top + *start, pos);
+                        let pal = theme::palette(ui.visuals());
+                        ui.painter().rect(rect, 2.0, pal.user.gamma_multiply(0.12), Stroke::new(1.0, pal.user), StrokeKind::Inside);
+                        let mut ids = base.clone();
+                        ids.extend(rects.iter().filter(|(_, r)| r.intersects(rect)).map(|(id, _)| id.clone()));
+                        self.picked = ids;
+                        // Near the top or bottom edge, the list scrolls to reach more rows.
+                        let clip = ui.clip_rect();
+                        let step = if pos.y < clip.top() + 16.0 {
+                            8.0
+                        } else if pos.y > clip.bottom() - 16.0 {
+                            -8.0
+                        } else {
+                            0.0
+                        };
+                        if step != 0.0 {
+                            ui.scroll_with_delta(egui::vec2(0.0, step));
+                            ui.ctx().request_repaint();
+                        }
+                    }
+                }
             }
         });
         for a in actions {
@@ -1037,7 +1660,8 @@ impl App {
 
     fn tabs(&mut self, ui: &mut egui::Ui, actions: &mut Vec<Action>) {
         ui.horizontal_wrapped(|ui| {
-            if ui.selectable_label(self.tab.is_none(), "All sessions").clicked() {
+            let all = ui.selectable_label(self.tab.is_none(), "All sessions").on_hover_text("Every session, and an overview of the workspaces");
+            if all.clicked() {
                 actions.push(Action::Tab(None));
             }
             for (w, ws) in self.workspaces.list.iter().enumerate() {
@@ -1052,11 +1676,11 @@ impl App {
                 if tab.clicked() {
                     actions.push(Action::Tab(Some(w)));
                 }
-                if tab.dnd_hover_payload::<String>().is_some() {
+                if tab.dnd_hover_payload::<Vec<String>>().is_some() {
                     ui.painter().rect_stroke(tab.rect, 3.0, Stroke::new(2.0, theme::palette(ui.visuals()).user), StrokeKind::Outside);
                 }
-                if let Some(id) = tab.dnd_release_payload::<String>() {
-                    actions.push(Action::MoveTo((*id).clone(), w));
+                if let Some(ids) = tab.dnd_release_payload::<Vec<String>>() {
+                    actions.push(Action::MoveTo((*ids).clone(), w));
                 }
                 tab.context_menu(|ui| {
                     if ui.button("Delete workspace").clicked() {
@@ -1076,7 +1700,9 @@ impl App {
         }
         if resp.lost_focus() {
             if ui.input(|i| i.key_pressed(Key::Enter)) {
-                if let Some(w) = self.workspaces.add(name) {
+                let name = name.clone();
+                self.sync_workspaces(None);
+                if let Some(w) = self.workspaces.add(&name) {
                     actions.push(Action::Tab(Some(w)));
                     self.save_workspaces();
                 }
@@ -1104,6 +1730,134 @@ impl App {
         }
         if delete || cancel || modal.should_close() {
             self.confirm_delete = None;
+        }
+    }
+
+    /// "Move to Trash?" for sessions picked to delete.
+    fn confirm_trash_modal(&mut self, ctx: &egui::Context) {
+        if self.confirm_trash.is_empty() {
+            return;
+        }
+        let titles: Vec<String> = self
+            .confirm_trash
+            .iter()
+            .filter_map(|id| self.sessions.iter().position(|s| &s.id == id))
+            .map(|i| self.title(i).to_owned())
+            .collect();
+        let (mut delete, mut cancel) = (false, false);
+        let modal = egui::Modal::new(Id::new("confirm-trash")).show(ctx, |ui| {
+            let heading = match titles.as_slice() {
+                [one] => format!("Move \"{one}\" to the Trash?"),
+                _ => format!("Move {} sessions to the Trash?", titles.len()),
+            };
+            ui.label(RichText::new(heading).strong());
+            if titles.len() > 1 {
+                for t in titles.iter().take(8) {
+                    ui.label(format!("• {t}"));
+                }
+                if titles.len() > 8 {
+                    ui.label(RichText::new(format!("and {} more", titles.len() - 8)).weak());
+                }
+            }
+            ui.label("Their files go to the Trash; Finder's Put Back restores them.");
+            ui.add_space(8.0);
+            ui.horizontal(|ui| {
+                delete = ui.button("Move to Trash").clicked();
+                cancel = ui.button("Cancel").clicked();
+            });
+        });
+        if delete {
+            let ids = std::mem::take(&mut self.confirm_trash);
+            self.trash_sessions(&ids);
+        }
+        if cancel || modal.should_close() {
+            self.confirm_trash.clear();
+        }
+    }
+
+    /// Offers to download the Whisper model that dictation needs, and shows the download.
+    fn model_prompt_modal(&mut self, ctx: &egui::Context) {
+        let Some(prompt) = &mut self.model_prompt else { return };
+        if let ModelPrompt::Downloading(child) = prompt {
+            match child.try_wait() {
+                Ok(None) => ctx.request_repaint_after(std::time::Duration::from_millis(250)),
+                Ok(Some(status)) => {
+                    let ModelPrompt::Downloading(child) = std::mem::replace(prompt, ModelPrompt::Done) else { unreachable!() };
+                    if let Err(e) = dictation::finish_model_download(child, status) {
+                        *prompt = ModelPrompt::Failed(e);
+                    }
+                }
+                Err(e) => {
+                    let _ = child.kill();
+                    *prompt = ModelPrompt::Failed(format!("download failed: {e}"));
+                }
+            }
+        }
+        let mb = |bytes: u64| bytes as f32 / 1_000_000.0;
+        let (mut download, mut cancel, mut close, mut dictate) = (false, false, false, false);
+        let modal = egui::Modal::new(Id::new("model-prompt")).show(ctx, |ui| {
+            ui.set_max_width(420.0);
+            match &*prompt {
+                ModelPrompt::Ask => {
+                    ui.label(RichText::new("Download the speech model?").strong());
+                    ui.label(format!(
+                        "Dictation transcribes on this Mac with the Whisper base model ({:.0} MB, from Hugging Face). Audio never leaves your machine.",
+                        mb(dictation::MODEL_BYTES)
+                    ));
+                    ui.label(RichText::new(format!("It is saved to {}", dictation::model_path().display())).small().weak());
+                    ui.add_space(8.0);
+                    ui.horizontal(|ui| {
+                        download = ui.button("Download").clicked();
+                        close = ui.button("Not now").clicked();
+                    });
+                }
+                ModelPrompt::Downloading(_) => {
+                    let got = std::fs::metadata(dictation::model_part_path()).map_or(0, |m| m.len());
+                    let fraction = got as f32 / dictation::MODEL_BYTES as f32;
+                    ui.label(RichText::new("Downloading the speech model…").strong());
+                    ui.add(egui::ProgressBar::new(fraction.min(1.0)).text(format!("{:.0} of {:.0} MB", mb(got), mb(dictation::MODEL_BYTES))));
+                    ui.add_space(8.0);
+                    cancel = ui.button("Cancel").clicked();
+                }
+                ModelPrompt::Done => {
+                    ui.label(RichText::new("Speech model installed").strong());
+                    ui.label("Dictation is ready: click the mic to start, click again to stop.");
+                    ui.add_space(8.0);
+                    ui.horizontal(|ui| {
+                        dictate = ui.button("Start dictating").clicked();
+                        close = ui.button("Close").clicked();
+                    });
+                }
+                ModelPrompt::Failed(e) => {
+                    ui.label(RichText::new("Couldn't download the speech model").strong());
+                    ui.label(e);
+                    ui.add_space(8.0);
+                    ui.horizontal(|ui| {
+                        download = ui.button("Retry").clicked();
+                        close = ui.button("Close").clicked();
+                    });
+                }
+            }
+        });
+        // Clicking outside or Esc closes it, except mid-download, where only Cancel stops it.
+        let downloading = matches!(prompt, ModelPrompt::Downloading(_));
+        if download {
+            *prompt = match dictation::start_model_download() {
+                Ok(child) => ModelPrompt::Downloading(child),
+                Err(e) => ModelPrompt::Failed(e),
+            };
+        } else if cancel {
+            if let ModelPrompt::Downloading(child) = prompt {
+                let _ = child.kill();
+                let _ = child.wait();
+            }
+            let _ = std::fs::remove_file(dictation::model_part_path());
+            self.model_prompt = None;
+        } else if close || dictate || (!downloading && modal.should_close()) {
+            self.model_prompt = None;
+            if dictate {
+                self.toggle_dictation();
+            }
         }
     }
 
@@ -1325,9 +2079,18 @@ impl App {
         let mut stop = false;
         let mut refine_click = false;
         let mut dictate_click = false;
+        let recording = matches!(self.dictation, Dictation::Recording(_));
+        let time = ui.input(|i| i.time);
+        // While recording, the input's border turns red and breathes, about once a second.
+        let border = if recording {
+            let pulse = 0.5 + 0.5 * (time * std::f64::consts::TAU / 1.2).sin() as f32;
+            Stroke::new(1.5, pal.error.gamma_multiply(0.35 + 0.65 * pulse))
+        } else {
+            Stroke::new(1.0, pal.border)
+        };
         egui::Frame::new()
             .fill(pal.prompt_bg)
-            .stroke(Stroke::new(1.0, pal.border))
+            .stroke(border)
             .inner_margin(egui::Margin::symmetric(10, 8))
             .corner_radius(4.0)
             .show(ui, |ui| {
@@ -1335,6 +2098,7 @@ impl App {
                     ui.label(RichText::new(">").monospace().strong().color(pal.prompt_sign));
                     let send_key = if self.settings.send_with_modifier { "cmd+enter" } else { "enter" };
                     let hint = match (&self.open, running) {
+                        _ if recording => "listening… click ⏹ to stop and transcribe".to_owned(),
                         (None, _) => "select a session".to_owned(),
                         (_, true) => format!("claude is working… {send_key} queues a prompt · ctrl+c stops"),
                         _ => format!("type a prompt · {send_key} to send · cmd+enter refines · up/down for history"),
@@ -1345,7 +2109,13 @@ impl App {
                     // frame), within min..max. The bottom edge stays put, so it grows upwards.
                     let height = self.prompt_text_height.clamp(min, max);
                     // Room for the buttons on the right: refine, stop, and the mic with its spinner.
-                    let buttons = (if running { 84.0 } else { 40.0 }) + if dictation::AVAILABLE { 48.0 } else { 0.0 };
+                    let buttons = (if running { 84.0 } else { 40.0 })
+                        + if dictation::AVAILABLE { 48.0 } else { 0.0 }
+                        + match self.dictation {
+                            Dictation::Recording(_) => MIC_METER_WIDTH,
+                            Dictation::Transcribing(_) => 90.0,
+                            Dictation::Idle => 0.0,
+                        };
                     let width = ui.available_width() - buttons;
                     let out = egui::ScrollArea::vertical()
                         .id_salt("prompt-scroll")
@@ -1390,7 +2160,6 @@ impl App {
                             .clicked();
                         // Added after refine, so it sits to the left of it.
                         if dictation::AVAILABLE {
-                            let recording = matches!(self.dictation, Dictation::Recording(_));
                             let transcribing = matches!(self.dictation, Dictation::Transcribing(_));
                             let (icon, color) = if recording { ("⏹", pal.error) } else { ("🎤", ui.visuals().text_color()) };
                             let mic = egui::Button::new(RichText::new(icon).color(color)).frame(false);
@@ -1402,6 +2171,10 @@ impl App {
                                 .clicked();
                             if transcribing {
                                 ui.spinner();
+                                ui.label(RichText::new("transcribing…").small().weak());
+                            }
+                            if let Dictation::Recording(recorder) = &self.dictation {
+                                recording_meter(ui, recorder, &mut self.mic_levels, pal.error);
                             }
                         }
                         if running {
@@ -1531,6 +2304,69 @@ impl App {
         }
     }
 
+    /// Pinned above a file tab, where the conversation pins "You": the path with a copy button,
+    /// and what's worth knowing about the file (on disk and in this session).
+    fn file_header(&self, ui: &mut egui::Ui, i: usize) {
+        let pal = theme::palette(ui.visuals());
+        let tab = &self.file_tabs[i];
+        let mut meta = vec![diffview::language_name(&tab.path)];
+        if let Ok(text) = &tab.contents {
+            let n = text.lines().count();
+            meta.push(format!("{n} line{}", if n == 1 { "" } else { "s" }));
+        }
+        match std::fs::metadata(&tab.path) {
+            Ok(m) => {
+                meta.push(file_size(m.len()));
+                if let Some(age) = m.modified().ok().and_then(|t| SystemTime::now().duration_since(t).ok()) {
+                    meta.push(format!("modified {} ago", short_duration(age)));
+                }
+                if m.permissions().readonly() {
+                    meta.push("read-only".to_owned());
+                }
+            }
+            Err(_) => meta.push("not on disk".to_owned()),
+        }
+        if let Some(s) = &self.open {
+            if let Some(rel) = s.cwd.as_ref().and_then(|cwd| std::path::Path::new(&tab.path).strip_prefix(cwd).ok()) {
+                meta.push(format!("./{}", rel.display()));
+            }
+            match diffview::stats(&s.changes, &tab.path) {
+                (0, ..) => meta.push("not changed in this session".to_owned()),
+                (n, added, removed) => meta.push(format!("+{added} -{removed} in {n} edit{} this session", if n == 1 { "" } else { "s" })),
+            }
+        }
+        let copied_id = Id::new(("copied-path", &tab.path));
+        let now = ui.input(|i| i.time);
+        let copied = ui.data(|d| d.get_temp::<f64>(copied_id)).is_some_and(|t| now - t < 1.5);
+        let frame = egui::Frame::new().fill(ui.visuals().faint_bg_color).stroke(Stroke::new(1.0, pal.border));
+        frame.inner_margin(6.0).corner_radius(4.0).show(ui, |ui| {
+            ui.set_width(ui.available_width());
+            ui.horizontal(|ui| {
+                let button_width = 64.0;
+                ui.label(RichText::new("📄 File").strong().color(pal.user));
+                ui.scope(|ui| {
+                    ui.set_max_width((ui.available_width() - button_width).max(0.0));
+                    ui.add(egui::Label::new(RichText::new(&tab.path).strong().monospace().color(pal.user)).truncate());
+                });
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    let label = if copied { "✔ Copied" } else { "📋 Copy" };
+                    if ui.small_button(label).on_hover_text("Copy the full path").clicked() {
+                        ui.ctx().copy_text(tab.path.clone());
+                        ui.data_mut(|d| d.insert_temp(copied_id, now));
+                    }
+                });
+            });
+            ui.label(RichText::new(meta.join(" · ")).weak().small());
+        });
+        if copied {
+            ui.ctx().request_repaint_after(std::time::Duration::from_millis(300));
+        }
+        // A rule between the header and the contents, so the path doesn't read as the file's first line.
+        ui.add_space(4.0);
+        ui.separator();
+        ui.add_space(2.0);
+    }
+
     fn file_options(&self) -> diffview::FileOptions {
         diffview::FileOptions {
             line_numbers: self.settings.line_numbers,
@@ -1542,6 +2378,7 @@ impl App {
 
     /// A file tab: Markdown files render, with a toggle to their source; others show as source.
     fn file_tab(&mut self, ui: &mut egui::Ui, i: usize) {
+        self.file_header(ui, i);
         let opts = self.file_options();
         let scroll_id = ("file", self.view_key(), self.file_tabs[i].path.clone());
         let tab = &mut self.file_tabs[i];
@@ -1557,8 +2394,6 @@ impl App {
         if !tab.rendered {
             return diffview::file_view(ui, &tab.path, &tab.contents, &opts, scroll_id, find);
         }
-        ui.label(RichText::new(&tab.path).weak().monospace());
-        ui.add_space(4.0);
         egui::ScrollArea::vertical().id_salt(("md", scroll_id)).auto_shrink(false).show(ui, |ui| {
             let from = find::next_shape(ui);
             let rect = egui::Frame::new().inner_margin(egui::Margin::symmetric(12, 4)).show(ui, |ui| markdown::show(ui, &mut self.md_cache, text)).response.rect;
@@ -1616,55 +2451,107 @@ impl App {
         let id = self.selected.map(|i| self.sessions[i].id.clone());
         let mut start_summary = false;
         let mut toggled = None;
-        let (mut ask, mut dismiss) = (false, false);
+        let (mut ask, mut close) = (false, None);
         // Questions about the goal sit at the very bottom, answered with the session's context
-        // but not added to it; the answer shows just above the field.
-        if id.is_some() && !s.messages.is_empty() {
+        // but not added to it; the answers stack above the field. Text wraps to the panel's
+        // width, so field and answers grow upwards until they meet the sections, then scroll.
+        if let Some(id) = id.as_ref().filter(|_| !s.messages.is_empty()) {
+            let room = ui.available_height();
+            let max_total = (room - self.info_height - 12.0).max(room * 0.3).max(120.0);
+            let pal = theme::palette(ui.visuals());
+            let field_id = Id::new("goal-question-input");
+            // Enter sends, Shift+Enter adds a line: taken before the TextEdit sees it.
+            if ui.memory(|m| m.has_focus(field_id)) && !self.goal_question.trim().is_empty() {
+                ask = ui.input_mut(|i| {
+                    let send = i.key_pressed(Key::Enter) && !i.modifiers.shift;
+                    if send {
+                        i.events.retain(|e| !matches!(e, egui::Event::Key { key: Key::Enter, .. }));
+                    }
+                    send
+                });
+            }
+            let list = self.btw.get(id).map(Vec::as_slice).unwrap_or_default();
             egui::Panel::bottom("goal-question")
                 .frame(egui::Frame::new().inner_margin(egui::Margin::symmetric(0, 6)))
                 .show_separator_line(false)
                 .resizable(false)
                 .show(ui, |ui| {
-                    if let Some(b) = &self.btw {
-                        egui::Frame::new()
-                            .fill(ui.visuals().faint_bg_color)
-                            .stroke(Stroke::new(1.0, theme::palette(ui.visuals()).note))
-                            .inner_margin(8.0)
-                            .corner_radius(4.0)
+                    if !list.is_empty() {
+                        let max_height = (max_total - self.goal_field_height - 16.0).max(60.0);
+                        egui::ScrollArea::vertical()
+                            .id_salt("goal-answers")
+                            .auto_shrink([false, true])
+                            .max_height(max_height)
+                            .stick_to_bottom(true)
                             .show(ui, |ui| {
-                                ui.set_width(ui.available_width());
-                                ui.horizontal(|ui| {
-                                    ui.label(RichText::new(&b.question).italics());
-                                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Min), |ui| {
-                                        dismiss = ui.small_button("Dismiss").clicked();
+                                for (i, b) in list.iter().enumerate() {
+                                    ui.push_id(i, |ui| {
+                                        egui::Frame::new()
+                                            .fill(ui.visuals().faint_bg_color)
+                                            .stroke(Stroke::new(1.0, pal.note))
+                                            .inner_margin(8.0)
+                                            .corner_radius(4.0)
+                                            .show(ui, |ui| {
+                                                ui.set_width(ui.available_width());
+                                                ui.horizontal_top(|ui| {
+                                                    let text = (ui.available_width() - 24.0).max(0.0);
+                                                    ui.allocate_ui_with_layout(egui::vec2(text, 0.0), egui::Layout::top_down(egui::Align::Min), |ui| {
+                                                        ui.add(egui::Label::new(RichText::new(&b.question).italics()).wrap());
+                                                    });
+                                                    if ui.small_button("×").on_hover_text("Close").clicked() {
+                                                        close = Some(i);
+                                                    }
+                                                });
+                                                match &b.answer {
+                                                    None => {
+                                                        ui.horizontal(|ui| {
+                                                            ui.spinner();
+                                                            ui.label("Thinking (not added to the session)…");
+                                                        });
+                                                    }
+                                                    Some(Ok(a)) => markdown::show(ui, &mut self.md_cache, a),
+                                                    Some(Err(e)) => {
+                                                        ui.add(egui::Label::new(RichText::new(e).color(pal.error)).wrap());
+                                                    }
+                                                }
+                                            });
                                     });
-                                });
-                                egui::ScrollArea::vertical().id_salt("goal-answer").max_height(260.0).show(ui, |ui| match &b.answer {
-                                    None => {
-                                        ui.horizontal(|ui| {
-                                            ui.spinner();
-                                            ui.label("Thinking (not added to the session)…");
-                                        });
-                                    }
-                                    Some(Ok(a)) => markdown::show(ui, &mut self.md_cache, a),
-                                    Some(Err(e)) => {
-                                        ui.colored_label(theme::palette(ui.visuals()).error, e);
-                                    }
-                                });
+                                    ui.add_space(4.0);
+                                }
                             });
-                        ui.add_space(4.0);
                     }
-                    let asking = self.btw.as_ref().is_some_and(|b| b.answer.is_none());
-                    let field = egui::TextEdit::singleline(&mut self.goal_question)
-                        .hint_text("Ask about this goal, Enter to send")
-                        .desired_width(f32::INFINITY);
-                    let resp = ui.add_enabled(!asking, field);
-                    if resp.lost_focus() && ui.input(|i| i.key_pressed(Key::Enter)) && !self.goal_question.trim().is_empty() {
-                        ask = true;
+                    let field_max = if list.is_empty() { max_total } else { (max_total - 80.0).max(40.0) };
+                    let out = egui::Frame::new()
+                        .fill(ui.visuals().extreme_bg_color)
+                        .stroke(ui.visuals().widgets.inactive.bg_stroke)
+                        .inner_margin(4.0)
+                        .corner_radius(4.0)
+                        .show(ui, |ui| {
+                            let width = ui.available_width();
+                            egui::ScrollArea::vertical()
+                                .id_salt("goal-question-scroll")
+                                .auto_shrink([false, true])
+                                .max_height(field_max)
+                                .stick_to_bottom(true)
+                                .show(ui, |ui| {
+                                    let field = egui::TextEdit::multiline(&mut self.goal_question)
+                                        .id(field_id)
+                                        .frame(egui::Frame::NONE)
+                                        .hint_text("Ask about this goal, Enter to send")
+                                        .desired_rows(1)
+                                        .return_key(Some(egui::KeyboardShortcut::new(Modifiers::SHIFT, Key::Enter)))
+                                        .desired_width(width);
+                                    ui.add(field);
+                                })
+                        })
+                        .response;
+                    if (out.rect.height() - self.goal_field_height).abs() > 0.5 {
+                        self.goal_field_height = out.rect.height();
+                        ui.ctx().request_repaint();
                     }
                 });
         }
-        egui::ScrollArea::vertical().auto_shrink(false).show(ui, |ui| {
+        let sections = egui::ScrollArea::vertical().auto_shrink(false).show(ui, |ui| {
             section(ui, "Goal");
             let goal = id.as_deref().and_then(|id| self.goals.get(id));
             match (goal, &id) {
@@ -1732,6 +2619,10 @@ impl App {
                 }
             }
         });
+        if (sections.content_size.y - self.info_height).abs() > 0.5 {
+            self.info_height = sections.content_size.y;
+            ui.ctx().request_repaint();
+        }
         if let (Some(i), Some(id)) = (toggled, &id) {
             let raw = goal::toggle(self.goals.get(id).unwrap_or_default(), i);
             self.goals.set(id, &raw);
@@ -1739,13 +2630,19 @@ impl App {
                 self.error = Some(format!("could not save goal: {e}"));
             }
         }
-        if dismiss {
-            self.btw = None;
+        if let (Some(i), Some(id)) = (close, &id)
+            && let Some(list) = self.btw.get_mut(id)
+        {
+            list.remove(i);
+            if list.is_empty() {
+                self.btw.remove(id);
+            }
         }
         if let (true, Some(id)) = (ask, &id) {
             let question = std::mem::take(&mut self.goal_question).trim().to_owned();
-            let rx = runner::btw(ui.ctx().clone(), id.clone(), s.cwd.clone(), goal_question_prompt(self.goals.get(id), &question));
-            self.btw = Some(Btw { question, answer: None, rx: Some(rx) });
+            let harness = Settings::harness(&self.settings.question_harness, goal::QUESTION_HARNESS);
+            let rx = runner::btw(ui.ctx().clone(), id.clone(), s.cwd.clone(), goal_question_prompt(harness, self.goals.get(id), &question));
+            self.btw.entry(id.clone()).or_default().push(Btw { question, answer: None, rx: Some(rx) });
         }
         if let (true, Some(id)) = (start_summary, id) {
             let rx = runner::summarize_goal(ui.ctx().clone(), session::digest(&s.messages, 400, 12_000));
@@ -1965,6 +2862,9 @@ impl App {
         }
         if ctx.input_mut(|i| i.consume_key(Modifiers::CTRL, Key::F) || i.consume_key(Modifiers::COMMAND, Key::F)) {
             self.find.show();
+        }
+        if !self.picked.is_empty() && self.confirm_trash.is_empty() && ctx.input(|i| i.key_pressed(Key::Escape)) {
+            self.picked.clear();
         }
         // Esc cancels a refine that is still waiting (egui also uses Esc to drop focus, so
         // this can't depend on the input being focused).
@@ -2260,6 +3160,15 @@ fn limits_ui(ui: &mut egui::Ui) -> bool {
     false
 }
 
+/// 14_200 → "13.9 KB"
+fn file_size(bytes: u64) -> String {
+    match bytes {
+        b if b < 1024 => format!("{b} B"),
+        b if b < 1024 * 1024 => format!("{:.1} KB", b as f64 / 1024.0),
+        b => format!("{:.1} MB", b as f64 / (1024.0 * 1024.0)),
+    }
+}
+
 /// 8000s → "2h 13m"
 fn short_duration(d: std::time::Duration) -> String {
     let m = d.as_secs() / 60;
@@ -2270,14 +3179,13 @@ fn short_duration(d: std::time::Duration) -> String {
     }
 }
 
-/// The question sent to the forked session, with the current goal and checklist for focus.
-fn goal_question_prompt(goal: Option<&str>, question: &str) -> String {
+/// The question sent to the forked session: the harness (Settings), then the current goal and
+/// checklist for focus.
+fn goal_question_prompt(harness: &str, goal: Option<&str>, question: &str) -> String {
+    let harness = harness.trim();
     match goal {
-        Some(raw) => format!(
-            "Side question about this session (answer briefly; do not change any files).\n\
-             The session's goal and subgoal checklist:\n{raw}\n\nQuestion: {question}"
-        ),
-        None => format!("Side question about this session (answer briefly; do not change any files).\n\nQuestion: {question}"),
+        Some(raw) => format!("{harness}\nThe session's goal and subgoal checklist:\n{raw}\n\nQuestion: {question}"),
+        None => format!("{harness}\n\nQuestion: {question}"),
     }
 }
 
@@ -2319,6 +3227,8 @@ impl eframe::App for App {
         let ctx = ui.ctx().clone();
         self.poll_runner();
         self.poll_summary();
+        self.poll_overviews();
+        self.poll_orchestration();
         self.poll_btw();
         self.poll_snapshots();
         self.poll_ai();
@@ -2337,6 +3247,14 @@ impl eframe::App for App {
             }
             if self.settings_active && self.settings_tab {
                 self.settings_page(ui);
+                return;
+            }
+            if self.showing_overview() {
+                self.overview(ui);
+                return;
+            }
+            if self.showing_orchestration() {
+                self.orchestration(ui);
                 return;
             }
             self.update_find();
@@ -2376,6 +3294,8 @@ impl eframe::App for App {
             ctx.request_repaint();
         }
         self.confirm_delete_modal(&ctx);
+        self.confirm_trash_modal(&ctx);
+        self.model_prompt_modal(&ctx);
     }
 
     fn save(&mut self, _storage: &mut dyn eframe::Storage) {

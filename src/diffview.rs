@@ -85,6 +85,44 @@ pub fn split_path(file: &str) -> (&str, &str) {
     }
 }
 
+/// (edits, lines added, lines removed) for one file across the session's changes.
+pub fn stats(changes: &[Change], file: &str) -> (usize, usize, usize) {
+    changes.iter().filter(|c| c.file == file).fold((0, 0, 0), |(n, a, r), c| {
+        let (added, removed) = counts(c);
+        (n + 1, a + added, r + removed)
+    })
+}
+
+/// A readable name for the file's language, from its extension.
+pub fn language_name(file: &str) -> String {
+    let name = match language(file) {
+        "rs" => "Rust",
+        "py" => "Python",
+        "js" | "mjs" | "cjs" => "JavaScript",
+        "ts" | "mts" | "cts" => "TypeScript",
+        "tsx" => "TypeScript (JSX)",
+        "jsx" => "JavaScript (JSX)",
+        "go" => "Go",
+        "c" | "h" => "C",
+        "cpp" | "cc" | "cxx" | "hpp" => "C++",
+        "java" => "Java",
+        "kt" => "Kotlin",
+        "swift" => "Swift",
+        "rb" => "Ruby",
+        "sh" | "bash" | "zsh" => "Shell",
+        "md" | "markdown" => "Markdown",
+        "json" => "JSON",
+        "toml" => "TOML",
+        "yaml" | "yml" => "YAML",
+        "html" | "htm" => "HTML",
+        "css" => "CSS",
+        "sql" => "SQL",
+        "txt" => "Text",
+        other => return other.to_uppercase(),
+    };
+    name.to_owned()
+}
+
 fn language(file: &str) -> &str {
     Path::new(file).extension().and_then(|e| e.to_str()).unwrap_or("txt")
 }
@@ -216,8 +254,6 @@ pub fn expand_tabs(text: &str, width: usize) -> std::borrow::Cow<'_, str> {
 /// view scrolls to the current one when `find.scroll` is set.
 pub fn file_view(ui: &mut egui::Ui, path: &str, contents: &Result<String, String>, opts: &FileOptions, id: impl std::hash::Hash + std::fmt::Debug, find: Option<&mut Find>) {
     let pal = theme::palette(ui.visuals());
-    ui.label(RichText::new(path).weak().monospace());
-    ui.add_space(4.0);
     let text = match contents {
         Ok(t) => t,
         Err(e) => {
@@ -281,6 +317,16 @@ mod tests {
         assert_eq!(expand_tabs("a\tb\n\tc", 4), "a   b\n    c");
         assert_eq!(expand_tabs("ab\tc", 2), "ab  c");
         assert!(matches!(expand_tabs("no tabs", 4), std::borrow::Cow::Borrowed(_)));
+    }
+
+    #[test]
+    fn stats_count_one_files_edits() {
+        let c = vec![change("/a/x.rs", "1\n", "2\n"), change("/a/y.rs", "", "new\n"), change("/a/x.rs", "3\n", "4\n5\n")];
+        assert_eq!(stats(&c, "/a/x.rs"), (2, 3, 2));
+        assert_eq!(stats(&c, "/a/z.rs"), (0, 0, 0));
+        assert_eq!(language_name("/a/x.rs"), "Rust");
+        assert_eq!(language_name("/a/Makefile"), "Text");
+        assert_eq!(language_name("/a/x.zig"), "ZIG");
     }
 
     #[test]

@@ -51,9 +51,10 @@ it to zoom.
 - **Double-click** a session name to rename it, like a folder: the name is selected, type the
   new one, **Enter** (or click elsewhere) saves, **Escape** cancels. Saving an empty name
   brings back the original one. Names are sessman's own; Claude Code keeps its own title.
-- **Tabs** at the top: "All sessions", one tab per workspace, and **+**. Selecting a tab opens
-  the session that was last open in it (or its newest session; an empty workspace shows an
-  empty main area). Each tab remembers its last session across restarts.
+- **Tabs** at the top: "All sessions", one tab per workspace, and **+**. Selecting a workspace tab
+  opens the session that was last open in it (or its newest session; an empty workspace shows
+  an empty main area); each remembers its last session across restarts. "All sessions" opens
+  on the workspaces overview.
   - **+** asks for a name and creates a workspace tab.
   - Drag a session onto a workspace tab to put it there (the tab is outlined while you hover).
   - Or right-click a session → **Move to** → pick a workspace.
@@ -63,6 +64,41 @@ it to zoom.
   - A session belongs to at most one workspace; "All sessions" always shows everything.
   - Every workspace has its own color (no two share one). Its tab is tinted with it, and in
     "All sessions" each session in a workspace gets a colored stripe and tint (the ▌ above).
+
+### Middle: workspaces overview (All sessions)
+In "All sessions", the main area shows an overview of the workspaces until a session is
+opened; clicking "All sessions" again comes back to it.
+- One card per workspace, in its tab's color (a dot by the name, a stripe down the left
+  edge, a light tint). Its header shows how many sessions it has, how recent the latest
+  activity is, a spinner while Claude works in one, and queued prompts. Click the name to
+  open the workspace.
+- Under it: the folder and git branch, then what the helper model made of its 8 newest
+  sessions: **Purpose** (why the work exists), **Now** (what is being done most recently)
+  and **Heading** (the end state it works towards), plus up to 3 Jira tickets, epics and
+  parent tickets first. Only keys that really appear in the sessions or the branch are kept;
+  with a Jira URL in Settings they link to the ticket.
+- Summaries are kept in `~/.config/sessman/overview.json` and are written when missing, or
+  again when there was activity since and they are at least 30 min old (up to 3 at a time).
+  **↻** on a card, or **↻ Refresh all**, writes them again now.
+
+### Workspace orchestration
+- In a workspace tab, the first bubble in the list is the workspace itself: **Orchestration**,
+  drawn unlike the session bubbles (filled with the workspace color, a thicker outline, a ◆ mark,
+  a line like `6 sessions · 2 working · 62% · 1 needs you`, and the progress along its bottom).
+- Clicking it opens the orchestration page in the main area (the tab reopens on it; an empty
+  workspace opens on it too): overall **progress**, a summary, **Needs you**, **Next**, then a
+  card per session with its live state (working spinner and tool, queued prompts, last activity,
+  goal checklist) and what the report says (working / waiting / blocked / done / idle, what it is
+  doing, its next step). Click a card to open the session.
+- The report is written by the orchestration model (the helper model unless set) from the
+  orchestration harness in Settings. Updates are incremental: the previous report plus only the
+  sessions with new activity. It updates on its own when missing, or every N minutes (Settings)
+  while there is news and the page is open; **↻ Update** asks now.
+- **Clear & re-summarize** forgets the report, what it has seen and the questions, and
+  summarizes every session again from scratch.
+- The field at the bottom asks the orchestrator about the workspace (report, recent questions
+  and a short digest of each session); answers stack on the page.
+- Saved in `~/.config/sessman/orchestration.json`, by workspace name.
 
 ### Middle: conversation and file tabs
 - When a file is open, a tab bar appears on top: **Main** (the conversation) and one tab per
@@ -157,6 +193,10 @@ the settings; each changed setting has a ↺ to reset it. Changes apply and save
 - **Claude**: path to `claude`, model for prompts, helper model (search, goals, refine),
   extra arguments for every `claude -p` (e.g. `--permission-mode acceptEdits`), default
   folder for new sessions.
+- **Overview**: Jira URL the ticket keys link to (e.g. `https://acme.atlassian.net`).
+- **Harness**: the instructions each helper starts from, editable (empty = default, ↺ resets):
+  workspace orchestration (plus its model and update interval), questions in the right panel,
+  and finding sessions in the left panel. The reply formats the app parses stay fixed.
 - **Behaviour**: confirm before deleting a workspace, restore the previous state at start,
   notify when a run finishes while sessman is in the background.
 - **Keyboard shortcuts** (a list) and **About** (version, config folder with Open in Finder,
@@ -180,6 +220,7 @@ moved aside (`state.json.bad`) and the app starts fresh.
 | Sending a prompt | Runs `claude -p [extra args] --resume <session-id> [--model <m>] --output-format stream-json --verbose --include-partial-messages "<prompt>"` in the session's folder, in its own process group, in the background; its streamed lines update the open conversation as they arrive. |
 | Stopping (Ctrl+C) | SIGINT to that process group (SIGKILL after 2 s). Claude Code saves the partial reply and an `[Request interrupted by user]` marker, shown as ⏹ Interrupted. |
 | Queue | Kept per session in memory and in `state.json`; the next prompt is sent when a run ends normally. |
+| Workspaces overview | `claude -p --model <helper> --no-session-persistence` with a digest of the workspace's 8 newest sessions (title, goal, conversation), the git branch and the Jira keys found in them; it answers in JSON with purpose, now, heading and tickets. |
 | Refine | `claude -p --model <helper> --no-session-persistence` with the prompt, the goal and the last 3 prompts; it answers in JSON with either the refined prompt or up to 3 questions. |
 | New session | Runs `claude -p --session-id <new uuid> "<first prompt>"` in the chosen folder. |
 | Model, context tokens | The latest reply's `model` and `usage` in the session file. |
