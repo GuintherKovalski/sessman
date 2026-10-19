@@ -183,6 +183,11 @@ pub enum RunEvent {
 pub fn send(ctx: eframe::egui::Context, id: String, cwd: Option<PathBuf>, prompt: String, new: bool) -> (Receiver<RunEvent>, Stop) {
     let c = claude();
     let mut cmd = command(&c);
+    // Claude can manage sessman's sessions through its command, and knows which one it is.
+    if let Ok(exe) = std::env::current_exe() {
+        cmd.args(["--append-system-prompt", &crate::control::system_prompt(&exe.to_string_lossy())]);
+    }
+    cmd.env(crate::control::SESSION_VAR, &id);
     cmd.args(send_args(&c, &id, &prompt, new));
     if let Some(dir) = cwd {
         cmd.current_dir(dir);

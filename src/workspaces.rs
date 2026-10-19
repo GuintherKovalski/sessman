@@ -14,6 +14,10 @@ pub struct Workspace {
     /// Folder new sessions in this workspace start in; picked once, for the first one.
     #[serde(default)]
     pub folder: Option<PathBuf>,
+    /// Whether `sessions` is the order the bar lists them in (arranged by hand); else newest
+    /// first.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub ordered: bool,
 }
 
 const PALETTE: [[u8; 3]; 10] = [
@@ -123,16 +127,40 @@ impl Workspaces {
             return None;
         }
         let color = Some(self.free_color());
-        self.list.push(Workspace { name: name.to_owned(), sessions: Vec::new(), color, last: None, folder: None });
+        self.list.push(Workspace { name: name.to_owned(), sessions: Vec::new(), color, last: None, folder: None, ordered: false });
         Some(self.list.len() - 1)
     }
 
+    /// A session moved in goes first in a hand-arranged workspace, as the newest does in the
+    /// others; one already there stays where it is.
     pub fn move_to(&mut self, session: &str, ws: usize) {
-        if ws >= self.list.len() {
+        if ws >= self.list.len() || self.list[ws].sessions.iter().any(|s| s == session) {
             return;
         }
         self.remove(session);
-        self.list[ws].sessions.push(session.to_owned());
+        let w = &mut self.list[ws];
+        if w.ordered {
+            w.sessions.insert(0, session.to_owned());
+        } else {
+            w.sessions.push(session.to_owned());
+        }
+    }
+
+    /// Lists workspace `ws` in the bar in `order` from now on. Its sessions missing from
+    /// `order` keep their place after the others; ids not in it are ignored.
+    pub fn arrange(&mut self, ws: usize, order: &[String]) {
+        let Some(w) = self.list.get_mut(ws) else { return };
+        let mut sessions: Vec<String> = order.iter().filter(|id| w.sessions.contains(id)).cloned().collect();
+        sessions.extend(w.sessions.iter().filter(|id| !order.contains(id)).cloned());
+        w.sessions = sessions;
+        w.ordered = true;
+    }
+
+    /// Back to listing workspace `ws` newest first.
+    pub fn unarrange(&mut self, ws: usize) {
+        if let Some(w) = self.list.get_mut(ws) {
+            w.ordered = false;
+        }
     }
 
     pub fn remove(&mut self, session: &str) {
@@ -257,6 +285,25 @@ mod tests {
         assert!(w.list[b].sessions.is_empty());
         w.delete(a);
         assert_eq!(w.list.len(), 1);
+    }
+
+    #[test]
+    fn arranged_order_is_kept_and_newcomers_go_first() {
+        let mut w = Workspaces::default();
+        let a = w.add("a").unwrap();
+        for s in ["s1", "s2", "s3"] {
+            w.move_to(s, a);
+        }
+        w.arrange(a, &["s3".into(), "gone".into(), "s1".into()]);
+        assert_eq!(w.list[a].sessions, vec!["s3", "s1", "s2"]);
+        assert!(w.list[a].ordered);
+        w.move_to("s4", a);
+        w.move_to("s2", a);
+        assert_eq!(w.list[a].sessions, vec!["s4", "s3", "s1", "s2"], "already there: stays put");
+        w.unarrange(a);
+        assert!(!w.list[a].ordered);
+        let old: Workspaces = serde_json::from_str(r#"{"list":[{"name":"x","sessions":[]}]}"#).unwrap();
+        assert!(!old.list[0].ordered);
     }
 
     #[test]

@@ -98,6 +98,8 @@ opened; clicking "All sessions" again comes back to it.
   summarizes every session again from scratch.
 - The field at the bottom asks the orchestrator about the workspace (report, recent questions
   and a short digest of each session); answers stack on the page.
+- Wherever the orchestrator mentions a session (summary, Needs you, Next, the cards and its
+  answers), it reads as the session's current name and is a link: click it to open the session.
 - Saved in `~/.config/sessman/orchestration.json`, by workspace name.
 
 ### Middle: conversation and file tabs

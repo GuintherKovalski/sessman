@@ -1,3 +1,4 @@
+use crate::control::{self, Command};
 use crate::diffview::{self, CardEvent};
 use crate::dictation;
 use crate::find::{self, Find};
@@ -27,6 +28,13 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 /// Height of the bar at the top of the window, where the macOS window buttons sit.
 pub const TITLE_BAR_HEIGHT: f32 = 28.0;
+
+/// A session the bar draws: a listed one (with its search note), or a new one still starting
+/// (id, its first prompt's first line).
+enum BarItem {
+    Listed(usize, Option<String>),
+    Starting(String, String),
+}
 
 /// Sidebar interactions, collected while drawing and applied afterwards.
 enum Action {
@@ -97,6 +105,9 @@ pub struct App {
     inline_you: bool,
     names: Names,
     renaming: Option<Renaming>,
+    /// New sessions whose first run ended before the indexer listed them: (id, first prompt,
+    /// folder). They stay in the bar as starting until it does.
+    unlisted: Vec<(String, String, Option<PathBuf>)>,
     /// Folder of a new session that has no prompt yet (nothing exists on disk until then).
     new_session: Option<PathBuf>,
     /// Id given to the new session's first prompt, to select it once it exists.
@@ -175,6 +186,8 @@ pub struct App {
     /// Each workspace's orchestration report and questions (by name), and those in flight.
     orchestrations: orchestration::Store,
     orch: orchestration::Jobs,
+    /// Commands from `sessman list|rename|move|new|ask` (control.rs).
+    control: Receiver<control::Incoming>,
 }
 
 /// A running `claude -p` for one session: its events, the reply being written, the tool it
@@ -314,6 +327,7 @@ impl App {
             inline_you: false,
             names: Names::load(&Names::path()),
             renaming: None,
+            unlisted: Vec::new(),
             new_session: None,
             new_id: None,
             focus_prompt: false,
@@ -359,6 +373,7 @@ impl App {
             orchestrating: false,
             orchestrations: orchestration::Store::load(&orchestration::Store::path()),
             orch: orchestration::Jobs::default(),
+            control: control::watch(ctx.clone()),
         };
         app.apply_settings();
         // Persist colors assigned on load to workspaces saved before colors existed.
@@ -671,10 +686,21 @@ impl App {
         self.orchestrating && self.tab.is_some() && self.open.is_none() && !(self.settings_active && self.settings_tab)
     }
 
-    /// Workspace `w`'s sessions as the orchestrator reads them, newest first.
+    /// Workspace `w`'s sessions as the orchestrator reads them, newest first: new ones still
+    /// starting (nothing on disk to read yet), then the listed ones.
     fn orchestration_members(&self, w: usize) -> Vec<orchestration::Member> {
-        self.workspace_sessions(w)
-            .into_iter()
+        let now = overview::secs(SystemTime::now());
+        let starting = pending_new(&self.runs, &self.unlisted, &self.sessions, Some(&self.workspaces.list[w].sessions));
+        let starting = starting.into_iter().map(|(id, ..)| orchestration::Member {
+            title: self.name_of(&id),
+            goal: None,
+            path: PathBuf::new(),
+            modified: now,
+            running: self.runs.contains_key(&id),
+            queued: self.queues.get(&id).map_or(0, |q| q.items.len()),
+            id,
+        });
+        starting.chain(self.workspace_sessions(w).into_iter()
             .map(|i| {
                 let s = &self.sessions[i];
                 orchestration::Member {
@@ -686,7 +712,7 @@ impl App {
                     running: self.runs.contains_key(&s.id),
                     queued: self.queues.get(&s.id).map_or(0, |q| q.items.len()),
                 }
-            })
+            }))
             .collect()
     }
 
@@ -745,12 +771,42 @@ impl App {
         }
         for (name, result) in answered {
             let Some((question, _)) = self.orch.asking.remove(&name) else { continue };
+            let asked_by = self.orch.asked_by.remove(&name);
             match result {
                 Ok(answer) => {
-                    self.orchestrations.entry(&name).answered(question, answer, now);
+                    // Sessions named as they were when it answered, before it renamed any.
+                    let plain = asked_by.is_some().then(|| self.plain_refs(&answer.text));
+                    let done: Vec<String> = answer
+                        .actions
+                        .into_iter()
+                        .map(|c| {
+                            // New sessions go in the orchestrator's own workspace.
+                            let c = match c {
+                                Command::New { prompt, folder, name: n, .. } => Command::New { prompt, workspace: Some(name.clone()), folder, name: n },
+                                c => c,
+                            };
+                            let request = control::Request { command: c, caller: None, cwd: None };
+                            match self.execute(request, None) {
+                                Some(Ok(d)) => d,
+                                Some(Err(e)) => format!("Could not: {e}"),
+                                None => String::new(),
+                            }
+                        })
+                        .filter(|d| !d.is_empty())
+                        .collect();
+                    if let (Some(path), Some(mut text)) = (asked_by, plain) {
+                        for d in &done {
+                            text.push_str(&format!("\n- {d}"));
+                        }
+                        control::write_reply(&path, &Ok(text));
+                    }
+                    self.orchestrations.entry(&name).answered(question, answer.text, done, now);
                     changed = true;
                 }
                 Err(e) => {
+                    if let Some(path) = asked_by {
+                        control::write_reply(&path, &Err(format!("the orchestrator could not answer: {e}")));
+                    }
                     // The question goes back to the field to try again.
                     if self.orch.question.trim().is_empty() {
                         self.orch.question = question;
@@ -779,8 +835,14 @@ impl App {
         }
         // Checked again every minute while the page is open, for news to report.
         ui.ctx().request_repaint_after(std::time::Duration::from_secs(60));
-        let live: Vec<orchestration::Live> = members
-            .iter()
+        // Cards in the bar's order; the model still reads the sessions newest first.
+        let mut shown: Vec<&orchestration::Member> = members.iter().collect();
+        let ws = &self.workspaces.list[w];
+        if ws.ordered {
+            shown.sort_by_key(|m| ws.sessions.iter().position(|id| *id == m.id));
+        }
+        let live: Vec<orchestration::Live> = shown
+            .into_iter()
             .map(|m| {
                 let checklist = self.goals.get(&m.id).map(goal::parse).map(|g| (g.items.iter().filter(|(d, _)| *d).count(), g.items.len()));
                 orchestration::Live {
@@ -808,14 +870,15 @@ impl App {
             asking: self.orch.asking.get(&name).map(|(q, _)| q.as_str()),
             ask_error: self.orch.ask_errors.get(&name).map(String::as_str),
             model: &model,
+            arranged: ws.ordered,
         };
-        let event = orchestration::ui(ui, &page, &mut self.orch.question, &mut self.md_cache);
+        let order: Vec<String> = live.iter().map(|s| s.id.to_owned()).collect();
+        let event = orchestration::ui(ui, &page, &mut self.orch.question, &mut self.orch.renaming, &mut self.md_cache);
         match event {
-            Some(orchestration::Event::Open(id)) => {
-                if let Some(i) = self.sessions.iter().position(|s| s.id == id) {
-                    self.select(i);
-                }
-            }
+            Some(orchestration::Event::Open(id)) => match self.sessions.iter().position(|s| s.id == id) {
+                Some(i) => self.select(i),
+                None => self.open_pending(&id),
+            },
             Some(orchestration::Event::Update) => self.update_orchestration(w, false),
             Some(orchestration::Event::Clear) => {
                 self.orchestrations.clear(&name);
@@ -824,11 +887,7 @@ impl App {
                 self.update_orchestration(w, true);
             }
             Some(orchestration::Event::Ask(question)) if !question.is_empty() => {
-                let harness = Settings::harness(&self.settings.orchestration_harness, orchestration::DEFAULT_HARNESS).to_owned();
-                let orch = self.orchestrations.get(&name).cloned();
-                let rx = orchestration::ask(self.ctx.clone(), harness, self.settings.orchestration_model.clone(), members, orch, question.clone());
-                self.orch.ask_errors.remove(&name);
-                self.orch.asking.insert(name, (question, rx));
+                let _ = self.ask_orchestrator(w, question);
             }
             Some(orchestration::Event::Forget(i)) => {
                 let log = &mut self.orchestrations.entry(&name).log;
@@ -837,8 +896,257 @@ impl App {
                 }
                 self.save_orchestrations();
             }
+            Some(orchestration::Event::Rename(id, name)) => self.apply(Action::Rename(id, name)),
+            Some(orchestration::Event::Move(id, to)) => {
+                let mut order = order;
+                order.retain(|x| *x != id);
+                order.insert(to.min(order.len()), id);
+                if let Some(w) = self.sync_workspaces(Some(w)) {
+                    self.workspaces.arrange(w, &order);
+                    self.save_workspaces();
+                }
+            }
+            Some(orchestration::Event::NewestFirst) => {
+                if let Some(w) = self.sync_workspaces(Some(w)) {
+                    self.workspaces.unarrange(w);
+                    self.save_workspaces();
+                }
+            }
             Some(orchestration::Event::Ask(_)) | None => {}
         }
+    }
+
+    /// Asks workspace `w`'s orchestrator `question`; it may act on it too. Err if one is
+    /// already being answered there.
+    fn ask_orchestrator(&mut self, w: usize, question: String) -> Result<(), String> {
+        let name = self.workspaces.list[w].name.clone();
+        if self.orch.asking.contains_key(&name) {
+            return Err(format!("the {name} orchestrator is still answering a question"));
+        }
+        let members = self.orchestration_members(w);
+        let bar = self.bar_ids(w);
+        let harness = Settings::harness(&self.settings.orchestration_harness, orchestration::DEFAULT_HARNESS).to_owned();
+        let orch = self.orchestrations.get(&name).cloned();
+        let rx = orchestration::ask(self.ctx.clone(), harness, self.settings.orchestration_model.clone(), members, bar, orch, question.clone());
+        self.orch.ask_errors.remove(&name);
+        self.orch.asking.insert(name, (question, rx));
+        Ok(())
+    }
+
+    /// `[[id]]` references as the sessions' names, for text read outside the app.
+    fn plain_refs(&self, text: &str) -> String {
+        orchestration::segments(text)
+            .into_iter()
+            .map(|(is_ref, piece)| match is_ref {
+                true => match self.sessions.iter().position(|s| s.id == piece) {
+                    Some(i) => format!("\"{}\"", self.title(i)),
+                    None => format!("[[{piece}]]"),
+                },
+                false => piece.to_owned(),
+            })
+            .collect()
+    }
+
+    /// Commands from `sessman …`: done, and their replies written.
+    fn poll_control(&mut self) {
+        let incoming: Vec<control::Incoming> = self.control.try_iter().collect();
+        for c in incoming {
+            let reply = c.reply.clone();
+            if let Some(result) = self.execute(c.request, Some(c.reply)) {
+                control::write_reply(&reply, &result);
+            }
+        }
+    }
+
+    /// The session `s` names: its id, an id prefix (6 or more), or its name (any case). New
+    /// sessions whose first prompt is still running count too.
+    fn find_session(&self, s: &str) -> Result<String, String> {
+        let s = s.trim();
+        let pending = self.runs.iter().filter(|(_, r)| r.new).map(|(id, _)| id.as_str());
+        let ids: Vec<&str> = self.sessions.iter().map(|m| m.id.as_str()).chain(pending).collect();
+        if let Some(id) = ids.iter().find(|id| **id == s) {
+            return Ok((*id).to_owned());
+        }
+        let by_prefix: Vec<&str> = ids.iter().copied().filter(|id| s.len() >= 6 && id.starts_with(s)).collect();
+        let by_name: Vec<&str> = ids
+            .iter()
+            .copied()
+            .filter(|id| {
+                let name = self.sessions.iter().position(|m| m.id == *id).map(|i| self.title(i)).or_else(|| self.names.get(id));
+                name.is_some_and(|n| n.trim().eq_ignore_ascii_case(s))
+            })
+            .collect();
+        match (&by_prefix[..], &by_name[..]) {
+            ([id], _) | ([], [id]) => Ok((*id).to_owned()),
+            ([], []) => Err(format!("no session is called or has the id \"{s}\" (see sessman list)")),
+            (many, []) | ([], many) | (many, _) => Err(format!("\"{s}\" could be {} sessions: {}; use the id", many.len(), many.join(", "))),
+        }
+    }
+
+    /// The workspace a command means: the one named (any case), else the calling session's,
+    /// else the open tab's. Ok(None) for no workspace.
+    fn find_workspace(&self, name: Option<&str>, caller: Option<&str>) -> Result<Option<usize>, String> {
+        let list = &self.workspaces.list;
+        if let Some(n) = name.map(str::trim).filter(|n| !n.is_empty()) {
+            return list
+                .iter()
+                .position(|w| w.name.eq_ignore_ascii_case(n))
+                .map(Some)
+                .ok_or_else(|| format!("no workspace is called \"{n}\"; there are: {}", list.iter().map(|w| w.name.as_str()).collect::<Vec<_>>().join(", ")));
+        }
+        let of_caller = caller.and_then(|c| list.iter().position(|w| w.sessions.iter().any(|s| s == c)));
+        Ok(of_caller.or(self.tab.filter(|&t| t < list.len())))
+    }
+
+    /// Workspace `w`'s sessions as its bar lists them.
+    fn visible_in(&self, w: usize) -> Vec<usize> {
+        self.bar_order(w, self.workspace_sessions(w))
+    }
+
+    /// Ids of workspace `w`'s bar, top first: new sessions still starting, then the listed
+    /// ones; in an arranged workspace, all of them where they were put.
+    fn bar_ids(&self, w: usize) -> Vec<String> {
+        let rows = self.visible_in(w).into_iter().map(|i| (i, None)).collect();
+        let pending = pending_new(&self.runs, &self.unlisted, &self.sessions, Some(&self.workspaces.list[w].sessions));
+        self.items_in(Some(w), rows, pending)
+            .into_iter()
+            .map(|item| match item {
+                BarItem::Listed(i, _) => self.sessions[i].id.clone(),
+                BarItem::Starting(id, _) => id,
+            })
+            .collect()
+    }
+
+    /// What the bar draws for the open tab: `rows` (listed sessions, maybe search results)
+    /// and the new sessions still starting.
+    fn bar_items(&self, rows: Vec<(usize, Option<String>)>, pending: Vec<(String, String, String)>) -> Vec<BarItem> {
+        let arranged = self.search.trim().is_empty().then_some(self.tab).flatten();
+        self.items_in(arranged, rows, pending)
+    }
+
+    /// Starting sessions above the listed ones, unless workspace `w` is arranged by hand:
+    /// then each goes where it was put.
+    fn items_in(&self, w: Option<usize>, rows: Vec<(usize, Option<String>)>, pending: Vec<(String, String, String)>) -> Vec<BarItem> {
+        let mut items: Vec<BarItem> = pending.into_iter().map(|(id, title, _)| BarItem::Starting(id, title)).collect();
+        items.extend(rows.into_iter().map(|(i, note)| BarItem::Listed(i, note)));
+        if let Some(ws) = w.and_then(|w| self.workspaces.list.get(w)).filter(|ws| ws.ordered) {
+            let id = |item: &BarItem| match item {
+                BarItem::Listed(i, _) => self.sessions[*i].id.clone(),
+                BarItem::Starting(id, _) => id.clone(),
+            };
+            // Stable: anything not placed keeps its default place after the placed ones.
+            items.sort_by_key(|item| ws.sessions.iter().position(|s| *s == id(item)).unwrap_or(usize::MAX));
+        }
+        items
+    }
+
+    /// A session's name as the bar shows it, for listed and still-starting sessions alike.
+    fn name_of(&self, id: &str) -> String {
+        if let Some(i) = self.sessions.iter().position(|s| s.id == id) {
+            return self.title(i).to_owned();
+        }
+        let prompt = self.runs.get(id).map(|r| &r.prompt).or_else(|| self.unlisted.iter().find(|u| u.0 == id).map(|u| &u.1));
+        match (self.names.get(id), prompt) {
+            (Some(n), _) => n.to_owned(),
+            (None, Some(p)) => p.lines().next().unwrap_or_default().chars().take(60).collect(),
+            (None, None) => id.to_owned(),
+        }
+    }
+
+    /// Does a command. None when its reply comes later (a question to an orchestrator, whose
+    /// reply is written to `reply` when it is answered).
+    fn execute(&mut self, request: control::Request, reply: Option<PathBuf>) -> Option<Result<String, String>> {
+        let control::Request { command, caller, cwd } = request;
+        let caller = caller.as_deref();
+        self.sync_workspaces(None);
+        Some(match command {
+            Command::List { workspace } => self.list_text(workspace.as_deref()),
+            Command::Rename { session, name } => self.find_session(&session).map(|id| {
+                let before = self.name_of(&id);
+                self.apply(Action::Rename(id.clone(), name.clone()));
+                format!("Renamed \"{before}\" to \"{}\"", self.name_of(&id))
+            }),
+            Command::Move { session, to } => self.find_session(&session).and_then(|id| {
+                let w = self.workspaces.list.iter().position(|w| w.sessions.contains(&id)).ok_or("that session is in no workspace, so it has no place in a bar to move to")?;
+                let mut order = self.bar_ids(w);
+                let from = order.iter().position(|x| *x == id).ok_or("that session isn't in its workspace's bar")?;
+                let at = control::place(&to, from, order.len())?;
+                order.remove(from);
+                order.insert(at, id.clone());
+                self.workspaces.arrange(w, &order);
+                self.save_workspaces();
+                Ok(format!("Moved \"{}\" to place {} of {} in the {} bar", self.name_of(&id), at + 1, order.len(), self.workspaces.list[w].name))
+            }),
+            Command::New { prompt, workspace, folder, name } => self.find_workspace(workspace.as_deref(), caller).and_then(|w| {
+                let dir = self.new_session_folder(w, folder, cwd)?;
+                let id = runner::new_session_id();
+                if let Some(w) = w {
+                    self.workspaces.move_to(&id, w);
+                    self.save_workspaces();
+                }
+                if let Some(n) = name.as_deref().filter(|n| !n.trim().is_empty()) {
+                    self.apply(Action::Rename(id.clone(), n.to_owned()));
+                }
+                self.start_run(id.clone(), Some(dir.clone()), prompt, true);
+                let place = w.map_or(String::new(), |w| format!(" in {}", self.workspaces.list[w].name));
+                let called = name.map_or(String::new(), |n| format!(" \"{}\"", n.trim()));
+                Ok(format!("Started session{called}{place} in {} (id {id})", dir.display()))
+            }),
+            Command::Ask { question, workspace } => {
+                let asked = self.find_workspace(workspace.as_deref(), caller).and_then(|w| {
+                    let w = w.ok_or("which workspace? none is open; use --workspace")?;
+                    self.ask_orchestrator(w, question)?;
+                    Ok(self.workspaces.list[w].name.clone())
+                });
+                match (asked, reply) {
+                    (Ok(name), Some(path)) => {
+                        self.orch.asked_by.insert(name, path);
+                        return None;
+                    }
+                    (Ok(name), None) => Ok(format!("Asked the {name} orchestrator")),
+                    (Err(e), _) => Err(e),
+                }
+            }
+        })
+    }
+
+    /// Where a new session starts: the folder asked for, else its workspace's (picked for it,
+    /// else that of its newest session), else the caller's.
+    fn new_session_folder(&self, w: Option<usize>, folder: Option<PathBuf>, cwd: Option<PathBuf>) -> Result<PathBuf, String> {
+        if let Some(f) = folder {
+            let f = if f.is_relative() { cwd.clone().unwrap_or_default().join(f) } else { f };
+            return if f.is_dir() { Ok(f) } else { Err(format!("{} is not a folder", f.display())) };
+        }
+        let of_workspace = w.and_then(|w| {
+            let picked = self.workspaces.list[w].folder.clone().filter(|d| d.is_dir());
+            picked.or_else(|| self.workspace_sessions(w).into_iter().find_map(|i| session::load(&self.sessions[i].path).ok()?.cwd.filter(|d| d.is_dir())))
+        });
+        of_workspace.or(cwd.filter(|d| d.is_dir())).ok_or_else(|| "which folder? the workspace has none yet; use --folder".to_owned())
+    }
+
+    /// `sessman list`: each workspace (or the one asked for) with its sessions in bar order.
+    fn list_text(&self, workspace: Option<&str>) -> Result<String, String> {
+        let only = match workspace {
+            Some(n) => Some(self.find_workspace(Some(n), None)?.unwrap_or_default()),
+            None => None,
+        };
+        let mut out = String::new();
+        for (w, ws) in self.workspaces.list.iter().enumerate().filter(|(w, _)| only.is_none_or(|o| o == *w)) {
+            let order = if ws.ordered { "arranged by hand" } else { "newest first" };
+            out.push_str(&format!("{} ({order})\n", ws.name));
+            for (k, id) in self.bar_ids(w).into_iter().enumerate() {
+                let state = match (self.runs.contains_key(&id), self.sessions.iter().any(|s| s.id == id)) {
+                    (_, false) => "  [starting]",
+                    (true, true) => "  [working]",
+                    _ => "",
+                };
+                out.push_str(&format!("  {}. {}  {id}{state}\n", k + 1, self.name_of(&id)));
+            }
+        }
+        if out.is_empty() {
+            out.push_str("No workspaces yet.\n");
+        }
+        Ok(out.trim_end().to_owned())
     }
 
     /// The main area shows the workspaces overview: All sessions with no session open.
@@ -1058,6 +1366,8 @@ impl App {
         let current = self.selected.map(|i| (self.sessions[i].id.clone(), self.sessions[i].modified));
         self.sessions = snap.sessions;
         self.index = snap.index;
+        let sessions = &self.sessions;
+        self.unlisted.retain(|(id, ..)| !sessions.iter().any(|s| &s.id == id));
         self.generation += 1;
         self.selected = current.as_ref().and_then(|(id, _)| self.sessions.iter().position(|s| &s.id == id));
         let changed = match (&current, self.selected) {
@@ -1181,6 +1491,9 @@ impl App {
     /// A run ended (or was stopped): send the next queued prompt, or pause the queue and say why.
     fn end_run(&mut self, id: &str, result: Result<(), String>, stopped: bool) {
         let Some(run) = self.runs.remove(id) else { return };
+        if run.new && !self.sessions.iter().any(|s| s.id == id) {
+            self.unlisted.push((id.to_owned(), run.prompt.clone(), run.cwd.clone()));
+        }
         if stopped {
             run.stop.stop();
         }
@@ -1327,10 +1640,20 @@ impl App {
 
     /// Sessions in the active tab (all, or one workspace), newest first.
     fn visible(&self) -> Vec<usize> {
-        match self.tab.and_then(|w| self.workspaces.list.get(w)) {
+        match self.tab.filter(|&w| w < self.workspaces.list.len()) {
             None => (0..self.sessions.len()).collect(),
-            Some(w) => (0..self.sessions.len()).filter(|&i| w.sessions.contains(&self.sessions[i].id)).collect(),
+            Some(w) => self.visible_in(w),
         }
+    }
+
+    /// Workspace `w`'s sessions (indices into `sessions`) in the order its bar lists them:
+    /// as arranged on its orchestration page, else newest first.
+    fn bar_order(&self, w: usize, mut sessions: Vec<usize>) -> Vec<usize> {
+        let ws = &self.workspaces.list[w];
+        if ws.ordered {
+            sessions.sort_by_key(|&i| ws.sessions.iter().position(|id| *id == self.sessions[i].id));
+        }
+        sessions
     }
 
     fn title(&self, i: usize) -> &str {
@@ -1481,7 +1804,7 @@ impl App {
 
         let rows = self.rows();
         let members = self.tab.and_then(|w| self.workspaces.list.get(w)).map(|w| w.sessions.as_slice());
-        let pending = pending_new(&self.runs, &self.sessions, members);
+        let pending = pending_new(&self.runs, &self.unlisted, &self.sessions, members);
         if rows.is_empty() && pending.is_empty() && !self.search.trim().is_empty() {
             ui.label(RichText::new("No matches. Press Enter to ask Haiku.").weak());
         } else if rows.is_empty() && pending.is_empty() {
@@ -1492,6 +1815,7 @@ impl App {
             });
         }
         let order: Vec<String> = rows.iter().map(|&(i, _)| self.sessions[i].id.clone()).collect();
+        let items = self.bar_items(rows, pending);
         // Rows picked, in list order: what a drag or the context menu acts on.
         let picked: Vec<String> = order.iter().filter(|id| self.picked.contains(*id)).cloned().collect();
         let open_id = self.selected.map(|i| self.sessions[i].id.clone());
@@ -1522,13 +1846,18 @@ impl App {
                     actions.push(Action::Orchestrate);
                 }
             }
-            for (id, title, _) in pending {
-                let open = self.new_session.is_some() && self.new_id.as_ref() == Some(&id);
-                if session_bubble(ui, open, &title, None, true, None).clicked() && !open {
-                    actions.push(Action::OpenPending(id));
-                }
-            }
-            for (i, note) in rows {
+            for item in items {
+                let (i, note) = match item {
+                    BarItem::Listed(i, note) => (i, note),
+                    BarItem::Starting(id, title) => {
+                        let open = self.new_session.is_some() && self.new_id.as_ref() == Some(&id);
+                        let title = self.names.get(&id).unwrap_or(&title);
+                        if session_bubble(ui, open, title, None, true, None).clicked() && !open {
+                            actions.push(Action::OpenPending(id));
+                        }
+                        continue;
+                    }
+                };
                 let s = &self.sessions[i];
                 let title = self.names.get(&s.id).unwrap_or(&s.title);
                 if let Some(r) = self.renaming.as_mut().filter(|r| r.id == s.id) {
@@ -2990,16 +3319,18 @@ fn closable_tab(ui: &mut egui::Ui, id: impl std::hash::Hash + std::fmt::Debug, t
 /// New sessions whose first prompt is running, before Claude has written their file (so the
 /// list doesn't have them yet): (id, first line of the prompt, folder). In a workspace tab,
 /// only the ones created there.
-fn pending_new(runs: &HashMap<String, Run>, listed: &[SessionMeta], members: Option<&[String]>) -> Vec<(String, String, String)> {
-    let mut out: Vec<_> = runs
-        .iter()
-        .filter(|(id, r)| r.new && !listed.iter().any(|s| &s.id == *id))
-        .filter(|(id, _)| members.is_none_or(|m| m.contains(id)))
-        .map(|(id, r)| {
-            let folder = r.cwd.as_ref().map(|d| d.display().to_string()).unwrap_or_default();
-            (id.clone(), r.prompt.lines().next().unwrap_or_default().chars().take(60).collect(), folder)
+fn pending_new(runs: &HashMap<String, Run>, ended: &[(String, String, Option<PathBuf>)], listed: &[SessionMeta], members: Option<&[String]>) -> Vec<(String, String, String)> {
+    let running = runs.iter().filter(|(_, r)| r.new).map(|(id, r)| (id, &r.prompt, &r.cwd));
+    let mut out: Vec<_> = running
+        .chain(ended.iter().map(|(id, prompt, cwd)| (id, prompt, cwd)))
+        .filter(|(id, ..)| !listed.iter().any(|s| &s.id == *id))
+        .filter(|(id, ..)| members.is_none_or(|m| m.contains(id)))
+        .map(|(id, prompt, cwd)| {
+            let folder = cwd.as_ref().map(|d| d.display().to_string()).unwrap_or_default();
+            (id.clone(), prompt.lines().next().unwrap_or_default().chars().take(60).collect(), folder)
         })
         .collect();
+    out.dedup_by(|a, b| a.0 == b.0);
     out.sort();
     out
 }
@@ -3223,17 +3554,23 @@ fn short_project(p: &str) -> String {
 }
 
 impl eframe::App for App {
-    fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
-        let ctx = ui.ctx().clone();
+    /// Before every frame, and also while the window is hidden (behind others or minimized),
+    /// when eframe draws nothing: runs, answers and commands keep being taken.
+    fn logic(&mut self, _ctx: &egui::Context, _frame: &mut eframe::Frame) {
         self.poll_runner();
         self.poll_summary();
         self.poll_overviews();
         self.poll_orchestration();
+        self.poll_control();
         self.poll_btw();
         self.poll_snapshots();
         self.poll_ai();
         self.poll_refine();
         self.poll_dictation();
+    }
+
+    fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
+        let ctx = ui.ctx().clone();
         self.global_keys(&ctx);
         self.keep_zoom(&ctx);
         // First, so it spans the whole width above the side panels.
@@ -3373,11 +3710,15 @@ mod tests {
         runs.insert("old".to_owned(), run(false, "continue"));
         runs.insert("n2".to_owned(), run(true, "listed already"));
         let listed = vec![SessionMeta { id: "n2".into(), path: PathBuf::new(), project: String::new(), title: String::new(), modified: UNIX_EPOCH }];
-        let pending = pending_new(&runs, &listed, None);
+        let pending = pending_new(&runs, &[], &listed, None);
         assert_eq!(pending, vec![("n1".to_owned(), "build it".to_owned(), "/tmp/play".to_owned())]);
         // In a workspace tab, only the sessions created there.
-        assert!(pending_new(&runs, &listed, Some(&["other".to_owned()])).is_empty());
-        assert_eq!(pending_new(&runs, &listed, Some(&["n1".to_owned()])).len(), 1);
+        assert!(pending_new(&runs, &[], &listed, Some(&["other".to_owned()])).is_empty());
+        assert_eq!(pending_new(&runs, &[], &listed, Some(&["n1".to_owned()])).len(), 1);
+        // Its run over, a new session stays until it is listed.
+        runs.remove("n1");
+        let ended = vec![("n1".to_owned(), "build it".to_owned(), None), ("n2".to_owned(), "listed already".to_owned(), None)];
+        assert_eq!(pending_new(&runs, &ended, &listed, None), vec![("n1".to_owned(), "build it".to_owned(), String::new())]);
     }
 
     #[test]

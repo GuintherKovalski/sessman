@@ -118,11 +118,41 @@ pub fn show(ui: &mut egui::Ui, cache: &mut CommonMarkCache, text: &str) {
     }
 }
 
+/// `text` with the characters Markdown would read as formatting escaped, to put it inside a
+/// link's text as it is.
+pub fn escape(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    for c in text.chars() {
+        if matches!(c, '\\' | '[' | ']' | '*' | '_' | '`' | '<' | '>' | '#' | '~' | '|') {
+            out.push('\\');
+        }
+        out.push(c);
+    }
+    out
+}
+
+/// Takes back a link clicked this frame whose URL starts with `prefix` (an app link, not a web
+/// page), so it is not opened in the browser; returns what follows the prefix.
+pub fn take_url(ctx: &egui::Context, prefix: &str) -> Option<String> {
+    ctx.output_mut(|o| {
+        let mut found = None;
+        o.commands.retain(|c| match c {
+            egui::OutputCommand::OpenUrl(u) if u.url.starts_with(prefix) => {
+                found = Some(u.url[prefix.len()..].to_owned());
+                false
+            }
+            _ => true,
+        });
+        found
+    })
+}
+
 const CELL_PAD: egui::Vec2 = egui::vec2(8.0, 4.0);
 const MAX_COL_WIDTH: f32 = 380.0;
 
 /// A bordered table with a bold header, striped rows and aligned columns, drawn by hand so
-/// columns size to their content and wide tables scroll instead of squeezing.
+/// columns size to their content and wide tables scroll instead of squeezing. Cell text is
+/// selectable (drag across cells, Cmd+C), and a cell's right-click menu copies it or the table.
 fn table(ui: &mut egui::Ui, t: &Table) {
     let rows: Vec<Vec<(std::sync::Arc<egui::Galley>, Option<String>)>> = std::iter::once(&t.header)
         .chain(&t.rows)
@@ -141,7 +171,7 @@ fn table(ui: &mut egui::Ui, t: &Table) {
     for (r, row) in rows.iter().enumerate() {
         let height = row.iter().map(|(g, _)| g.size().y).fold(0.0, f32::max) + 2.0 * CELL_PAD.y;
         let (rect, _) = ui.allocate_exact_size(egui::vec2(total, height), Sense::hover());
-        let painter = ui.painter();
+        let painter = ui.painter().clone();
         if r == 0 {
             painter.rect_filled(rect, 0.0, v.code_bg_color);
         } else if r % 2 == 0 {
@@ -156,12 +186,13 @@ fn table(ui: &mut egui::Ui, t: &Table) {
                 Some(Alignment::Center) => free / 2.0,
                 _ => 0.0,
             };
-            painter.galley(cell.min + CELL_PAD + egui::vec2(dx, 0.0), galley.clone(), v.text_color());
             if c > 0 {
                 painter.vline(x, rect.y_range(), border);
             }
+            let at = egui::Rect::from_min_size(cell.min + CELL_PAD + egui::vec2(dx, 0.0), galley.size());
+            let mut resp = ui.put(at, egui::Label::new(galley.clone()).selectable(true));
             if let Some(url) = link {
-                let resp = ui.interact(cell, ui.id().with((r, c)), Sense::click()).on_hover_text(url);
+                resp = resp.on_hover_text(url);
                 if resp.hovered() {
                     ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
                 }
@@ -169,6 +200,19 @@ fn table(ui: &mut egui::Ui, t: &Table) {
                     ui.ctx().open_url(egui::OpenUrl::new_tab(url));
                 }
             }
+            resp.context_menu(|ui| {
+                if ui.button("Copy cell").clicked() {
+                    ui.ctx().copy_text(galley.text().to_owned());
+                }
+                if ui.button("Copy table").on_hover_text("Tab-separated, to paste into a spreadsheet").clicked() {
+                    ui.ctx().copy_text(tsv(&rows));
+                }
+                if let Some(url) = link
+                    && ui.button("Copy link").clicked()
+                {
+                    ui.ctx().copy_text(url.clone());
+                }
+            });
             x += widths[c];
         }
         if r == 0 {
@@ -177,6 +221,14 @@ fn table(ui: &mut egui::Ui, t: &Table) {
     }
     let outline = egui::Rect::from_min_max(egui::pos2(left, top), egui::pos2(left + total, ui.cursor().top()));
     ui.painter().rect_stroke(outline, 2.0, border, egui::StrokeKind::Inside);
+}
+
+/// The table's text as tab-separated rows, header first.
+fn tsv(rows: &[Vec<(std::sync::Arc<egui::Galley>, Option<String>)>]) -> String {
+    let line = |row: &Vec<(std::sync::Arc<egui::Galley>, Option<String>)>| {
+        row.iter().map(|(g, _)| g.text().trim().replace(['\t', '\n'], " ")).collect::<Vec<_>>().join("\t")
+    };
+    rows.iter().map(line).collect::<Vec<_>>().join("\n")
 }
 
 /// Lays out a cell's inline Markdown (bold, italic, code, strikethrough, links); returns the
@@ -340,6 +392,14 @@ mod tests {
     }
 
     #[test]
+    fn escaped_text_reads_as_it_is() {
+        assert_eq!(escape("a [b] *c* d_e"), "a \\[b\\] \\*c\\* d\\_e");
+        let md = format!("[{}](x:1)", escape("Fix [auth] *now*"));
+        let text: String = Parser::new(&md).filter_map(|e| if let Event::Text(t) = e { Some(t.to_string()) } else { None }).collect();
+        assert_eq!(text, "Fix [auth] *now*");
+    }
+
+    #[test]
     fn bare_urls_become_links() {
         assert_eq!(linkify("See https://example.com/a_b?x=1."), "See <https://example.com/a_b?x=1>.");
         assert_eq!(linkify("(docs at https://x.dev/page) ok"), "(docs at <https://x.dev/page>) ok");
@@ -388,5 +448,56 @@ mod tests {
         assert_eq!(blocks(unclosed), vec![Block::Markdown(unclosed)]);
         let quoted = "> | a |\n> |---|\n> | 1 |\n";
         assert_eq!(blocks(quoted), vec![Block::Markdown(quoted)]);
+    }
+}
+
+#[cfg(test)]
+mod drag_tests {
+    use super::*;
+
+    /// Drags from the first header cell to the last body cell of a table and copies.
+    #[test]
+    fn dragging_across_a_table_selects_its_cells() {
+        let ctx = egui::Context::default();
+        let mut cache = CommonMarkCache::default();
+        let text = "Before\n\n| Name | Value |\n|---|---|\n| alpha | 1 |\n| beta | 2 |\n\nAfter\n";
+        let mut rects: Vec<egui::Rect> = Vec::new();
+        let mut frame = |events: Vec<egui::Event>, rects: &mut Vec<egui::Rect>| {
+            let input = egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(800.0, 600.0))),
+                events,
+                ..Default::default()
+            };
+            let mut out = ctx.run_ui(input, |ui| {
+                let r = ui.scope(|ui| show(ui, &mut cache, text)).response.rect;
+                rects.clear();
+                rects.push(r);
+            });
+            out.textures_delta.clear();
+            out
+        };
+        frame(vec![], &mut rects);
+        frame(vec![], &mut rects);
+        let r = rects[0];
+        // Start left of "Before", end at the bottom right of the content.
+        let start = r.left_top() + egui::vec2(1.0, 5.0);
+        let end = r.left_bottom() + egui::vec2(30.0, -5.0);
+        let press = |pos, pressed| egui::Event::PointerButton { pos, button: egui::PointerButton::Primary, pressed, modifiers: Default::default() };
+        frame(vec![egui::Event::PointerMoved(start)], &mut rects);
+        frame(vec![press(start, true)], &mut rects);
+        for i in 1..=10 {
+            let p = start + (end - start) * (i as f32 / 10.0);
+            frame(vec![egui::Event::PointerMoved(p)], &mut rects);
+        }
+        frame(vec![press(end, false)], &mut rects);
+        let out = frame(vec![egui::Event::Copy], &mut rects);
+        let copied: Vec<_> = out.platform_output.commands.iter().filter_map(|c| match c {
+            egui::OutputCommand::CopyText(t) => Some(t.clone()),
+            _ => None,
+        }).collect();
+        let all = copied.join("");
+        for word in ["Before", "Name", "alpha", "2", "After"] {
+            assert!(all.contains(word), "missing {word} in {all:?}");
+        }
     }
 }

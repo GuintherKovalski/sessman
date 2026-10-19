@@ -1,4 +1,5 @@
 mod app;
+mod control;
 mod diffview;
 mod dictation;
 mod find;
@@ -23,6 +24,10 @@ fn main() -> eframe::Result {
     if std::env::args().nth(1).as_deref() == Some("statusline") {
         status::run();
         return Ok(());
+    }
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    if args.first().is_some_and(|a| control::is_command(a)) {
+        std::process::exit(control::cli(&args));
     }
     runner::fix_path();
     let options = eframe::NativeOptions {

@@ -8,11 +8,21 @@
 //! sends the previous report and only the sessions with new activity since. **Clear &
 //! re-summarize** forgets the report, its questions and what it covered, and starts over from
 //! every session's digest.
+//!
+//! The orchestrator mentions sessions as `[[n]]`, their number in what it was sent; these are
+//! kept as `[[session id]]` and shown as links named after the session (renamed or not), that
+//! open it. From the page, sessions can also be renamed and put in the order the bar lists them.
+//!
+//! Asked to, the orchestrator also acts: it ends its answer with an `actions` block of
+//! commands (control.rs) to rename sessions, move them in the bar, or start new ones, which
+//! the app does and lists under the answer.
+use crate::control::Command;
 use crate::markdown;
 use crate::overview::{ago, secs};
 use crate::runner;
 use crate::session;
 use crate::theme;
+use eframe::egui::text::{CCursor, CCursorRange};
 use eframe::egui::{self, Color32, Id, Key, Modifiers, RichText, Sense, Stroke, StrokeKind};
 use egui_commonmark::CommonMarkCache;
 use serde::{Deserialize, Serialize};
@@ -68,6 +78,9 @@ pub struct Exchange {
     pub question: String,
     pub answer: String,
     pub at: u64,
+    /// What the orchestrator did on it, one line each (failures start with "Could not").
+    #[serde(default)]
+    pub done: Vec<String>,
 }
 
 /// One workspace's orchestration: its report and what it covers, and the questions asked.
@@ -102,8 +115,8 @@ impl Orchestration {
         self.updates += 1;
     }
 
-    pub fn answered(&mut self, question: String, answer: String, now: u64) {
-        self.log.push(Exchange { question, answer, at: now });
+    pub fn answered(&mut self, question: String, answer: String, done: Vec<String>, now: u64) {
+        self.log.push(Exchange { question, answer, at: now, done });
         if self.log.len() > MAX_LOG {
             self.log.remove(0);
         }
@@ -148,11 +161,94 @@ impl Store {
 #[derive(Default)]
 pub struct Jobs {
     pub updating: HashMap<String, Receiver<Result<Update, String>>>,
-    pub asking: HashMap<String, (String, Receiver<Result<String, String>>)>,
+    pub asking: HashMap<String, (String, Receiver<Result<Answer, String>>)>,
+    /// Where to reply when the answer is in, for questions asked with `sessman ask`.
+    pub asked_by: HashMap<String, PathBuf>,
     pub errors: HashMap<String, String>,
     pub ask_errors: HashMap<String, String>,
     /// Text in the page's question field.
     pub question: String,
+    /// A session card's name being edited.
+    pub renaming: Option<Rename>,
+}
+
+/// A session's name being edited on the page, and whether the field was just opened.
+pub struct Rename {
+    pub id: String,
+    pub text: String,
+    pub fresh: bool,
+}
+
+/// Rewrites every `[[…]]` reference with `f` of what is inside; a `None` keeps it as it is.
+fn map_refs(text: &str, f: impl Fn(&str) -> Option<String>) -> String {
+    let mut out = String::with_capacity(text.len());
+    for (is_ref, piece) in segments(text) {
+        match is_ref.then(|| f(piece)).flatten() {
+            Some(r) => out.push_str(&r),
+            None if is_ref => out.push_str(&format!("[[{piece}]]")),
+            None => out.push_str(piece),
+        }
+    }
+    out
+}
+
+/// Text split into plain pieces and references (what is inside `[[…]]`), in order.
+pub fn segments(text: &str) -> Vec<(bool, &str)> {
+    let mut out = Vec::new();
+    let mut rest = text;
+    while let Some(start) = rest.find("[[") {
+        let Some(len) = rest[start + 2..].find("]]") else { break };
+        if start > 0 {
+            out.push((false, &rest[..start]));
+        }
+        out.push((true, &rest[start + 2..start + 2 + len]));
+        rest = &rest[start + 2 + len + 2..];
+    }
+    if !rest.is_empty() {
+        out.push((false, rest));
+    }
+    out
+}
+
+/// The model's `[[n]]` (also `[[Session n]]`, `[[#n]]`) as `[[id]]` of the n-th of `ids`.
+pub fn link_ids(text: &str, ids: &[String]) -> String {
+    map_refs(text, |r| {
+        let r = r.trim();
+        let r = r.strip_prefix("Session").or_else(|| r.strip_prefix("session")).unwrap_or(r).trim().trim_start_matches('#');
+        let n: usize = r.parse().ok()?;
+        Some(format!("[[{}]]", ids.get(n.checked_sub(1)?)?))
+    })
+}
+
+/// Back to the numbers in what the model is sent now; sessions no longer listed are named.
+fn number_ids(text: &str, ids: &[String]) -> String {
+    map_refs(text, |r| Some(ids.iter().position(|id| id == r).map_or("another session".to_owned(), |n| format!("[[{}]]", n + 1))))
+}
+
+const REFS: &str = "When you mention a session anywhere in your text, write [[n]] with its number (e.g. \
+[[2]]) in place of its name: it is shown as the session's name, linked to it, so never write the name as \
+well (write \"[[2]] is done\", not \"[[2]] Auth fixes is done\").";
+
+impl Report {
+    /// The report as the model is sent it: sessions by their number in `ids`.
+    fn numbered(&self, ids: &[String]) -> serde_json::Value {
+        let num = |t: &String| number_ids(t, ids);
+        let sessions: Vec<serde_json::Value> = self
+            .sessions
+            .iter()
+            .filter_map(|s| {
+                let n = ids.iter().position(|id| *id == s.id)? + 1;
+                Some(serde_json::json!({"n": n, "state": s.state, "now": num(&s.now), "next": num(&s.next)}))
+            })
+            .collect();
+        serde_json::json!({
+            "progress": self.progress,
+            "summary": num(&self.summary),
+            "sessions": sessions,
+            "attention": self.attention.iter().map(num).collect::<Vec<_>>(),
+            "next": self.next.iter().map(num).collect::<Vec<_>>(),
+        })
+    }
 }
 
 /// A session of the workspace, as the orchestrator reads it.
@@ -224,22 +320,11 @@ pub fn request(harness: &str, members: &[Member], digests: &[Option<String>], pr
          List every session below by its number. \"waiting\" means it needs the developer's input or \
          review; \"blocked\" means it hit a problem it could not solve; \"done\" means its goal is met.\n",
     );
+    p.push_str(REFS);
+    p.push('\n');
     if let Some(prev) = previous {
-        let numbered: Vec<serde_json::Value> = prev
-            .sessions
-            .iter()
-            .filter_map(|s| {
-                let n = members.iter().position(|m| m.id == s.id)? + 1;
-                Some(serde_json::json!({"n": n, "state": s.state, "now": s.now, "next": s.next}))
-            })
-            .collect();
-        let json = serde_json::json!({
-            "progress": prev.progress,
-            "summary": prev.summary,
-            "sessions": numbered,
-            "attention": prev.attention,
-            "next": prev.next,
-        });
+        let ids: Vec<String> = members.iter().map(|m| m.id.clone()).collect();
+        let json = prev.numbered(&ids);
         p.push_str(&format!(
             "\nYour PREVIOUS REPORT is below. Update it: keep what still holds, change what the new \
              activity changes.\n{json}\n"
@@ -307,12 +392,12 @@ pub fn parse(reply: &str, ids: &[String]) -> Result<Report, String> {
         }
         let state = s.state.trim().to_lowercase();
         let state = if STATES.contains(&state.as_str()) { state } else { "idle".to_owned() };
-        sessions.push(Status { id: id.clone(), state, now: s.now.trim().to_owned(), next: s.next.trim().to_owned() });
+        sessions.push(Status { id: id.clone(), state, now: link_ids(s.now.trim(), ids), next: link_ids(s.next.trim(), ids) });
     }
-    let list = |v: Vec<String>| v.into_iter().map(|s| s.trim().to_owned()).filter(|s| !s.is_empty()).collect::<Vec<_>>();
+    let list = |v: Vec<String>| v.into_iter().map(|s| link_ids(s.trim(), ids)).filter(|s| !s.is_empty()).collect::<Vec<_>>();
     Ok(Report {
         progress: raw.progress.unwrap_or(0.0).clamp(0.0, 100.0).round() as u8,
-        summary: raw.summary.trim().to_owned(),
+        summary: link_ids(raw.summary.trim(), ids),
         sessions,
         attention: list(raw.attention),
         next: list(raw.next).into_iter().take(4).collect(),
@@ -321,30 +406,51 @@ pub fn parse(reply: &str, ids: &[String]) -> Result<Report, String> {
 
 const STATES: [&str; 5] = ["working", "waiting", "blocked", "done", "idle"];
 
+/// An answer, and what the orchestrator asked to be done with it (sessions by id).
+#[derive(Debug, PartialEq)]
+pub struct Answer {
+    pub text: String,
+    pub actions: Vec<Command>,
+}
+
+const ACTIONS: &str = "You can also act on the workspace, but only when the developer asks you to: rename \
+sessions, move them in the bar, or start new sessions. To act, end your reply with a block like this:\n\
+```actions\n\
+[{\"do\": \"rename\", \"session\": 2, \"name\": \"Auth fixes\"},\n \
+{\"do\": \"move\", \"session\": 2, \"to\": \"top\"},\n \
+{\"do\": \"new\", \"prompt\": \"the new session's first prompt, complete and self-contained\", \"name\": \"short name\"}]\n\
+```\n\
+\"to\" is \"top\", \"bottom\", \"up\", \"down\" or a position in the bar from 1. They are done in order, \
+right after your reply; above the block, say briefly what you are doing. Without a request to act, add no block.";
+
 /// Answers a question about the workspace on a thread, from the report, recent questions and a
-/// short digest of each session.
-pub fn ask(ctx: egui::Context, harness: String, model: String, members: Vec<Member>, orch: Option<Orchestration>, question: String) -> Receiver<Result<String, String>> {
+/// short digest of each session. `bar` is the workspace's sessions in the bar's order.
+pub fn ask(ctx: egui::Context, harness: String, model: String, members: Vec<Member>, bar: Vec<String>, orch: Option<Orchestration>, question: String) -> Receiver<Result<Answer, String>> {
     let (tx, rx) = mpsc::channel();
     std::thread::spawn(move || {
+        let members: Vec<Member> = members.into_iter().take(MAX_SESSIONS).collect();
+        let ids: Vec<String> = members.iter().map(|m| m.id.clone()).collect();
         let mut p = format!(
             "{}\n\nAnswer the developer's QUESTION about this workspace, briefly, in Markdown. Use the \
-             report and the sessions below; say so when they don't tell.\n",
+             report and the sessions below; say so when they don't tell. {REFS}\n\n{ACTIONS}\n",
             harness.trim()
         );
         if let Some(r) = orch.as_ref().and_then(|o| o.report.as_ref()) {
-            p.push_str(&format!("\nCURRENT REPORT:\n{}\n", serde_json::to_string(r).unwrap_or_default()));
+            p.push_str(&format!("\nCURRENT REPORT:\n{}\n", r.numbered(&ids)));
         }
         let recent: Vec<&Exchange> = orch.as_ref().map(|o| o.log.iter().rev().take(3).rev().collect()).unwrap_or_default();
         if !recent.is_empty() {
             p.push_str("\nEARLIER QUESTIONS:\n");
             for e in recent {
                 let short: String = e.answer.chars().take(600).collect();
-                p.push_str(&format!("Q: {}\nA: {short}\n", e.question));
+                p.push_str(&format!("Q: {}\nA: {}\n", e.question, number_ids(&short, &ids)));
             }
         }
+        let order: Vec<String> = bar.iter().filter_map(|id| ids.iter().position(|x| x == id)).map(|n| format!("[[{}]]", n + 1)).collect();
+        p.push_str(&format!("\nTHE BAR lists the sessions in this order, top first: {}\n", order.join(", ")));
         p.push_str("\nSESSIONS, newest first:\n");
-        for (n, m) in members.iter().take(MAX_SESSIONS).enumerate() {
-            p.push_str(&format!("\n## Session {}: {} (id {})\n", n + 1, m.title, m.id));
+        for (n, m) in members.iter().enumerate() {
+            p.push_str(&format!("\n## Session {}: {}\n", n + 1, m.title));
             if let Some(g) = &m.goal {
                 p.push_str(&format!("Goal and checklist:\n{}\n", g.trim()));
             }
@@ -353,11 +459,47 @@ pub fn ask(ctx: egui::Context, harness: String, model: String, members: Vec<Memb
             }
         }
         p.push_str(&format!("\nQUESTION: {question}\n"));
-        let result = runner::ask_model(ctx.clone(), &model, p).recv().unwrap_or_else(|_| Err("the model stopped unexpectedly".into()));
+        let result = runner::ask_model(ctx.clone(), &model, p)
+            .recv()
+            .unwrap_or_else(|_| Err("the model stopped unexpectedly".into()))
+            .map(|reply| {
+                let (text, actions) = actions(&reply, &ids);
+                Answer { text: link_ids(&text, &ids), actions }
+            });
         let _ = tx.send(result);
         ctx.request_repaint();
     });
     rx
+}
+
+/// Takes the `actions` block off the end of a reply: the text without it, and its commands
+/// with sessions by id. Actions on sessions it doesn't know, and ones it can't read, are dropped.
+pub fn actions(reply: &str, ids: &[String]) -> (String, Vec<Command>) {
+    let Some(start) = reply.find("```actions") else { return (reply.trim().to_owned(), Vec::new()) };
+    let body = &reply[start + "```actions".len()..];
+    let end = body.find("```").unwrap_or(body.len());
+    let rest = body.get(end + 3..).unwrap_or("");
+    let text = format!("{}{}", reply[..start].trim_end(), if rest.trim().is_empty() { String::new() } else { format!("\n\n{}", rest.trim()) });
+    let list: Vec<serde_json::Value> = serde_json::from_str(body[..end].trim()).unwrap_or_default();
+    let session = |v: &serde_json::Value| {
+        let n = v.as_u64().or_else(|| v.as_str().and_then(|t| t.trim().trim_start_matches("[[").trim_end_matches("]]").parse().ok()))?;
+        ids.get((n as usize).checked_sub(1)?).cloned()
+    };
+    let text_of = |v: &serde_json::Value, k: &str| v.get(k).and_then(|x| x.as_str()).map(|x| x.trim().to_owned());
+    let commands = list
+        .iter()
+        .filter_map(|a| match a.get("do")?.as_str()? {
+            "rename" => Some(Command::Rename { session: session(a.get("session")?)?, name: text_of(a, "name")? }),
+            "move" => {
+                let to = a.get("to")?;
+                let to = to.as_str().map(str::to_owned).or_else(|| to.as_u64().map(|n| n.to_string()))?;
+                Some(Command::Move { session: session(a.get("session")?)?, to })
+            }
+            "new" => Some(Command::New { prompt: text_of(a, "prompt").filter(|p| !p.is_empty())?, workspace: None, folder: None, name: text_of(a, "name").filter(|n| !n.is_empty()) }),
+            _ => None,
+        })
+        .collect();
+    (text.trim().to_owned(), commands)
 }
 
 /// Whether the page should update on its own: never written yet, or there is activity it hasn't
@@ -436,6 +578,8 @@ pub struct Page<'a> {
     pub asking: Option<&'a str>,
     pub ask_error: Option<&'a str>,
     pub model: &'a str,
+    /// Whether the bar lists the sessions as arranged here (else newest first).
+    pub arranged: bool,
 }
 
 pub enum Event {
@@ -447,11 +591,17 @@ pub enum Event {
     Ask(String),
     /// Forget the question and answer at this index.
     Forget(usize),
+    /// Give this session this name (empty: its own title again).
+    Rename(String, String),
+    /// Put this session at this place in the bar (an index into the page's sessions).
+    Move(String, usize),
+    /// List the sessions newest first again.
+    NewestFirst,
 }
 
 /// The orchestration page: header with actions, overall progress and report, a card per
 /// session, and questions to the orchestrator at the bottom.
-pub fn ui(ui: &mut egui::Ui, page: &Page, question: &mut String, md: &mut CommonMarkCache) -> Option<Event> {
+pub fn ui(ui: &mut egui::Ui, page: &Page, question: &mut String, renaming: &mut Option<Rename>, md: &mut CommonMarkCache) -> Option<Event> {
     let mut event = None;
     let now = secs(SystemTime::now());
     let pal = theme::palette(ui.visuals());
@@ -566,21 +716,26 @@ pub fn ui(ui: &mut egui::Ui, page: &Page, question: &mut String, md: &mut Common
                             ui.add(bar);
                         });
                         ui.add_space(6.0);
+                        let mut open = |id: Option<String>| {
+                            if let Some(id) = id {
+                                event = Some(Event::Open(id));
+                            }
+                        };
                         if !rep.summary.is_empty() {
-                            ui.add(egui::Label::new(&rep.summary).wrap());
+                            open(linked(ui, &rep.summary, page.sessions, |t| RichText::new(t)));
                         }
                         if !rep.attention.is_empty() {
                             ui.add_space(8.0);
                             ui.label(RichText::new("NEEDS YOU").size(10.0).strong().color(pal.note));
                             for a in &rep.attention {
-                                ui.add(egui::Label::new(RichText::new(format!("•  {a}")).color(pal.note)).wrap());
+                                open(linked(ui, &format!("•  {a}"), page.sessions, |t| RichText::new(t).color(pal.note)));
                             }
                         }
                         if !rep.next.is_empty() {
                             ui.add_space(8.0);
                             ui.label(RichText::new("NEXT").size(10.0).color(accent));
                             for n in &rep.next {
-                                ui.add(egui::Label::new(format!("•  {n}")).wrap());
+                                open(linked(ui, &format!("•  {n}"), page.sessions, |t| RichText::new(t)));
                             }
                         }
                     }
@@ -611,14 +766,25 @@ pub fn ui(ui: &mut egui::Ui, page: &Page, question: &mut String, md: &mut Common
         ui.add_space(10.0);
 
         // A card per session: live state first, then what the report says about it.
-        ui.label(RichText::new("Sessions").strong());
+        ui.horizontal(|ui| {
+            ui.label(RichText::new("Sessions").strong());
+            ui.label(RichText::new("in the bar's order · drag to reorder · right-click for more").weak().small());
+            if page.arranged {
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    if ui.small_button("Newest first").on_hover_text("List the sessions in the bar newest first again").clicked() {
+                        event = Some(Event::NewestFirst);
+                    }
+                });
+            }
+        });
         ui.add_space(4.0);
         let columns = ((ui.available_width() / 340.0) as usize).clamp(1, 3);
         ui.columns(columns, |cols| {
             for (k, s) in page.sessions.iter().enumerate() {
                 let status = report.and_then(|r| r.sessions.iter().find(|x| x.id == s.id));
-                if session_card(&mut cols[k % columns], s, status, now, accent) {
-                    event = Some(Event::Open(s.id.to_owned()));
+                let card = Card { s, k, count: page.sessions.len(), sessions: page.sessions, status, now, accent };
+                if let Some(e) = session_card(&mut cols[k % columns], &card, renaming) {
+                    event = Some(e);
                 }
             }
         });
@@ -646,7 +812,21 @@ pub fn ui(ui: &mut egui::Ui, page: &Page, question: &mut String, md: &mut Common
                                     event = Some(Event::Forget(i));
                                 }
                             });
-                            markdown::show(ui, md, &e.answer);
+                            // References read as the session's name, linked to it.
+                            let answer = map_refs(&e.answer, |id| {
+                                Some(match name_of(page.sessions, id) {
+                                    Some(t) => format!("[{}]({SESSION_URL}{id})", markdown::escape(t)),
+                                    None => "*another session*".to_owned(),
+                                })
+                            });
+                            markdown::show(ui, md, &answer);
+                            if let Some(id) = markdown::take_url(ui.ctx(), SESSION_URL) {
+                                event = Some(Event::Open(id));
+                            }
+                            for d in &e.done {
+                                let color = if d.starts_with("Could not") { pal.error } else { pal.add_fg };
+                                ui.add(egui::Label::new(RichText::new(format!("✓ {d}")).small().color(color)).wrap());
+                            }
                             ui.label(RichText::new(ago(e.at, now)).weak().small());
                         });
                 });
@@ -657,8 +837,64 @@ pub fn ui(ui: &mut egui::Ui, page: &Page, question: &mut String, md: &mut Common
     event
 }
 
-/// A session's card; true when clicked (to open it).
-fn session_card(ui: &mut egui::Ui, s: &Live, status: Option<&Status>, now: u64, accent: Color32) -> bool {
+/// What a session reference links to in rendered Markdown, followed by its id; the page
+/// takes these clicks itself instead of opening them as URLs.
+const SESSION_URL: &str = "sessman-session:";
+
+/// A session's current name, if it is one of the page's.
+fn name_of<'a>(sessions: &'a [Live], id: &str) -> Option<&'a str> {
+    sessions.iter().find(|s| s.id == id).map(|s| s.title)
+}
+
+/// A link named after the session; true when clicked. Sessions no longer listed read weak.
+fn session_link(ui: &mut egui::Ui, sessions: &[Live], id: &str, style: impl Fn(&str) -> RichText) -> bool {
+    match name_of(sessions, id) {
+        Some(title) => ui.link(style(title)).on_hover_text("Open this session").clicked(),
+        None => {
+            ui.label(style("another session").weak());
+            false
+        }
+    }
+}
+
+/// Wrapped text with its session references as links; the id of one clicked.
+fn linked(ui: &mut egui::Ui, text: &str, sessions: &[Live], style: impl Fn(&str) -> RichText) -> Option<String> {
+    let parts = segments(text);
+    if !parts.iter().any(|&(r, _)| r) {
+        ui.add(egui::Label::new(style(text)).wrap());
+        return None;
+    }
+    let mut clicked = None;
+    ui.horizontal_wrapped(|ui| {
+        ui.spacing_mut().item_spacing.x = 0.0;
+        for (is_ref, piece) in parts {
+            if !is_ref {
+                ui.add(egui::Label::new(style(piece)).wrap());
+            } else if session_link(ui, sessions, piece, &style) {
+                clicked = Some(piece.to_owned());
+            }
+        }
+    });
+    clicked
+}
+
+/// What a session card shows: the session, its place among the page's `count`, and what the
+/// report says about it.
+struct Card<'a> {
+    s: &'a Live<'a>,
+    k: usize,
+    count: usize,
+    sessions: &'a [Live<'a>],
+    status: Option<&'a Status>,
+    now: u64,
+    accent: Color32,
+}
+
+/// A session's card. Clicking opens the session, dragging it onto another card moves it there
+/// in the bar, the pencil renames it, and right-click has all of these.
+fn session_card(ui: &mut egui::Ui, card: &Card, renaming: &mut Option<Rename>) -> Option<Event> {
+    let Card { s, k, count, sessions, status, now, accent } = *card;
+    let mut event = None;
     let pal = theme::palette(ui.visuals());
     let state = if s.running { "working" } else { status.map_or("", |x| x.state.as_str()) };
     let state_color = match state {
@@ -668,59 +904,138 @@ fn session_card(ui: &mut egui::Ui, s: &Live, status: Option<&Status>, now: u64, 
         "done" => pal.add_fg,
         _ => ui.visuals().weak_text_color(),
     };
-    let shown = egui::Frame::new()
-        .fill(ui.visuals().faint_bg_color)
-        .stroke(Stroke::new(1.0, ui.visuals().widgets.noninteractive.bg_stroke.color))
-        .corner_radius(8.0)
-        .inner_margin(egui::Margin { left: 14, right: 10, top: 8, bottom: 8 })
-        .show(ui, |ui| {
-            ui.set_width(ui.available_width());
-            ui.horizontal(|ui| {
-                if s.running {
-                    ui.spinner();
-                }
-                let title_width = (ui.available_width() - 70.0).max(40.0);
-                ui.scope(|ui| {
-                    ui.set_max_width(title_width);
-                    ui.add(egui::Label::new(RichText::new(s.title).strong()).truncate());
+    let editing = renaming.as_ref().is_some_and(|r| r.id == s.id);
+    let rename = || Rename { id: s.id.to_owned(), text: s.title.to_owned(), fresh: true };
+    // Sensing before its contents, so the pencil and links on it still get their clicks.
+    let shown = ui.scope_builder(egui::UiBuilder::new().id_salt(("orchestration-card", s.id)).sense(Sense::click_and_drag()), |ui| {
+        // Text on it doesn't take the card's clicks and drags.
+        ui.style_mut().interaction.selectable_labels = false;
+        egui::Frame::new()
+            .fill(ui.visuals().faint_bg_color)
+            .stroke(Stroke::new(1.0, ui.visuals().widgets.noninteractive.bg_stroke.color))
+            .corner_radius(8.0)
+            .inner_margin(egui::Margin { left: 14, right: 10, top: 8, bottom: 8 })
+            .show(ui, |ui| {
+                ui.set_width(ui.available_width());
+                ui.horizontal(|ui| {
+                    if s.running {
+                        ui.spinner();
+                    }
+                    let title_width = (ui.available_width() - 70.0).max(40.0);
+                    ui.scope(|ui| {
+                        ui.set_max_width(title_width);
+                        match renaming.as_mut().filter(|r| r.id == s.id) {
+                            Some(r) => {
+                                let id = Id::new(("orchestration-rename", s.id));
+                                let mut out = egui::TextEdit::singleline(&mut r.text).id(id).desired_width(title_width).show(ui);
+                                if r.fresh {
+                                    r.fresh = false;
+                                    out.response.request_focus();
+                                    let all = CCursorRange::two(CCursor::new(0), CCursor::new(r.text.chars().count()));
+                                    out.state.cursor.set_char_range(Some(all));
+                                    out.state.store(ui.ctx(), id);
+                                }
+                                if out.response.lost_focus() {
+                                    if !ui.input(|i| i.key_pressed(Key::Escape)) {
+                                        event = Some(Event::Rename(r.id.clone(), r.text.clone()));
+                                    }
+                                    *renaming = None;
+                                }
+                            }
+                            None => {
+                                ui.add(egui::Label::new(RichText::new(s.title).strong()).truncate());
+                                if ui.small_button("✏").on_hover_text("Rename").clicked() {
+                                    *renaming = Some(rename());
+                                }
+                            }
+                        }
+                    });
+                    if !state.is_empty() {
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            let chip = ui.label(RichText::new(state).small().strong().color(state_color));
+                            ui.painter().rect_stroke(chip.rect.expand2(egui::vec2(5.0, 1.0)), 6.0, Stroke::new(1.0, state_color.gamma_multiply(0.7)), StrokeKind::Outside);
+                        });
+                    }
                 });
-                if !state.is_empty() {
-                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        let chip = ui.label(RichText::new(state).small().strong().color(state_color));
-                        ui.painter().rect_stroke(chip.rect.expand2(egui::vec2(5.0, 1.0)), 6.0, Stroke::new(1.0, state_color.gamma_multiply(0.7)), StrokeKind::Outside);
+                if let Some(tool) = s.tool.filter(|_| s.running) {
+                    ui.label(RichText::new(format!("⚙ {tool}…")).monospace().weak().small());
+                }
+                if let Some(st) = status {
+                    let mut open = |id: Option<String>| {
+                        if let Some(id) = id {
+                            event = Some(Event::Open(id));
+                        }
+                    };
+                    if !st.now.is_empty() {
+                        open(linked(ui, &st.now, sessions, |t| RichText::new(t)));
+                    }
+                    if !st.next.is_empty() {
+                        open(linked(ui, &format!("Next: {}", st.next), sessions, |t| RichText::new(t).weak()));
+                    }
+                }
+                if let Some((done, total)) = s.checklist.filter(|&(_, t)| t > 0) {
+                    ui.horizontal(|ui| {
+                        ui.label(RichText::new(format!("Goal {done}/{total}")).small().weak());
+                        ui.add(egui::ProgressBar::new(done as f32 / total as f32).desired_height(5.0).fill(accent.gamma_multiply(0.8)));
                     });
                 }
-            });
-            if let Some(tool) = s.tool.filter(|_| s.running) {
-                ui.label(RichText::new(format!("⚙ {tool}…")).monospace().weak().small());
-            }
-            if let Some(st) = status {
-                if !st.now.is_empty() {
-                    ui.add(egui::Label::new(&st.now).wrap());
+                let mut meta = vec![ago(s.modified, now)];
+                if s.queued > 0 {
+                    meta.push(format!("+{} queued", s.queued));
                 }
-                if !st.next.is_empty() {
-                    ui.add(egui::Label::new(RichText::new(format!("Next: {}", st.next)).weak()).wrap());
-                }
-            }
-            if let Some((done, total)) = s.checklist.filter(|&(_, t)| t > 0) {
-                ui.horizontal(|ui| {
-                    ui.label(RichText::new(format!("Goal {done}/{total}")).small().weak());
-                    ui.add(egui::ProgressBar::new(done as f32 / total as f32).desired_height(5.0).fill(accent.gamma_multiply(0.8)));
-                });
-            }
-            let mut meta = vec![ago(s.modified, now)];
-            if s.queued > 0 {
-                meta.push(format!("+{} queued", s.queued));
-            }
-            ui.label(RichText::new(meta.join(" · ")).weak().small());
-        });
+                ui.label(RichText::new(meta.join(" · ")).weak().small());
+            })
+    });
+    let card = shown.response;
     // The card's own stripe, in its state's color.
-    let rect = shown.response.rect;
+    let rect = shown.inner.response.rect;
     let stripe = egui::Rect::from_min_max(rect.min + egui::vec2(4.0, 8.0), egui::pos2(rect.min.x + 7.0, rect.max.y - 8.0));
     ui.painter().rect_filled(stripe, 1.5, state_color);
-    let click = ui.interact(rect, Id::new(("orchestration-card", s.id)), Sense::click()).on_hover_cursor(egui::CursorIcon::PointingHand).on_hover_text("Open this session");
+
+    // Dragged onto another card: it takes that one's place.
+    if card.drag_started() && !editing {
+        card.dnd_set_drag_payload(s.id.to_owned());
+    }
+    if card.dragged()
+        && let Some(pos) = ui.ctx().pointer_interact_pos()
+    {
+        let painter = ui.ctx().layer_painter(egui::LayerId::new(egui::Order::Tooltip, Id::new("orchestration-drag")));
+        painter.text(pos + egui::vec2(14.0, 0.0), egui::Align2::LEFT_CENTER, s.title, egui::FontId::proportional(14.0), pal.user);
+    }
+    if card.dnd_hover_payload::<String>().is_some_and(|from| *from != s.id) {
+        ui.painter().rect_stroke(rect, 8.0, Stroke::new(2.0, accent), StrokeKind::Outside);
+    }
+    if let Some(from) = card.dnd_release_payload::<String>().filter(|from| **from != s.id) {
+        event = Some(Event::Move((*from).clone(), k));
+    }
+
+    let card = card.on_hover_cursor(egui::CursorIcon::PointingHand).on_hover_text("Open this session · drag onto another to reorder");
+    if card.clicked() && !editing {
+        event = Some(Event::Open(s.id.to_owned()));
+    }
+    card.context_menu(|ui| {
+        let mut chosen = None;
+        if ui.button("Open").clicked() {
+            chosen = Some(Event::Open(s.id.to_owned()));
+        }
+        if ui.button("Rename…").clicked() {
+            *renaming = Some(rename());
+            ui.close();
+        }
+        ui.separator();
+        let moves = [("Move to top", 0, k > 0), ("Move up", k.saturating_sub(1), k > 0), ("Move down", k + 1, k + 1 < count), ("Move to bottom", count.saturating_sub(1), k + 1 < count)];
+        for (label, to, can) in moves {
+            if ui.add_enabled(can, egui::Button::new(label)).clicked() {
+                chosen = Some(Event::Move(s.id.to_owned(), to));
+            }
+        }
+        if chosen.is_some() {
+            event = chosen;
+            ui.close();
+        }
+    });
     ui.add_space(8.0);
-    click.clicked()
+    event
 }
 
 fn plural(n: usize, word: &str) -> String {
@@ -753,6 +1068,38 @@ mod tests {
         assert_eq!(r.next.len(), 4);
         assert!(parse("nope", &ids).is_err());
         assert!(parse("{\"summary\": \"\"}", &ids).is_err());
+    }
+
+    #[test]
+    fn references_are_kept_by_id_and_sent_back_by_number() {
+        let ids = vec!["a".to_owned(), "b".to_owned()];
+        let linked = link_ids("[[2]] waits on [[Session 1]], [[#9]] and [[x]] [[ unclosed", &ids);
+        assert_eq!(linked, "[[b]] waits on [[a]], [[#9]] and [[x]] [[ unclosed");
+        assert_eq!(segments("hi [[b]]!"), vec![(false, "hi "), (true, "b"), (false, "!")]);
+        assert_eq!(number_ids("[[b]] then [[a]], not [[gone]]", &["b".to_owned(), "a".to_owned()]), "[[1]] then [[2]], not another session");
+        let r = parse("{\"summary\": \"[[2]] is ahead\", \"sessions\": [{\"n\": 1, \"now\": \"after [[2]]\"}]}", &ids).unwrap();
+        assert_eq!((r.summary.as_str(), r.sessions[0].now.as_str()), ("[[b]] is ahead", "after [[b]]"));
+        let p = request("H", &[member("b", 1), member("a", 1)], &[None, None], Some(&r), 2);
+        assert!(p.contains("\"summary\":\"[[1]] is ahead\""), "{p}");
+    }
+
+    #[test]
+    fn actions_come_off_the_answer_with_sessions_by_id() {
+        let ids = vec!["a".to_owned(), "b".to_owned()];
+        let reply = "Renaming [[2]] and starting docs.\n\n```actions\n[{\"do\":\"rename\",\"session\":2,\"name\":\" Auth \"},\
+                     {\"do\":\"move\",\"session\":\"[[1]]\",\"to\":3},{\"do\":\"move\",\"session\":7,\"to\":\"top\"},\
+                     {\"do\":\"new\",\"prompt\":\"write docs\"},{\"do\":\"explode\"}]\n```\n";
+        let (text, acts) = actions(reply, &ids);
+        assert_eq!(text, "Renaming [[2]] and starting docs.");
+        assert_eq!(
+            acts,
+            vec![
+                Command::Rename { session: "b".into(), name: "Auth".into() },
+                Command::Move { session: "a".into(), to: "3".into() },
+                Command::New { prompt: "write docs".into(), workspace: None, folder: None, name: None },
+            ]
+        );
+        assert_eq!(actions("Just an answer.", &ids), ("Just an answer.".to_owned(), Vec::new()));
     }
 
     #[test]
@@ -793,7 +1140,7 @@ mod tests {
         o.apply(up(true, "c"), 30);
         assert_eq!((o.updates, o.covered.len()), (1, 1));
         for i in 0..(MAX_LOG + 3) {
-            o.answered(format!("q{i}"), "a".into(), 0);
+            o.answered(format!("q{i}"), "a".into(), Vec::new(), 0);
         }
         assert_eq!(o.log.len(), MAX_LOG);
         assert_eq!(o.log[0].question, "q3");
@@ -803,7 +1150,7 @@ mod tests {
     fn store_roundtrips_and_clears() {
         let path = std::env::temp_dir().join(format!("sessman-orch-{}.json", std::process::id()));
         let mut s = Store::default();
-        s.entry("W").answered("q".into(), "a".into(), 1);
+        s.entry("W").answered("q".into(), "a".into(), vec!["did".into()], 1);
         s.save(&path).unwrap();
         let mut back = Store::load(&path);
         assert_eq!(back.get("W"), s.get("W"));

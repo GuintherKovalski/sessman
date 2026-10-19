@@ -4,8 +4,8 @@ Features for the next rounds. Each one is meant to go through Spec Kit like the 
 (`/speckit-specify` with the text under its heading as the starting description). The rounds
 are a suggested order: small UI fixes first, then the features that build on them.
 
-All 12 items are implemented (`specs/012-roadmap-rounds-1-4/`); PROJECT.md describes how they
-work now.
+Items 1–12 are implemented (`specs/012-roadmap-rounds-1-4/`); PROJECT.md describes how they
+work now. Item 13 is planned.
 
 ## Overview
 
@@ -23,6 +23,7 @@ work now.
 | 10 | 2 | [Prompt queue](#10-input-stays-usable-while-claude-works-enter-queues-the-prompt) | Input never blocked; Enter queues while Claude works | 9 | Done |
 | 11 | 3 | [Settings page](#11-settings-page) | IDE-style settings in the main area | 8 | Done (3 settings deferred, see item) |
 | 12 | 4 | [Refine prompt](#12-refine-prompt-before-sending) | Model rewrites the prompt, asks skippable questions | 11 | Done |
+| 13 | 5 | [Live changes](#13-live-changes-sessman-updates-without-ending-its-sessions) | Rebuild and reload sessman without ending the sessions it runs | 8 | Planned |
 
 ## Round 1: UI polish and navigation
 
@@ -214,3 +215,32 @@ work now.
 - The refined prompt replaces the input text for review and editing; it is never sent
   automatically. **Cmd/Ctrl+Z** (or an **Undo refine** link) restores the original text.
 - While refining, the input shows a spinner and stays editable; Esc cancels.
+
+## Round 5: Developing sessman from inside sessman
+
+### 13. Live changes: sessman updates without ending its sessions
+- **Why**: sessman is developed with Claude sessions that sessman itself runs. Each run is a
+  child of the app (`claude -p` with its output piped to it), so restarting sessman to see a
+  change ends every running session, including the one making the change. For now changes are
+  tested in a separate instance (`scripts/test-instance.sh`, see CLAUDE.md), and the developer
+  restarts their own sessman by hand to take them.
+- **Runs outlive the app.** Start each run detached from the app: a small
+  `sessman run <id> …` wrapper in its own session (`setsid`) that runs `claude -p` and appends
+  its stream-json lines to `~/.config/sessman/runs/<id>.jsonl`, with its pid in
+  `runs/<id>.pid`. The app tails that file instead of a pipe (the same events as today), and
+  Stop signals the pid's process group. On start, sessman re-attaches to every run whose pid is
+  still alive and reads what it missed from the file; runs whose process is gone end as they do
+  now (queued prompts go on).
+- **Restart in place.** With runs detached and the state already restored on start (item 8),
+  a restart loses nothing. sessman watches its own binary (`std::env::current_exe()`): when a
+  new build or bundle replaces it, a quiet **Restart to update** button appears in the top bar
+  (and `sessman restart` does the same from a session). It saves the state and `exec`s the new
+  binary, so the window comes back in the same place, on the same session, with its runs still
+  streaming.
+- **Agents' loop**: a session changes the code, tests it in a separate instance, then runs
+  `scripts/bundle.sh` and `sessman restart` itself; it keeps running through the restart and
+  sees its change live in the IDE it runs in.
+- Not planned: hot-reloading UI code into the running process (dylib reloading). It is fragile
+  with egui's state and saves only the second or two a restart takes.
+- Until this is done, CLAUDE.md's rule stands: every test runs in a new instance of the IDE,
+  never the running one.
