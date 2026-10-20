@@ -3,7 +3,7 @@ use super::harness::*;
 use eframe::egui::{Key, Modifiers};
 use serde_json::json;
 
-fn opened() -> Sessman {
+fn opened() -> Scope {
     let mut s = setup().session(session("s-a", "alpha prompt", 100)).launch();
     s.click("alpha prompt");
     s.press_with(Modifiers::COMMAND, Key::Comma);

@@ -2,7 +2,7 @@
 use super::harness::*;
 use eframe::egui::{Id, Key};
 
-fn work() -> Sessman {
+fn work() -> Scope {
     let mut s = setup()
         .session(session("s-a", "alpha prompt", 300))
         .session(session("s-b", "beta prompt", 200))
@@ -12,7 +12,7 @@ fn work() -> Sessman {
     s
 }
 
-fn on_page() -> Sessman {
+fn on_page() -> Scope {
     let mut s = work();
     s.click("Orchestration");
     s.wait_to_see("Fake summary of ");

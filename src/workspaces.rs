@@ -43,7 +43,7 @@ pub struct Workspaces {
     /// Folder last chosen in the picker, where it opens next time.
     #[serde(default)]
     pub last_folder: Option<PathBuf>,
-    /// The file as last read or written here, to notice when another sessman changed it.
+    /// The file as last read or written here, to notice when another scope changed it.
     #[serde(skip)]
     disk: String,
 }
@@ -76,7 +76,7 @@ impl Workspaces {
         Some(w)
     }
 
-    /// Takes the file's contents if another sessman changed it since it was last read or
+    /// Takes the file's contents if another scope changed it since it was last read or
     /// written here, so a change is made on top of theirs instead of overwriting it.
     /// True if anything was taken.
     pub fn refresh(&mut self, path: &Path) -> bool {
@@ -327,7 +327,7 @@ mod tests {
 
     #[test]
     fn old_files_without_colors_get_distinct_ones() {
-        let path = std::env::temp_dir().join(format!("sessman-old-{}.json", std::process::id()));
+        let path = std::env::temp_dir().join(format!("scope-old-{}.json", std::process::id()));
         std::fs::write(&path, r#"{"list":[{"name":"a","sessions":[]},{"name":"b","sessions":[]}]}"#).unwrap();
         let w = Workspaces::load(&path);
         std::fs::remove_file(path).unwrap();
@@ -336,7 +336,7 @@ mod tests {
 
     #[test]
     fn a_change_from_another_instance_is_kept() {
-        let path = std::env::temp_dir().join(format!("sessman-two-{}.json", std::process::id()));
+        let path = std::env::temp_dir().join(format!("scope-two-{}.json", std::process::id()));
         let mut a = Workspaces::default();
         a.add("x");
         a.save(&path).unwrap();
@@ -358,7 +358,7 @@ mod tests {
 
     #[test]
     fn save_and_load_roundtrip() {
-        let path = std::env::temp_dir().join(format!("sessman-test-{}.json", std::process::id()));
+        let path = std::env::temp_dir().join(format!("scope-test-{}.json", std::process::id()));
         let mut w = Workspaces::default();
         let i = w.add("x").unwrap();
         w.move_to("s", i);

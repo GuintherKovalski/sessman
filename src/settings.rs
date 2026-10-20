@@ -2,12 +2,22 @@ use eframe::egui::{self, RichText, ThemePreference};
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 
-/// sessman's own folder: `~/.config/sessman`, or `$SESSMAN_CONFIG` (used to run a test copy
+/// scope's own folder: `~/.config/scope`, or `$SCOPE_CONFIG` (used to run a test copy
 /// of the app next to the real one).
 pub fn config_dir() -> PathBuf {
-    match std::env::var_os("SESSMAN_CONFIG") {
+    match std::env::var_os("SCOPE_CONFIG") {
         Some(dir) => PathBuf::from(dir),
-        None => PathBuf::from(std::env::var("HOME").unwrap_or_default()).join(".config/sessman"),
+        None => PathBuf::from(std::env::var("HOME").unwrap_or_default()).join(".config/scope"),
+    }
+}
+
+/// Before the app was renamed scope its folder was `~/.config/sessman`: copied over (not moved,
+/// so a sessman still running keeps its own) the first time scope starts without one.
+pub fn adopt_old_config() {
+    let new = config_dir();
+    let old = PathBuf::from(std::env::var("HOME").unwrap_or_default()).join(".config/sessman");
+    if std::env::var_os("SCOPE_CONFIG").is_none() && !new.exists() && old.is_dir() {
+        let _ = std::process::Command::new("cp").arg("-R").arg(&old).arg(&new).status();
     }
 }
 
@@ -294,7 +304,7 @@ pub fn ui(ui: &mut egui::Ui, s: &mut Settings, filter: &mut String, about: &Abou
             }
             ui.checkbox(&mut s.restore_state, "");
         });
-        page.row("Notify when a run finishes", "A system notification, while sessman is in the background", s.notify_when_done != defaults.notify_when_done, |ui, reset| {
+        page.row("Notify when a run finishes", "A system notification, while scope is in the background", s.notify_when_done != defaults.notify_when_done, |ui, reset| {
             if reset {
                 s.notify_when_done = defaults.notify_when_done;
             }
@@ -427,7 +437,7 @@ mod tests {
 
     #[test]
     fn old_theme_only_file_loads_with_defaults() {
-        let path = std::env::temp_dir().join(format!("sessman-settings-{}.json", std::process::id()));
+        let path = std::env::temp_dir().join(format!("scope-settings-{}.json", std::process::id()));
         std::fs::write(&path, r#"{"theme":"dark"}"#).unwrap();
         let s = Settings::load(&path);
         assert_eq!(s.theme(), ThemePreference::Dark);

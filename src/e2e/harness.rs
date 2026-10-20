@@ -1,10 +1,10 @@
 //! Runs the whole app headless, the way a user drives it, against a throwaway home folder.
 //!
 //! Each test gets its own `HOME` (so `~/.claude/projects` holds only the sessions the test
-//! wrote) and `SESSMAN_CONFIG` (so settings, workspaces, names and state are its own), and a
+//! wrote) and `SCOPE_CONFIG` (so settings, workspaces, names and state are its own), and a
 //! fake `claude` (examples/fake_claude.rs) that answers without a model. The app is the real
 //! one, built by `App::new` and drawn by egui_kittest; tests click, type and press keys on
-//! what it shows, send `sessman` commands through its inbox, and read back what it shows and
+//! what it shows, send `scope` commands through its inbox, and read back what it shows and
 //! the files it writes.
 //!
 //! Nothing here reads the app's fields, so the app can be restructured freely: as long as it
@@ -22,7 +22,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Mutex, MutexGuard};
 use std::time::{Duration, Instant, SystemTime};
 
-/// The app reads `HOME` and `SESSMAN_CONFIG` from the process environment, so app tests take
+/// The app reads `HOME` and `SCOPE_CONFIG` from the process environment, so app tests take
 /// turns.
 static ONE_AT_A_TIME: Mutex<()> = Mutex::new(());
 
@@ -51,7 +51,7 @@ impl Env {
         static COUNT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
         let n = COUNT.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         let tmp = std::fs::canonicalize(std::env::temp_dir()).unwrap();
-        let root = tmp.join(format!("sessman-e2e-{}-{n}", std::process::id()));
+        let root = tmp.join(format!("scope-e2e-{}-{n}", std::process::id()));
         let _ = std::fs::remove_dir_all(&root);
         let env = Env {
             home: root.join("home"),
@@ -301,24 +301,24 @@ impl Setup {
         self
     }
 
-    pub fn launch(self) -> Sessman {
+    pub fn launch(self) -> Scope {
         self.env.write_config("settings.json", &Value::Object(self.settings));
-        Sessman::start(self.env, self.lock)
+        Scope::start(self.env, self.lock)
     }
 }
 
 /// The running app.
-pub struct Sessman {
+pub struct Scope {
     // Dropped first: the app (and the threads it started) before the folders go.
     h: Harness<'static, App>,
     pub env: Env,
     _lock: MutexGuard<'static, ()>,
 }
 
-impl Drop for Sessman {
+impl Drop for Scope {
     fn drop(&mut self) {
         HELD_HERE.set(false);
-        if std::env::var_os("SESSMAN_E2E_KEEP").is_none() {
+        if std::env::var_os("SCOPE_E2E_KEEP").is_none() {
             let _ = std::fs::remove_dir_all(&self.env.root);
         }
     }
@@ -335,19 +335,19 @@ impl eframe::Storage for NoStorage {
     fn flush(&mut self) {}
 }
 
-impl Sessman {
+impl Scope {
     fn start(env: Env, lock: MutexGuard<'static, ()>) -> Self {
         // SAFETY: app tests hold ONE_AT_A_TIME, and no other test reads these variables.
         unsafe {
             std::env::set_var("HOME", &env.home);
-            std::env::set_var("SESSMAN_CONFIG", &env.config);
+            std::env::set_var("SCOPE_CONFIG", &env.config);
         }
         let h = Harness::builder()
             .with_size(egui::vec2(1400.0, 900.0))
             .with_step_dt(1.0 / 60.0)
             .with_max_steps(20)
             .build_eframe(|cc| App::new(&cc.egui_ctx));
-        let mut s = Sessman { h, env, _lock: lock };
+        let mut s = Scope { h, env, _lock: lock };
         s.frames(3);
         s
     }
@@ -358,15 +358,15 @@ impl Sessman {
         self.restart_without_saving()
     }
 
-    /// Like [`Sessman::restart`], without saving the state first (as after a crash).
+    /// Like [`Scope::restart`], without saving the state first (as after a crash).
     pub fn restart_without_saving(self) -> Self {
-        // Keep the folders: this Sessman is dropped without its Drop cleaning up.
+        // Keep the folders: this Scope is dropped without its Drop cleaning up.
         let env = self.env.clone();
         let me = std::mem::ManuallyDrop::new(self);
         // SAFETY: each field is read out once and `me` is never used again.
         let (h, lock) = unsafe { (std::ptr::read(&me.h), std::ptr::read(&me._lock)) };
         drop(h);
-        let mut s = Sessman::start(env, lock);
+        let mut s = Scope::start(env, lock);
         s.drain_old_inbox_watcher();
         s
     }
@@ -713,13 +713,13 @@ impl Sessman {
         self.frames(3);
     }
 
-    /// A `sessman` command (`{"do": ...}` as the CLI sends it), through the app's inbox.
+    /// A `scope` command (`{"do": ...}` as the CLI sends it), through the app's inbox.
     #[track_caller]
     pub fn command(&mut self, command: Value) -> Result<String, String> {
         self.command_from(command, None, None)
     }
 
-    /// A command as a session sessman runs sends it: with its id and folder.
+    /// A command as a session scope runs sends it: with its id and folder.
     #[track_caller]
     pub fn command_from(&mut self, command: Value, caller: Option<&str>, cwd: Option<&Path>) -> Result<String, String> {
         let request = json!({"command": command, "caller": caller, "cwd": cwd});
@@ -757,7 +757,7 @@ impl Sessman {
         None
     }
 
-    /// `sessman list`, as text.
+    /// `scope list`, as text.
     #[track_caller]
     pub fn list(&mut self) -> String {
         self.command(json!({"do": "list"})).expect("list")

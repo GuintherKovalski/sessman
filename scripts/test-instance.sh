@@ -1,14 +1,14 @@
 #!/bin/sh
-# Runs a separate sessman to test changes in, never the one you are working in: the Claude
-# sessions sessman runs are its child processes, so restarting it ends them (and the agent
+# Runs a separate scope to test changes in, never the one you are working in: the Claude
+# sessions scope runs are its child processes, so restarting it ends them (and the agent
 # making the change with them).
 #
 #   scripts/test-instance.sh start [name]   build, then launch an instance with its own copy of
-#                                           ~/.config/sessman; prints how to drive it
+#                                           ~/.config/scope; prints how to drive it
 #   scripts/test-instance.sh stop [name]    quit it, and delete it and the sessions made in it
 #
-# The instance lives in /tmp/sessman-test-<name> (default name: "default"):
-#   config/  its config (SESSMAN_CONFIG); changes there never reach your own
+# The instance lives in /tmp/scope-test-<name> (default name: "default"):
+#   config/  its config (SCOPE_CONFIG); changes there never reach your own
 #   proj/    folder for test sessions, the default for its "E2E" workspace
 #   pid, app.log
 set -eu
@@ -16,8 +16,8 @@ set -eu
 cd "$(dirname "$0")/.."
 cmd="${1:-}"
 name="${2:-default}"
-dir="/tmp/sessman-test-$name"
-bin="$PWD/target/debug/sessman"
+dir="/tmp/scope-test-$name"
+bin="$PWD/target/debug/scope"
 
 case "$cmd" in
 start)
@@ -29,7 +29,10 @@ start)
     rm -rf "$dir"
     mkdir -p "$dir/config" "$dir/proj"
     # A copy of your config, without the Whisper models (linked) and anything in flight.
-    for f in "$HOME/.config/sessman"/*; do
+    # (~/.config/sessman until your own scope has run once since the rename.)
+    own="$HOME/.config/scope"
+    [ -d "$own" ] || own="$HOME/.config/sessman"
+    for f in "$own"/*; do
         case "$(basename "$f")" in
         models) ln -s "$f" "$dir/config/models" ;;
         inbox) ;;
@@ -50,7 +53,7 @@ st = json.load(open(s)) if os.path.exists(s) else {}
 st.update(tab="E2E", open=None)
 json.dump(st, open(s, "w"))
 EOF
-    SESSMAN_CONFIG="$dir/config" nohup "$bin" >"$dir/app.log" 2>&1 &
+    SCOPE_CONFIG="$dir/config" nohup "$bin" >"$dir/app.log" 2>&1 &
     echo $! >"$dir/pid"
     sleep 3
     if ! kill -0 "$(cat "$dir/pid")" 2>/dev/null; then
@@ -60,7 +63,7 @@ EOF
     cat <<EOF
 Test instance "$name" running (pid $(cat "$dir/pid")), on its E2E workspace.
 Drive it with its own config:
-  export SESSMAN_CONFIG=$dir/config
+  export SCOPE_CONFIG=$dir/config
   $bin list --workspace E2E
   $bin new --workspace E2E --name Alpha "Reply with exactly: Alpha ready."
 Stop it and clean up:  $0 stop $name
@@ -71,7 +74,7 @@ stop)
         kill "$(cat "$dir/pid")" 2>/dev/null || true
     fi
     # Sessions made in it are real Claude Code sessions: remove them from ~/.claude/projects.
-    project="$HOME/.claude/projects/$(echo "$(cd /tmp && pwd -P)/sessman-test-$name/proj" | sed 's/[^A-Za-z0-9]/-/g')"
+    project="$HOME/.claude/projects/$(echo "$(cd /tmp && pwd -P)/scope-test-$name/proj" | sed 's/[^A-Za-z0-9]/-/g')"
     rm -rf "$project" "$dir"
     echo "stopped and removed test instance \"$name\""
     ;;

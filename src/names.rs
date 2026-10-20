@@ -50,7 +50,7 @@ mod tests {
         let mut n = Names::default();
         n.set("s1", "  auth refactor ");
         assert_eq!(n.get("s1"), Some("auth refactor"));
-        let path = std::env::temp_dir().join(format!("sessman-names-{}.json", std::process::id()));
+        let path = std::env::temp_dir().join(format!("scope-names-{}.json", std::process::id()));
         n.save(&path).unwrap();
         assert_eq!(Names::load(&path), n);
         std::fs::remove_file(path).unwrap();

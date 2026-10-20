@@ -1,5 +1,5 @@
 //! Usage limits and exact context size are only given by Claude Code to a status-line command
-//! (JSON on stdin). `sessman statusline` is that command: it saves the JSON for the app to read
+//! (JSON on stdin). `scope statusline` is that command: it saves the JSON for the app to read
 //! and prints a short status line. https://code.claude.com/docs/en/statusline.md
 use serde_json::{Value, json};
 use std::io::Read;
@@ -18,7 +18,7 @@ fn settings_path() -> PathBuf {
     home().join(".claude/settings.json")
 }
 
-/// Entry point for `sessman statusline`, run by Claude Code.
+/// Entry point for `scope statusline`, run by Claude Code.
 pub fn run() {
     let mut input = String::new();
     let _ = std::io::stdin().read_to_string(&mut input);
@@ -80,7 +80,9 @@ pub enum Setup {
 pub fn setup() -> Setup {
     let settings = load(&settings_path()).map(|(v, _)| v).unwrap_or_default();
     match settings["statusLine"]["command"].as_str() {
-        Some(c) if c.contains("sessman") && c.ends_with("statusline") => Setup::Enabled,
+        Some(c) if c.contains("scope") && c.ends_with("statusline") => Setup::Enabled,
+        // From before the app was renamed scope: that binary saves to the old folder.
+        Some(c) if c.contains("sessman") && c.ends_with("statusline") => Setup::NotSet,
         Some(c) => Setup::Other(c.to_owned()),
         None => Setup::NotSet,
     }

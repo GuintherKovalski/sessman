@@ -3,7 +3,7 @@ use super::harness::*;
 use eframe::egui::Key;
 
 /// A session that edited two files in its folder, and another one with no changes.
-fn edited() -> Sessman {
+fn edited() -> Scope {
     let s = setup();
     let proj = s.env().proj.clone();
     std::fs::write(proj.join("main.rs"), "fn main() {\n    println!(\"new\");\n}\n").unwrap();

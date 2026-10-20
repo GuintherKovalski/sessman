@@ -2,7 +2,7 @@
 use super::harness::*;
 use eframe::egui::{Key, Modifiers};
 
-fn typed(text: &str) -> Sessman {
+fn typed(text: &str) -> Scope {
     let mut s = setup().session(session("s-a", "alpha prompt", 100)).launch();
     s.click("alpha prompt");
     s.type_prompt(text);

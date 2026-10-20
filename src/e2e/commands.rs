@@ -1,8 +1,8 @@
-//! `sessman list|rename|move|new|ask`: the commands sessions (and terminals) send the app.
+//! `scope list|rename|move|new|ask`: the commands sessions (and terminals) send the app.
 use super::harness::*;
 use serde_json::json;
 
-fn three_in_work() -> Sessman {
+fn three_in_work() -> Scope {
     setup()
         .session(session("aaaaaaaa-1111", "alpha prompt", 300))
         .session(session("bbbbbbbb-2222", "beta prompt", 200))
@@ -37,7 +37,7 @@ fn rename_finds_a_session_by_id_prefix_or_name() {
     assert_eq!(s.command(json!({"do": "rename", "session": "aaaaaaaa-1111", "name": ""})).unwrap(), "Renamed \"Again\" to \"alpha prompt\"");
     assert!(s.sees("alpha prompt"));
     let err = s.command(json!({"do": "rename", "session": "nobody", "name": "x"})).unwrap_err();
-    assert_eq!(err, "no session is called or has the id \"nobody\" (see sessman list)");
+    assert_eq!(err, "no session is called or has the id \"nobody\" (see scope list)");
 }
 
 #[test]
@@ -92,7 +92,7 @@ fn new_starts_a_session_in_a_workspace_and_its_folder() {
     assert_eq!((run_id.as_str(), prompt.as_str()), (id.as_str(), "build the thing"));
     let call = s.env.calls().into_iter().find(|c| c["args"].as_array().unwrap().iter().any(|a| a == "--session-id")).unwrap();
     assert_eq!(call["cwd"], dir.display().to_string());
-    assert_eq!(call["session"], id, "the session knows its own id (SESSMAN_SESSION)");
+    assert_eq!(call["session"], id, "the session knows its own id (SCOPE_SESSION)");
     let file = s.env.session_file(&id).expect("its file was written");
     assert!(std::fs::read_to_string(file).unwrap().contains("Echo: build the thing"));
 }

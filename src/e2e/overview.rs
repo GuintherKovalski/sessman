@@ -2,7 +2,7 @@
 use super::harness::*;
 use serde_json::json;
 
-fn two_workspaces() -> Sessman {
+fn two_workspaces() -> Scope {
     setup()
         .session(session("s-a", "alpha prompt about ABC-123", 300))
         .session(session("s-b", "beta prompt", 200))

@@ -40,7 +40,7 @@ fn log_call(fake: &Path, args: &[String]) {
     let line = json!({
         "args": args,
         "cwd": std::env::current_dir().map(|d| d.display().to_string()).unwrap_or_default(),
-        "session": std::env::var("SESSMAN_SESSION").ok(),
+        "session": std::env::var("SCOPE_SESSION").ok(),
     });
     // One file per call: calls run side by side, and their lines would interleave in one file.
     let dir = fake.join("calls");

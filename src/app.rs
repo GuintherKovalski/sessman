@@ -186,7 +186,7 @@ pub struct App {
     /// Each workspace's orchestration report and questions (by name), and those in flight.
     orchestrations: orchestration::Store,
     orch: orchestration::Jobs,
-    /// Commands from `sessman list|rename|move|new|ask` (control.rs).
+    /// Commands from `scope list|rename|move|new|ask` (control.rs).
     control: Receiver<control::Incoming>,
 }
 
@@ -386,7 +386,7 @@ impl App {
         app
     }
 
-    /// Puts back what was open when sessman last closed.
+    /// Puts back what was open when scope last closed.
     fn restore(&mut self, mut st: State) {
         st.prune(|id| self.sessions.iter().any(|s| s.id == id));
         self.tab = st.tab.as_ref().and_then(|name| self.workspaces.list.iter().position(|w| &w.name == name));
@@ -444,7 +444,7 @@ impl App {
         markdown::SHOW_TOOLS.store(self.settings.show_tool_lines, std::sync::atomic::Ordering::Relaxed);
     }
 
-    /// Takes workspace changes another sessman saved, so a change made here doesn't overwrite
+    /// Takes workspace changes another scope saved, so a change made here doesn't overwrite
     /// them. `w`, a workspace index from before, comes back for the same workspace (None if
     /// it is gone); the open tab follows its workspace the same way.
     fn sync_workspaces(&mut self, w: Option<usize>) -> Option<usize> {
@@ -947,7 +947,7 @@ impl App {
             .collect()
     }
 
-    /// Commands from `sessman …`: done, and their replies written.
+    /// Commands from `scope …`: done, and their replies written.
     fn poll_control(&mut self) {
         let incoming: Vec<control::Incoming> = self.control.try_iter().collect();
         for c in incoming {
@@ -978,7 +978,7 @@ impl App {
             .collect();
         match (&by_prefix[..], &by_name[..]) {
             ([id], _) | ([], [id]) => Ok((*id).to_owned()),
-            ([], []) => Err(format!("no session is called or has the id \"{s}\" (see sessman list)")),
+            ([], []) => Err(format!("no session is called or has the id \"{s}\" (see scope list)")),
             (many, []) | ([], many) | (many, _) => Err(format!("\"{s}\" could be {} sessions: {}; use the id", many.len(), many.join(", "))),
         }
     }
@@ -1124,7 +1124,7 @@ impl App {
         of_workspace.or(cwd.filter(|d| d.is_dir())).ok_or_else(|| "which folder? the workspace has none yet; use --folder".to_owned())
     }
 
-    /// `sessman list`: each workspace (or the one asked for) with its sessions in bar order.
+    /// `scope list`: each workspace (or the one asked for) with its sessions in bar order.
     fn list_text(&self, workspace: Option<&str>) -> Result<String, String> {
         let only = match workspace {
             Some(n) => Some(self.find_workspace(Some(n), None)?.unwrap_or_default()),
@@ -1522,7 +1522,7 @@ impl App {
                 Ok(()) => format!("{name}: Claude finished"),
                 Err(e) => format!("{name}: {e}"),
             };
-            runner::notify("sessman", &body);
+            runner::notify("scope", &body);
         }
         // The file now holds what was streamed; reloading makes it canonical. A new session is
         // selected when the indexer lists it.
@@ -3244,7 +3244,7 @@ fn split_interrupt_marker(text: &str) -> (String, String) {
 }
 
 /// True once the session file holds the stop (Claude saved the partial reply and its marker),
-/// so sessman's own copy of the partial reply isn't shown twice.
+/// so scope's own copy of the partial reply isn't shown twice.
 fn saved_interrupt(messages: &[session::Message]) -> bool {
     messages.iter().rev().take_while(|m| !(m.role == Role::User && !is_interrupt_marker(&m.text))).any(|m| is_interrupt_marker(&m.text))
 }
@@ -3468,11 +3468,11 @@ fn limits_ui(ui: &mut egui::Ui) -> bool {
     ui.ctx().request_repaint_after(std::time::Duration::from_secs(5));
     match status::setup() {
         status::Setup::Other(cmd) => {
-            ui.label(RichText::new(format!("Claude Code limits are only shared with the status line, and yours is already set to `{cmd}`. sessman won't replace it.")).weak());
+            ui.label(RichText::new(format!("Claude Code limits are only shared with the status line, and yours is already set to `{cmd}`. scope won't replace it.")).weak());
             return false;
         }
         status::Setup::NotSet => {
-            ui.label(RichText::new("Claude Code shares usage limits only with its status line. Enable sessman's status line to see them here (sets statusLine in ~/.claude/settings.json).").weak());
+            ui.label(RichText::new("Claude Code shares usage limits only with its status line. Enable scope's status line to see them here (sets statusLine in ~/.claude/settings.json).").weak());
             return ui.button("Enable").clicked();
         }
         status::Setup::Enabled => {}
@@ -3672,9 +3672,9 @@ mod tests {
         assert_eq!(input_heights(10.0, 10, Some(150.0), true, 500.0), (10.0, 10.0));
     }
 
-    /// Regression: after Ctrl+C the partial reply showed twice (sessman's copy and Claude's).
+    /// Regression: after Ctrl+C the partial reply showed twice (scope's copy and Claude's).
     #[test]
-    fn a_saved_stop_hides_sessmans_own_copy() {
+    fn a_saved_stop_hides_scopes_own_copy() {
         let m = |role, text: &str| session::Message { role, text: text.into() };
         let before = vec![m(Role::User, "write a story"), m(Role::Assistant, "Once upon")];
         assert!(!saved_interrupt(&before));

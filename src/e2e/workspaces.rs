@@ -3,13 +3,13 @@ use super::harness::*;
 use eframe::egui::{Key, Modifiers};
 use serde_json::{Value, json};
 
-fn members(s: &Sessman, name: &str) -> Vec<String> {
+fn members(s: &Scope, name: &str) -> Vec<String> {
     let ws = s.env.config_json("workspaces.json");
     let w = ws["list"].as_array().unwrap().iter().find(|w| w["name"] == name).unwrap_or_else(|| panic!("no workspace {name}: {ws}"));
     w["sessions"].as_array().unwrap().iter().map(|v| v.as_str().unwrap().to_owned()).collect()
 }
 
-fn names(s: &Sessman) -> Vec<String> {
+fn names(s: &Scope) -> Vec<String> {
     let ws = s.env.config_json("workspaces.json");
     ws["list"].as_array().map(|l| l.iter().map(|w| w["name"].as_str().unwrap().to_owned()).collect()).unwrap_or_default()
 }
@@ -167,13 +167,13 @@ fn all_sessions_clicked_again_goes_back_to_the_overview() {
 }
 
 #[test]
-fn workspace_changes_made_by_another_sessman_are_not_overwritten() {
+fn workspace_changes_made_by_another_scope_are_not_overwritten() {
     let mut s = setup()
         .session(session("s-a", "alpha prompt", 100))
         .session(session("s-b", "beta prompt", 50))
         .workspaces(&[("Work", &[])])
         .launch();
-    // Another sessman adds a workspace behind this one's back.
+    // Another scope adds a workspace behind this one's back.
     s.env.write_config("workspaces.json", &json!({"list": [{"name": "Work", "sessions": [], "color": [86, 156, 214]}, {"name": "Theirs", "sessions": ["s-b"], "color": [214, 122, 78]}]}));
     s.right_click("alpha prompt");
     s.open_submenu("Move to");

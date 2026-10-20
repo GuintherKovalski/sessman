@@ -31,6 +31,7 @@ fn main() -> eframe::Result {
     if args.first().is_some_and(|a| control::is_command(a)) {
         std::process::exit(control::cli(&args));
     }
+    settings::adopt_old_config();
     runner::fix_path();
     let options = eframe::NativeOptions {
         viewport: viewport(),
@@ -39,7 +40,7 @@ fn main() -> eframe::Result {
         ..Default::default()
     };
     eframe::run_native(
-        "sessman",
+        "scope",
         options,
         Box::new(|cc| Ok(Box::new(app::App::new(&cc.egui_ctx)))),
     )
@@ -50,8 +51,8 @@ fn main() -> eframe::Result {
 fn viewport() -> eframe::egui::ViewportBuilder {
     eframe::egui::ViewportBuilder::default()
         .with_inner_size([1400.0, 850.0])
-        .with_title("sessman")
-        // The same image scripts/bundle.sh puts in sessman.app, so running and quit look alike.
+        .with_title("scope")
+        // The same image scripts/bundle.sh puts in scope.app, so running and quit look alike.
         .with_icon(eframe::icon_data::from_png_bytes(include_bytes!("../assets/icon.png")).expect("valid icon"))
         .with_fullsize_content_view(true)
         .with_titlebar_shown(false)

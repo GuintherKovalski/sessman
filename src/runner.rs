@@ -86,7 +86,7 @@ pub fn resolve_bin(bin: &str, path: &str, home: &str) -> PathBuf {
 fn login_shell_path() -> String {
     let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/zsh".into());
     let Ok(mut child) = Command::new(shell)
-        .args(["-ilc", "printf '\\n__SESSMAN_PATH__%s\\n' \"$PATH\""])
+        .args(["-ilc", "printf '\\n__SCOPE_PATH__%s\\n' \"$PATH\""])
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
@@ -104,7 +104,7 @@ fn login_shell_path() -> String {
     let out = rx.recv_timeout(std::time::Duration::from_secs(3)).unwrap_or_default();
     let _ = child.kill();
     let _ = child.wait();
-    out.lines().find_map(|l| l.strip_prefix("__SESSMAN_PATH__")).unwrap_or_default().to_owned()
+    out.lines().find_map(|l| l.strip_prefix("__SCOPE_PATH__")).unwrap_or_default().to_owned()
 }
 
 /// Gives this process (and so every `claude` run and the tools it starts) the PATH a terminal
@@ -183,7 +183,7 @@ pub enum RunEvent {
 pub fn send(ctx: eframe::egui::Context, id: String, cwd: Option<PathBuf>, prompt: String, new: bool) -> (Receiver<RunEvent>, Stop) {
     let c = claude();
     let mut cmd = command(&c);
-    // Claude can manage sessman's sessions through its command, and knows which one it is.
+    // Claude can manage scope's sessions through its command, and knows which one it is.
     if let Ok(exe) = std::env::current_exe() {
         cmd.args(["--append-system-prompt", &crate::control::system_prompt(&exe.to_string_lossy())]);
     }
@@ -371,7 +371,7 @@ pub fn trash(path: &Path) -> Result<(), String> {
     if path.is_dir() { std::fs::remove_dir_all(path) } else { std::fs::remove_file(path) }.map_err(|e| e.to_string())
 }
 
-/// A system notification (macOS), e.g. when a run ends while sessman is in the background.
+/// A system notification (macOS), e.g. when a run ends while scope is in the background.
 pub fn notify(title: &str, body: &str) {
     let quote = |s: &str| s.replace('\\', "\\\\").replace('"', "\\\"");
     let script = format!("display notification \"{}\" with title \"{}\"", quote(body), quote(title));
@@ -469,7 +469,7 @@ mod tests {
     #[test]
     fn resolve_bin_finds_claude_outside_the_finder_path() {
         use std::os::unix::fs::PermissionsExt;
-        let home = std::env::temp_dir().join(format!("sessman-resolve-{}", std::process::id()));
+        let home = std::env::temp_dir().join(format!("scope-resolve-{}", std::process::id()));
         let bin_dir = home.join(".local/bin");
         std::fs::create_dir_all(&bin_dir).unwrap();
         let claude = bin_dir.join("claude");

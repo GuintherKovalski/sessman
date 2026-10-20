@@ -1,4 +1,4 @@
-# sessman
+# scope
 
 A small desktop app for browsing and continuing Claude Code sessions.
 
@@ -7,7 +7,7 @@ A small desktop app for browsing and continuing Claude Code sessions.
 - **Orchestration**: in each workspace tab, a bubble above its sessions (filled with the workspace color, with a ◆ mark and a progress line) opens the workspace's orchestration page: overall progress, what needs you, next steps, and a card per session (live state, what it is doing, its next step, goal checklist). The helper model writes the report and updates it with only the new activity; **Clear & re-summarize** starts it over from scratch. Ask the orchestrator questions at the bottom of the page
 - **Center bottom**: a terminal-style prompt input that grows upwards as you type (Shift+Enter for a new line), with a drag handle to resize or collapse it. Up/Down walks through this session's previous prompts; Enter sends the prompt via `claude -p --resume <id>`, and Claude's progress streams in live. While Claude works, Enter queues prompts (shown above the input) and **Ctrl+C** stops it at once. **✨ / Cmd+Enter** refines the prompt with a helper model, asking skippable questions when it is ambiguous. **🎤** dictates: click to start, click again to stop, and the speech is transcribed locally with Whisper and inserted at the cursor
 - **Center**: the conversation as Markdown cards, with real tables, highlighted code and clickable links (bare URLs too); click anywhere to focus the input. Files open in tabs that belong to their session; `.md` files open rendered. **Ctrl+F** (or Cmd+F) finds text in whatever is on screen, the conversation or the open file: Enter / Shift+Enter step through the matches, Esc closes
-- **Managed through Claude**: `sessman list | rename | move | new | ask` drive the running app (sessions are named by id, id prefix or name). Every session sessman runs is told about these commands, so you can ask Claude to start, rename or reorder sessions, or to ask the orchestrator. The orchestrator can do the same when you ask it on its page. On the orchestration page itself you can also rename sessions (✏ or right-click), drag cards to reorder the bar (**Newest first** undoes it), and click sessions mentioned in the report to open them
+- **Managed through Claude**: `scope list | rename | move | new | ask` drive the running app (sessions are named by id, id prefix or name). Every session scope runs is told about these commands, so you can ask Claude to start, rename or reorder sessions, or to ask the orchestrator. The orchestrator can do the same when you ask it on its page. On the orchestration page itself you can also rename sessions (✏ or right-click), drag cards to reorder the bar (**Newest first** undoes it), and click sessions mentioned in the report to open them
 - **Settings** (⚙ or Cmd+,): appearance, prompt input, files, Claude command and models, behaviour, **harness** (editable instructions for workspace orchestration, the Info panel's questions and the session search, plus the orchestration model and update interval), shortcuts
 - **Restart-proof**: the open workspace and session, tabs, drafts, queues and layout come back after a restart; each workspace reopens its last session
 - **Right**: tabs. **Changes**: code changes grouped by file with syntax highlighting, and a file list (click to filter, double-click to open the file read-only in a main-area tab). **Info**: session goal with a subgoal checklist and a field to ask about it, model, context usage, usage limits
@@ -15,25 +15,25 @@ A small desktop app for browsing and continuing Claude Code sessions.
 ```sh
 cargo run --release
 cargo test
-scripts/bundle.sh     # builds sessman.app with its icon into ~/Applications (or a dir you pass)
+scripts/bundle.sh     # builds scope.app with its icon into ~/Applications (or a dir you pass)
 ```
 
-**Testing changes**: always in a new instance of sessman, never the one running your sessions
+**Testing changes**: always in a new instance of scope, never the one running your sessions
 (restarting it ends them): `scripts/test-instance.sh start`, then `stop`. See
 [CLAUDE.md](CLAUDE.md). Taking changes live without a restart is on the
-[roadmap](ROADMAP.md#13-live-changes-sessman-updates-without-ending-its-sessions).
+[roadmap](ROADMAP.md#13-live-changes-scope-updates-without-ending-its-sessions).
 
-Pin `~/Applications/sessman.app` in the Dock, not `target/release/sessman`: a bare binary shows
+Pin `~/Applications/scope.app` in the Dock, not `target/release/scope`: a bare binary shows
 the generic executable icon whenever the app isn't running.
 
 Dictation (the 🎤 button by the prompt) needs a few things on macOS, once:
 
 - `brew install cmake`, which builds the Whisper engine (whisper.cpp, with Metal) for `cargo build`
-- The Whisper model, about 150 MB, in `~/.config/sessman/models/`:
+- The Whisper model, about 150 MB, in `~/.config/scope/models/`:
 
   ```sh
-  mkdir -p ~/.config/sessman/models
-  curl -L -o ~/.config/sessman/models/ggml-base.bin https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-base.bin
+  mkdir -p ~/.config/scope/models
+  curl -L -o ~/.config/scope/models/ggml-base.bin https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-base.bin
   ```
 
 The first recording asks for microphone access. Linux is not supported yet.
@@ -75,7 +75,7 @@ Known shortcomings of what's already built, to pick up as Spec Kit features late
 - **Testing with synthetic key events**: modifier keys sent by System Events (e.g. Shift+Enter)
   sometimes arrive without the modifier, so automated UI checks use CGEvents with explicit
   flags. Real keyboards are not affected.
-- **A few symbols** (→, ▾) are missing from egui's default font and render as boxes; sessman
+- **A few symbols** (→, ▾) are missing from egui's default font and render as boxes; scope
   avoids them in its own text (the input's collapse triangle is drawn), but they still show
   as boxes inside conversations that contain them.
 - **A stopped run may add a "No response requested." reply** the next time the session runs:

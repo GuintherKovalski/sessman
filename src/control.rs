@@ -1,5 +1,5 @@
-//! Sessman driven through Claude: the `sessman list|rename|move|new|ask` commands, for the
-//! sessions sessman runs (told about them in their system prompt) and anyone at a terminal.
+//! Scope driven through Claude: the `scope list|rename|move|new|ask` commands, for the
+//! sessions scope runs (told about them in their system prompt) and anyone at a terminal.
 //! A command is a JSON file dropped in the inbox folder; the running app takes it, does it,
 //! and writes the reply next to it, which the command prints. The orchestrator's actions
 //! (orchestration.rs) are the same commands, done by the app directly.
@@ -39,7 +39,7 @@ pub enum Command {
     },
 }
 
-/// A command and who sent it: the session it came from (`SESSMAN_SESSION`) and its folder.
+/// A command and who sent it: the session it came from (`SCOPE_SESSION`) and its folder.
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
 pub struct Request {
     pub command: Command,
@@ -59,8 +59,8 @@ pub fn inbox() -> PathBuf {
     crate::settings::config_dir().join("inbox")
 }
 
-/// The env var a session sessman runs finds its own id in.
-pub const SESSION_VAR: &str = "SESSMAN_SESSION";
+/// The env var a session scope runs finds its own id in.
+pub const SESSION_VAR: &str = "SCOPE_SESSION";
 
 /// Watches the inbox on a thread: each request found is taken out of it and passed on.
 pub fn watch(ctx: eframe::egui::Context) -> Receiver<Incoming> {
@@ -117,13 +117,13 @@ impl From<Result<String, String>> for Reply {
 }
 
 pub const USAGE: &str = "usage:
-  sessman list [--workspace W]           workspaces and their sessions, in the bar's order
-  sessman rename <session> <name>        an empty name gives back its own title
-  sessman move <session> <top|bottom|up|down|N>
-                                          its place in its workspace's bar (N from 1)
-  sessman new [--workspace W] [--folder DIR] [--name NAME] <prompt>
-                                          starts a session with that first prompt
-  sessman ask [--workspace W] <question>  asks the workspace's orchestrator (it may act)
+  scope list [--workspace W]             workspaces and their sessions, in the bar's order
+  scope rename <session> <name>          an empty name gives back its own title
+  scope move <session> <top|bottom|up|down|N>
+                                         its place in its workspace's bar (N from 1)
+  scope new [--workspace W] [--folder DIR] [--name NAME] <prompt>
+                                         starts a session with that first prompt
+  scope ask [--workspace W] <question>   asks the workspace's orchestrator (it may act)
 <session> is an id, an id prefix, the session's name, or . for the session running this.
 The workspace defaults to the calling session's.";
 
@@ -216,19 +216,19 @@ fn send(dir: &Path, request: &Request, wait: Duration) -> Result<String, String>
         if start.elapsed() > wait {
             // Not taken: no app is running to do it, so it shouldn't happen later by surprise.
             if std::fs::remove_file(&path).is_ok() {
-                return Err("sessman is not running: start it and try again".into());
+                return Err("scope is not running: start it and try again".into());
             }
-            return Err("sessman took the command but did not answer in time".into());
+            return Err("scope took the command but did not answer in time".into());
         }
         std::thread::sleep(Duration::from_millis(100));
     }
 }
 
-/// What sessions sessman runs are told, so Claude can manage them when asked. `exe` is how
-/// to run sessman.
+/// What sessions scope runs are told, so Claude can manage them when asked. `exe` is how
+/// to run scope.
 pub fn system_prompt(exe: &str) -> String {
     format!(
-        "You are running inside sessman, the developer's IDE for Claude Code sessions, grouped in workspaces. \
+        "You are running inside scope, the developer's IDE for Claude Code sessions, grouped in workspaces. \
          When the developer asks you to start, rename or reorder sessions, or to ask the workspace's orchestrator, \
          use its command (run it with Bash; it prints what it did):\n\
          \"{exe}\" list [--workspace W]\n\
@@ -293,7 +293,7 @@ mod tests {
 
     #[test]
     fn a_command_waits_for_its_reply_and_gives_up_when_no_app_takes_it() {
-        let dir = std::env::temp_dir().join(format!("sessman-inbox-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("scope-inbox-{}", std::process::id()));
         let request = Request { command: Command::List { workspace: None }, caller: None, cwd: None };
         // No app: the command is taken back.
         assert!(send(&dir, &request, Duration::from_millis(300)).unwrap_err().contains("not running"));

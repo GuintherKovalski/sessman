@@ -2,7 +2,7 @@
 use super::harness::*;
 use eframe::egui::{Key, Modifiers};
 
-fn conversation() -> Sessman {
+fn conversation() -> Scope {
     let mut s = setup()
         .session(session("s-a", "first needle here", 100).reply("no match in this one").turn("another needle", "and a needle in the reply"))
         .launch();

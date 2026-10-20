@@ -3,7 +3,7 @@ use super::harness::*;
 use eframe::egui::{Key, Modifiers};
 use serde_json::json;
 
-fn one_session() -> Sessman {
+fn one_session() -> Scope {
     let mut s = setup().session(session("s-a", "alpha prompt", 100)).launch();
     s.click("alpha prompt");
     s
@@ -20,7 +20,7 @@ fn enter_sends_the_prompt_to_its_session_and_shows_the_reply() {
     let args: Vec<&str> = call["args"].as_array().unwrap().iter().map(|a| a.as_str().unwrap()).collect();
     assert!(args.windows(2).any(|w| w == ["--resume", "s-a"]));
     assert!(args.contains(&"--include-partial-messages"));
-    assert!(args.contains(&"--append-system-prompt"), "sessions are told about the sessman commands");
+    assert!(args.contains(&"--append-system-prompt"), "sessions are told about the scope commands");
     assert_eq!(call["cwd"], s.env.proj.display().to_string(), "it runs in the session's folder");
     assert_eq!(call["session"], "s-a");
 }

@@ -4,7 +4,7 @@ use serde_json::json;
 
 /// A workspace whose new sessions go to `folder` without asking (the native folder picker
 /// can't be driven from a test, so these start where the workspace already has a folder).
-fn workspace_with_folder() -> Sessman {
+fn workspace_with_folder() -> Scope {
     let s = setup().session(session("s-a", "alpha prompt", 100));
     let folder = s.env().folder("newproj");
     let mut s = s

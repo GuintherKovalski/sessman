@@ -3295,6 +3295,26 @@ dependencies = [
 ]
 
 [[package]]
+name = "scope"
+version = "0.1.0"
+dependencies = [
+ "cpal",
+ "eframe",
+ "egui_commonmark",
+ "egui_extras",
+ "egui_kittest",
+ "libc",
+ "objc2 0.6.5",
+ "objc2-app-kit 0.3.2",
+ "objc2-foundation 0.3.2",
+ "pulldown-cmark",
+ "serde",
+ "serde_json",
+ "similar",
+ "whisper-rs",
+]
+
+[[package]]
 name = "scoped-tls"
 version = "1.0.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3394,26 +3414,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "4e7523beb55eece201a2356bee0bbca0d1ab466c14c07703b2e0ee6d42cb0c2c"
 dependencies = [
  "serde_core",
-]
-
-[[package]]
-name = "sessman"
-version = "0.1.0"
-dependencies = [
- "cpal",
- "eframe",
- "egui_commonmark",
- "egui_extras",
- "egui_kittest",
- "libc",
- "objc2 0.6.5",
- "objc2-app-kit 0.3.2",
- "objc2-foundation 0.3.2",
- "pulldown-cmark",
- "serde",
- "serde_json",
- "similar",
- "whisper-rs",
 ]
 
 [[package]]

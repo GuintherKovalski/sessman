@@ -3,7 +3,7 @@ use super::harness::*;
 use eframe::egui::Key;
 use serde_json::json;
 
-fn three() -> Sessman {
+fn three() -> Scope {
     setup()
         .session(session("s-a", "Markdown rendering and theming", 300))
         .session(session("s-b", "Fix the login flow", 200).reply("We talked about the quantum flux capacitor here"))

@@ -1,6 +1,6 @@
-# sessman: project overview
+# scope: project overview
 
-sessman is a small desktop app, written in Rust, for browsing, organizing and continuing
+scope is a small desktop app, written in Rust, for browsing, organizing and continuing
 your Claude Code sessions. It reads the sessions Claude Code already keeps on disk; it does
 not replace Claude Code.
 
@@ -50,7 +50,7 @@ it to zoom.
 - Click a session to open it in the middle.
 - **Double-click** a session name to rename it, like a folder: the name is selected, type the
   new one, **Enter** (or click elsewhere) saves, **Escape** cancels. Saving an empty name
-  brings back the original one. Names are sessman's own; Claude Code keeps its own title.
+  brings back the original one. Names are scope's own; Claude Code keeps its own title.
 - **Tabs** at the top: "All sessions", one tab per workspace, and **+**. Selecting a workspace tab
   opens the session that was last open in it (or its newest session; an empty workspace shows
   an empty main area); each remembers its last session across restarts. "All sessions" opens
@@ -77,7 +77,7 @@ opened; clicking "All sessions" again comes back to it.
   and **Heading** (the end state it works towards), plus up to 3 Jira tickets, epics and
   parent tickets first. Only keys that really appear in the sessions or the branch are kept;
   with a Jira URL in Settings they link to the ticket.
-- Summaries are kept in `~/.config/sessman/overview.json` and are written when missing, or
+- Summaries are kept in `~/.config/scope/overview.json` and are written when missing, or
   again when there was activity since and they are at least 30 min old (up to 3 at a time).
   **↻** on a card, or **↻ Refresh all**, writes them again now.
 
@@ -100,7 +100,7 @@ opened; clicking "All sessions" again comes back to it.
   and a short digest of each session); answers stack on the page.
 - Wherever the orchestrator mentions a session (summary, Needs you, Next, the cards and its
   answers), it reads as the session's current name and is a link: click it to open the session.
-- Saved in `~/.config/sessman/orchestration.json`, by workspace name.
+- Saved in `~/.config/scope/orchestration.json`, by workspace name.
 
 ### Middle: conversation and file tabs
 - When a file is open, a tab bar appears on top: **Main** (the conversation) and one tab per
@@ -175,10 +175,10 @@ opened; clicking "All sessions" again comes back to it.
   - **Model** of the latest reply.
   - **Context**: tokens in context vs the window size (e.g. 204k / 1.0M).
   - **Usage limits**: your 5-hour and weekly limits with time until reset. Claude Code only
-    shares these with its status line, so click **Enable** once: it sets sessman as Claude
+    shares these with its status line, so click **Enable** once: it sets scope as Claude
     Code's status line (`statusLine` in `~/.claude/settings.json`). Limits then appear after
     your next reply in an interactive Claude Code session (Pro/Max plans). If you already
-    have a status line, sessman leaves it alone.
+    have a status line, scope leaves it alone.
   - **Ask about this goal**: the last item, pinned to the bottom of the panel. Enter sends the question, together
     with the goal and checklist, to the session's own model with its full context, like
     Claude Code's `/btw`: nothing is added to the session. The answer shows just above the field
@@ -200,12 +200,12 @@ the settings; each changed setting has a ↺ to reset it. Changes apply and save
   workspace orchestration (plus its model and update interval), questions in the right panel,
   and finding sessions in the left panel. The reply formats the app parses stay fixed.
 - **Behaviour**: confirm before deleting a workspace, restore the previous state at start,
-  notify when a run finishes while sessman is in the background.
+  notify when a run finishes while scope is in the background.
 - **Keyboard shortcuts** (a list) and **About** (version, config folder with Open in Finder,
   status line).
 
 ### Restarting
-Closing and opening sessman brings everything back: window size and position, panel widths,
+Closing and opening scope brings everything back: window size and position, panel widths,
 the input's size, the workspace tab and open session, every session's file tabs, scroll
 positions, drafts and queued prompts (queues come back paused), the right panel tab and the
 search text. Sessions or files that no longer exist are skipped; a damaged state file is
@@ -226,18 +226,18 @@ moved aside (`state.json.bad`) and the app starts fresh.
 | Refine | `claude -p --model <helper> --no-session-persistence` with the prompt, the goal and the last 3 prompts; it answers in JSON with either the refined prompt or up to 3 questions. |
 | New session | Runs `claude -p --session-id <new uuid> "<first prompt>"` in the chosen folder. |
 | Model, context tokens | The latest reply's `model` and `usage` in the session file. |
-| Context size, usage limits | Claude Code's status-line data, saved by `sessman statusline` to `~/.config/sessman/status/`. Without it, the size is inferred from the model. |
+| Context size, usage limits | Claude Code's status-line data, saved by `scope statusline` to `~/.config/scope/status/`. Without it, the size is inferred from the model. |
 | Search | An in-memory index (names, goals, conversation text) rebuilt in the background for changed files every 10 s. Enter-search: `claude -p --model haiku --no-session-persistence` with a numbered list of recent sessions (name, goal, first prompts). |
-| Goal and checklist | `claude -p --model haiku --no-session-persistence` with a digest of the conversation, on request; saved (with your ticks) to `~/.config/sessman/goals.json`. |
+| Goal and checklist | `claude -p --model haiku --no-session-persistence` with a digest of the conversation, on request; saved (with your ticks) to `~/.config/scope/goals.json`. |
 | Goal questions | `claude -p --resume <id> --fork-session --no-session-persistence "<question>"`: full context, original session untouched, nothing saved. |
-| Settings (theme included) | sessman's own file: `~/.config/sessman/settings.json`. |
-| App state | `~/.config/sessman/state.json` (sessions' tabs, drafts, queues, layout) and `window.ron` (window, panel sizes, scroll positions, saved by eframe). Saved every 2 s when changed and on quit. |
+| Settings (theme included) | scope's own file: `~/.config/scope/settings.json`. |
+| App state | `~/.config/scope/state.json` (sessions' tabs, drafts, queues, layout) and `window.ron` (window, panel sizes, scroll positions, saved by eframe). Saved every 2 s when changed and on quit. |
 | Bare URLs | Turned into Markdown autolinks before rendering (not inside code or existing links). |
-| Workspaces and their colors | sessman's own file: `~/.config/sessman/workspaces.json`. |
-| Custom session names | sessman's own file: `~/.config/sessman/names.json`. |
+| Workspaces and their colors | scope's own file: `~/.config/scope/workspaces.json`. |
+| Custom session names | scope's own file: `~/.config/scope/names.json`. |
 
-sessman never writes to Claude's session files. Everything it adds (workspaces, names, goals,
-settings, app state, status data) lives in its own config folder (`$SESSMAN_CONFIG` overrides
+scope never writes to Claude's session files. Everything it adds (workspaces, names, goals,
+settings, app state, status data) lives in its own config folder (`$SCOPE_CONFIG` overrides
 it, e.g. to run a test copy next to your own). The one exception is the opt-in **Enable** button,
 which sets `statusLine` in `~/.claude/settings.json` and nothing else.
 
@@ -260,7 +260,7 @@ src/
 ├── names.rs       custom session names and goals
 ├── goal.rs        goal + subgoal checklist format
 ├── diffview.rs    changes grouped by file, diff cards, read-only file viewer
-├── markdown.rs    Markdown rendering: tables and tool lines drawn by sessman, the rest by egui_commonmark
+├── markdown.rs    Markdown rendering: tables and tool lines drawn by scope, the rest by egui_commonmark
 ├── theme.rs       the colors for dark and light
 ├── settings.rs    the Settings page, its file, and the config folder
 ├── state.rs       what is restored after a restart; per-session views (file tabs, draft)
@@ -268,7 +268,7 @@ src/
 ├── refine.rs      Refine prompt: the request to the helper model and its reply
 ├── runner.rs      runs `claude -p` (streaming send, stop, helper questions), folder picker, notifications
 ├── search.rs      session search: background index, matching and ranking, Haiku search format
-├── status.rs      `sessman statusline`: saves Claude Code's status data; usage limits
+├── status.rs      `scope statusline`: saves Claude Code's status data; usage limits
 └── workspaces.rs  workspaces: create, move, remove, delete, load/save
 ```
 

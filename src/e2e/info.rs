@@ -3,7 +3,7 @@ use super::harness::*;
 use eframe::egui::Key;
 use serde_json::json;
 
-fn info_of_one() -> Sessman {
+fn info_of_one() -> Scope {
     let mut s = setup().session(session("s-a", "alpha prompt", 100).reply("alpha reply")).launch();
     s.click("alpha prompt");
     s.click("Info");

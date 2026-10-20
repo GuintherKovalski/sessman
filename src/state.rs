@@ -1,4 +1,4 @@
-//! What sessman restores after a restart: the open workspace and session, each session's
+//! What scope restores after a restart: the open workspace and session, each session's
 //! file tabs, draft and queue, and the layout. Window size and panel widths are saved by
 //! eframe (`window.ron` in the same folder).
 use crate::queue::Queue;
@@ -146,7 +146,7 @@ mod tests {
 
     #[test]
     fn roundtrip_pauses_queues_and_survives_a_broken_file() {
-        let dir = std::env::temp_dir().join(format!("sessman-state-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("scope-state-{}", std::process::id()));
         let path = dir.join("state.json");
         let mut s = State { open: Some("s1".into()), search: "auth".into(), prompt_height: Some(120.0), ..Default::default() };
         s.views.insert("s1".into(), View { draft: "half typed".into(), ..Default::default() });
@@ -170,7 +170,7 @@ mod tests {
 
     #[test]
     fn prune_skips_deleted_sessions_and_missing_files() {
-        let real = std::env::temp_dir().join(format!("sessman-prune-{}.rs", std::process::id()));
+        let real = std::env::temp_dir().join(format!("scope-prune-{}.rs", std::process::id()));
         std::fs::write(&real, "x").unwrap();
         let mut s = State { open: Some("gone".into()), ..Default::default() };
         s.views.insert("gone".into(), View::default());

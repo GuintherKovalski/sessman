@@ -8,7 +8,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 /// The "Show tool lines" setting.
 pub static SHOW_TOOLS: AtomicBool = AtomicBool::new(true);
 
-/// A message split into what sessman draws itself (tables, tool calls) and plain Markdown.
+/// A message split into what scope draws itself (tables, tool calls) and plain Markdown.
 #[derive(Debug, PartialEq)]
 pub enum Block<'a> {
     Markdown(&'a str),
@@ -97,7 +97,7 @@ fn markdown_blocks<'a>(text: &'a str, out: &mut Vec<Block<'a>>) {
     push_md(out, &text[last..]);
 }
 
-/// Renders a message: Markdown via egui_commonmark, tables and tool calls by sessman.
+/// Renders a message: Markdown via egui_commonmark, tables and tool calls by scope.
 pub fn show(ui: &mut egui::Ui, cache: &mut CommonMarkCache, text: &str) {
     for (i, block) in blocks(text).into_iter().enumerate() {
         ui.push_id(i, |ui| match block {

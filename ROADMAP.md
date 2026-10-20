@@ -1,4 +1,4 @@
-# sessman: roadmap
+# scope: roadmap
 
 Features for the next rounds. Each one is meant to go through Spec Kit like the others
 (`/speckit-specify` with the text under its heading as the starting description). The rounds
@@ -23,7 +23,7 @@ work now. Item 13 is planned.
 | 10 | 2 | [Prompt queue](#10-input-stays-usable-while-claude-works-enter-queues-the-prompt) | Input never blocked; Enter queues while Claude works | 9 | Done |
 | 11 | 3 | [Settings page](#11-settings-page) | IDE-style settings in the main area | 8 | Done (3 settings deferred, see item) |
 | 12 | 4 | [Refine prompt](#12-refine-prompt-before-sending) | Model rewrites the prompt, asks skippable questions | 11 | Done |
-| 13 | 5 | [Live changes](#13-live-changes-sessman-updates-without-ending-its-sessions) | Rebuild and reload sessman without ending the sessions it runs | 8 | Planned |
+| 13 | 5 | [Live changes](#13-live-changes-scope-updates-without-ending-its-sessions) | Rebuild and reload scope without ending the sessions it runs | 8 | Planned |
 
 ## Round 1: UI polish and navigation
 
@@ -66,7 +66,7 @@ work now. Item 13 is planned.
 
 ### 5. Opening a new workspace is faster
 - Starting work in a new folder (**+ New session** → pick a folder → first prompt) takes
-  noticeably long before sessman is ready. It should feel instant: the folder picker opens
+  noticeably long before scope is ready. It should feel instant: the folder picker opens
   right away, and the new session is usable as soon as the folder is chosen.
 - Measure first where the time goes. Likely causes, from the current code:
   - The folder picker runs through `osascript` (`runner::pick_folder`), which starts a new
@@ -93,7 +93,7 @@ work now. Item 13 is planned.
 ### 7. Selecting a workspace opens its last session
 - Clicking a workspace tab (or **All**) switches the main area to the session that was last
   open in that workspace, instead of leaving the previous workspace's session on screen.
-- sessman remembers, per workspace, the last session opened there. If there is none yet (or
+- scope remembers, per workspace, the last session opened there. If there is none yet (or
   it was moved out or deleted), the most recently active session in the workspace opens.
   An empty workspace shows the empty main area.
 - Coming back to a workspace restores that session as it was, with its file tabs (item 6),
@@ -102,7 +102,7 @@ work now. Item 13 is planned.
   restart.
 
 ### 8. The whole state is saved and restored on restart
-- Closing sessman and opening it again brings everything back as it was, with no action
+- Closing scope and opening it again brings everything back as it was, with no action
   needed: saving happens automatically while the app is used (shortly after each change,
   and on quit), and loading happens at start.
 - What is restored:
@@ -115,10 +115,10 @@ work now. Item 13 is planned.
     (item 10);
   - the right panel tab (Changes / Info) and its file filter;
   - the session search text.
-- Saved in sessman's own config folder (e.g. `~/.config/sessman/state.json`), never in
+- Saved in scope's own config folder (e.g. `~/.config/scope/state.json`), never in
   Claude's files. Things that no longer exist (deleted sessions, missing files, removed
   workspaces) are skipped quietly.
-- Prompts that were running when sessman closed can't continue (the `claude` process ends
+- Prompts that were running when scope closed can't continue (the `claude` process ends
   with the app); their sessions open showing what was saved, and their queues come back
   paused, with **Resume queue**, so nothing is sent without the user asking.
 - A broken or old-format state file never stops the app from starting: it starts fresh and
@@ -130,7 +130,7 @@ work now. Item 13 is planned.
 - While a session is working (⏳), **Ctrl+C** stops it at once, as in Claude Code in the
   terminal: the running `claude -p` process for that session is killed right away, without
   waiting for the current step or tool to finish, and the ⏳ goes away in the same frame.
-- It works whenever sessman's window has focus and the open session is working, whether or
+- It works whenever scope's window has focus and the open session is working, whether or
   not the input is focused. On macOS there is no clash with copy (that is Cmd+C); on other
   systems Ctrl+C stops Claude only when no text is selected, otherwise it copies.
 - A small **Stop** button next to the ⏳ does the same, for the mouse.
@@ -172,7 +172,7 @@ work now. Item 13 is planned.
 - A **⚙ Settings** button (bottom of the left panel, next to search, and **Cmd+,** on macOS
   / **Ctrl+,** elsewhere) opens the settings in the main area, as a tab like the file tabs.
 - Settings are grouped into sections with a search field on top, and saved immediately to
-  `~/.config/sessman/settings.json` (which already holds the theme). A **Reset to default**
+  `~/.config/scope/settings.json` (which already holds the theme). A **Reset to default**
   link per setting.
 - First set (the basics most IDEs have; more will be added later):
   - **Appearance**: theme (dark / light / system, moves here from the Info tab buttons),
@@ -189,7 +189,7 @@ work now. Item 13 is planned.
     sessions.
   - **Behaviour**: confirm before deleting a workspace; restore the previous state at start
     (item 8; on by default); notify (system notification) when a run
-    finishes while sessman is in the background.
+    finishes while scope is in the background.
   - **Keyboard shortcuts**: a read-only list of all shortcuts for now (rebinding later).
   - **About**: version, config folder (with **Open in Finder**), status-line integration
     state.
@@ -216,29 +216,29 @@ work now. Item 13 is planned.
   automatically. **Cmd/Ctrl+Z** (or an **Undo refine** link) restores the original text.
 - While refining, the input shows a spinner and stays editable; Esc cancels.
 
-## Round 5: Developing sessman from inside sessman
+## Round 5: Developing scope from inside scope
 
-### 13. Live changes: sessman updates without ending its sessions
-- **Why**: sessman is developed with Claude sessions that sessman itself runs. Each run is a
-  child of the app (`claude -p` with its output piped to it), so restarting sessman to see a
+### 13. Live changes: scope updates without ending its sessions
+- **Why**: scope is developed with Claude sessions that scope itself runs. Each run is a
+  child of the app (`claude -p` with its output piped to it), so restarting scope to see a
   change ends every running session, including the one making the change. For now changes are
   tested in a separate instance (`scripts/test-instance.sh`, see CLAUDE.md), and the developer
-  restarts their own sessman by hand to take them.
+  restarts their own scope by hand to take them.
 - **Runs outlive the app.** Start each run detached from the app: a small
-  `sessman run <id> …` wrapper in its own session (`setsid`) that runs `claude -p` and appends
-  its stream-json lines to `~/.config/sessman/runs/<id>.jsonl`, with its pid in
+  `scope run <id> …` wrapper in its own session (`setsid`) that runs `claude -p` and appends
+  its stream-json lines to `~/.config/scope/runs/<id>.jsonl`, with its pid in
   `runs/<id>.pid`. The app tails that file instead of a pipe (the same events as today), and
-  Stop signals the pid's process group. On start, sessman re-attaches to every run whose pid is
+  Stop signals the pid's process group. On start, scope re-attaches to every run whose pid is
   still alive and reads what it missed from the file; runs whose process is gone end as they do
   now (queued prompts go on).
 - **Restart in place.** With runs detached and the state already restored on start (item 8),
-  a restart loses nothing. sessman watches its own binary (`std::env::current_exe()`): when a
+  a restart loses nothing. scope watches its own binary (`std::env::current_exe()`): when a
   new build or bundle replaces it, a quiet **Restart to update** button appears in the top bar
-  (and `sessman restart` does the same from a session). It saves the state and `exec`s the new
+  (and `scope restart` does the same from a session). It saves the state and `exec`s the new
   binary, so the window comes back in the same place, on the same session, with its runs still
   streaming.
 - **Agents' loop**: a session changes the code, tests it in a separate instance, then runs
-  `scripts/bundle.sh` and `sessman restart` itself; it keeps running through the restart and
+  `scripts/bundle.sh` and `scope restart` itself; it keeps running through the restart and
   sees its change live in the IDE it runs in.
 - Not planned: hot-reloading UI code into the running process (dylib reloading). It is fragile
   with egui's state and saves only the second or two a restart takes.

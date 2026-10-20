@@ -162,7 +162,7 @@ impl Store {
 pub struct Jobs {
     pub updating: HashMap<String, Receiver<Result<Update, String>>>,
     pub asking: HashMap<String, (String, Receiver<Result<Answer, String>>)>,
-    /// Where to reply when the answer is in, for questions asked with `sessman ask`.
+    /// Where to reply when the answer is in, for questions asked with `scope ask`.
     pub asked_by: HashMap<String, PathBuf>,
     pub errors: HashMap<String, String>,
     pub ask_errors: HashMap<String, String>,
@@ -840,7 +840,7 @@ pub fn ui(ui: &mut egui::Ui, page: &Page, question: &mut String, renaming: &mut 
 
 /// What a session reference links to in rendered Markdown, followed by its id; the page
 /// takes these clicks itself instead of opening them as URLs.
-const SESSION_URL: &str = "sessman-session:";
+const SESSION_URL: &str = "scope-session:";
 
 /// A session's current name, if it is one of the page's.
 fn name_of<'a>(sessions: &'a [Live], id: &str) -> Option<&'a str> {
@@ -1149,7 +1149,7 @@ mod tests {
 
     #[test]
     fn store_roundtrips_and_clears() {
-        let path = std::env::temp_dir().join(format!("sessman-orch-{}.json", std::process::id()));
+        let path = std::env::temp_dir().join(format!("scope-orch-{}.json", std::process::id()));
         let mut s = Store::default();
         s.entry("W").answered("q".into(), "a".into(), vec!["did".into()], 1);
         s.save(&path).unwrap();
