@@ -32,4 +32,5 @@ scripts/test-instance.sh stop [name]    # quits it; removes its folder and the s
 - Never touch `~/.config/sessman` or the running sessman to test. When the developer should see
   a change in their own sessman, say so: they restart it themselves.
 
-`cargo test` covers the logic; run it before any instance.
+`cargo test` covers the logic and, in `src/e2e`, the whole app driven headless against a fake
+`claude` (no real sessions, no cost); run it before any instance.

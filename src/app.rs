@@ -2341,7 +2341,9 @@ impl App {
         }
         // A small triangle: down to collapse, up to expand.
         let (crect, toggle) = ui.allocate_exact_size(egui::vec2(18.0, 8.0), Sense::click());
-        let toggle = toggle.on_hover_text(if self.prompt_collapsed { "Expand the input" } else { "Collapse the input to one line" });
+        let label = if self.prompt_collapsed { "Expand the input" } else { "Collapse the input to one line" };
+        toggle.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, label));
+        let toggle = toggle.on_hover_text(label);
         let c = crect.center();
         let (w, h) = (4.5, 3.0);
         let dir = if self.prompt_collapsed { -1.0 } else { 1.0 };
@@ -3284,6 +3286,7 @@ fn closable_tab(ui: &mut egui::Ui, id: impl std::hash::Hash + std::fmt::Debug, t
     let x_size = 16.0;
     let size = egui::vec2(pad.x + galley.size().x + 6.0 + x_size + 4.0, galley.size().y.max(x_size) + 2.0 * pad.y);
     let (rect, tab) = ui.allocate_exact_size(size, Sense::click());
+    tab.widget_info(|| egui::WidgetInfo::selected(egui::WidgetType::Button, true, selected, galley.text()));
     let x_rect = egui::Rect::from_center_size(egui::pos2(rect.right() - 4.0 - x_size / 2.0, rect.center().y), egui::vec2(x_size, x_size));
     let x = ui.interact(x_rect, ui.id().with(&id).with("close"), Sense::click()).on_hover_text("Close");
     let tab = tab.on_hover_text(hover);
@@ -3350,6 +3353,11 @@ fn session_bubble(ui: &mut egui::Ui, selected: bool, title: &str, note: Option<&
     let note = note.map(|n| ui.painter().layout(n.to_owned(), egui::TextStyle::Small.resolve(ui.style()), ui.visuals().weak_text_color(), text_width));
     let height = galley.size().y + note.as_ref().map_or(0.0, |n| n.size().y + 2.0) + 2.0 * PAD.y;
     let (rect, row) = ui.allocate_exact_size(egui::vec2(width, height), Sense::click_and_drag());
+    let label = match &note {
+        Some(n) => format!("{title}\n{}", n.text()),
+        None => title.to_owned(),
+    };
+    row.widget_info(|| egui::WidgetInfo::selected(egui::WidgetType::Button, true, selected, &label));
     if ui.is_rect_visible(rect) {
         let v = ui.visuals();
         let fill = if selected {

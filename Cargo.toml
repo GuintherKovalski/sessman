@@ -19,3 +19,6 @@ whisper-rs = { version = "0.15", features = ["metal"] }
 objc2 = "0.6"
 objc2-foundation = { version = "0.3", features = ["NSString", "NSURL", "NSArray", "NSFileManager", "NSError"] }
 objc2-app-kit = { version = "0.3", features = ["NSOpenPanel", "NSSavePanel", "NSPanel", "NSWindow", "NSResponder", "NSApplication"] }
+
+[dev-dependencies]
+egui_kittest = { version = "0.36", features = ["eframe"] }

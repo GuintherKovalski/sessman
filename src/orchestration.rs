@@ -526,6 +526,7 @@ pub fn bubble(ui: &mut egui::Ui, selected: bool, line: &str, busy: bool) -> egui
     let sub = ui.painter().layout(line.to_owned(), egui::TextStyle::Small.resolve(ui.style()), v.weak_text_color(), text_width);
     let height = title.size().y + 2.0 + sub.size().y + 2.0 * PAD.y;
     let (rect, resp) = ui.allocate_exact_size(egui::vec2(width, height), Sense::click());
+    resp.widget_info(|| egui::WidgetInfo::selected(egui::WidgetType::Button, true, selected, format!("Orchestration\n{line}")));
     if ui.is_rect_visible(rect) {
         let fill = if selected {
             v.selection.bg_fill

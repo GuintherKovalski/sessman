@@ -1,6 +1,8 @@
 mod app;
 mod control;
 mod diffview;
+#[cfg(test)]
+mod e2e;
 mod dictation;
 mod find;
 mod goal;
