@@ -199,6 +199,12 @@ pub struct App {
     orch: orchestration::Jobs,
     /// Commands from `scope list|rename|move|new|ask` (control.rs).
     control: Receiver<control::Incoming>,
+    /// Account limits from the usage endpoint (`status::watch_usage`): the latest answer and
+    /// when it came, the last failure, and whether Claude is working (asks more often then).
+    usage_rx: Receiver<Result<Vec<status::Window>, String>>,
+    usage: Option<(Vec<status::Window>, SystemTime)>,
+    usage_error: Option<String>,
+    usage_busy: std::sync::Arc<std::sync::atomic::AtomicBool>,
 }
 
 /// A running `claude -p` for one session: its events, the reply being written, the tool it
@@ -315,6 +321,7 @@ impl App {
     pub fn new(ctx: &egui::Context) -> Self {
         let (snapshots, poke_index) = search::spawn_indexer(ctx.clone());
         let settings = Settings::load(&settings::path());
+        let usage_busy = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
         let mut app = Self {
             ctx: ctx.clone(),
             sessions: session::list(&session::projects_dir()),
@@ -373,6 +380,10 @@ impl App {
             snapshots,
             poke_index,
             foreign_runs: runner::watch_runs(ctx.clone()),
+            usage_rx: status::watch_usage(ctx.clone(), usage_busy.clone()),
+            usage: None,
+            usage_error: None,
+            usage_busy,
             index: search::Index::new(),
             generation: 0,
             search: String::new(),
@@ -1740,6 +1751,21 @@ impl App {
         }
     }
 
+    /// Takes the usage endpoint's latest answer, and tells it whether Claude is working, so it
+    /// asks every 10 s then and every 10 minutes otherwise. A failure keeps the last numbers.
+    fn poll_usage(&mut self) {
+        self.usage_busy.store(!self.runs.is_empty(), std::sync::atomic::Ordering::Relaxed);
+        for answer in self.usage_rx.try_iter() {
+            match answer {
+                Ok(windows) => {
+                    self.usage = Some((windows, SystemTime::now()));
+                    self.usage_error = None;
+                }
+                Err(e) => self.usage_error = Some(e),
+            }
+        }
+    }
+
     fn poll_dictation(&mut self) {
         let Dictation::Transcribing(rx) = &self.dictation else { return };
         let result = match rx.try_recv() {
@@ -3088,7 +3114,7 @@ impl App {
             }
 
             section(ui, "Usage limits");
-            if limits_ui(ui) {
+            if limits_ui(ui, self.usage.as_ref(), self.usage_error.as_deref()) {
                 match status::enable() {
                     Ok(()) => self.error = None,
                     Err(e) => self.error = Some(format!("could not enable status line: {e}")),
@@ -3653,10 +3679,21 @@ fn rename_field(ui: &mut egui::Ui, r: &mut Renaming, project: &str, actions: &mu
 }
 
 
-/// Account usage limits from the latest status-line payload. Returns true if "Enable" was clicked.
-fn limits_ui(ui: &mut egui::Ui) -> bool {
-    // The file changes whenever Claude Code refreshes its status line; re-read every few seconds.
+/// Account usage limits: from the usage endpoint `/usage` reads, else from the latest
+/// status-line payload. Returns true if "Enable" was clicked.
+fn limits_ui(ui: &mut egui::Ui, usage: Option<&(Vec<status::Window>, SystemTime)>, error: Option<&str>) -> bool {
+    // Keeps "resets in" and "updated ago" current, and re-reads the status-line file.
     ui.ctx().request_repaint_after(std::time::Duration::from_secs(5));
+    if let Some((windows, at)) = usage {
+        limit_bars(ui, windows, *at);
+        if let Some(e) = error {
+            ui.label(RichText::new(format!("Last refresh failed: {e}")).weak().small());
+        }
+        return false;
+    }
+    if let Some(e) = error {
+        ui.label(RichText::new(format!("Can't ask Claude for your usage ({e}); showing what the status line last saw.")).weak().small());
+    }
     match status::setup() {
         status::Setup::Other(cmd) => {
             ui.label(RichText::new(format!("Claude Code limits are only shared with the status line, and yours is already set to `{cmd}`. scope won't replace it.")).weak());
@@ -3672,13 +3709,19 @@ fn limits_ui(ui: &mut egui::Ui) -> bool {
         ui.label(RichText::new("Enabled. Limits appear after your next reply in an interactive Claude Code session (Pro/Max plans only).").weak());
         return false;
     };
+    limit_bars(ui, &status::limits(&v), at);
+    false
+}
+
+/// One bar per limit window that hasn't reset yet, and how old the numbers are.
+fn limit_bars(ui: &mut egui::Ui, windows: &[status::Window], at: SystemTime) {
     let now = SystemTime::now();
-    for w in status::limits(&v) {
+    for w in windows {
         let reset = w.resets_at.map(|t| UNIX_EPOCH + std::time::Duration::from_secs(t));
         if reset.is_some_and(|r| r <= now) {
             continue; // window has reset since the payload was written
         }
-        ui.label(w.label);
+        ui.label(&w.label);
         let text = match reset.and_then(|r| r.duration_since(now).ok()) {
             Some(d) => format!("{:.0}% · resets in {}", w.used, short_duration(d)),
             None => format!("{:.0}%", w.used),
@@ -3686,8 +3729,8 @@ fn limits_ui(ui: &mut egui::Ui) -> bool {
         ui.add(egui::ProgressBar::new((w.used / 100.0) as f32).text(text));
     }
     let age = now.duration_since(at).unwrap_or_default();
-    ui.label(RichText::new(format!("Updated {} ago", short_duration(age))).weak().small());
-    false
+    let ago = if age.as_secs() < 60 { format!("{}s", age.as_secs()) } else { short_duration(age) };
+    ui.label(RichText::new(format!("Updated {ago} ago")).weak().small());
 }
 
 /// 14_200 → "13.9 KB"
@@ -3768,6 +3811,7 @@ impl eframe::App for App {
         self.poll_ai();
         self.poll_refine();
         self.poll_dictation();
+        self.poll_usage();
     }
 
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
