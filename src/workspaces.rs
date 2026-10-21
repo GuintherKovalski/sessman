@@ -20,7 +20,7 @@ pub struct Workspace {
     pub ordered: bool,
 }
 
-const PALETTE: [[u8; 3]; 10] = [
+pub const PALETTE: [[u8; 3]; 10] = [
     [86, 156, 214],
     [214, 122, 78],
     [106, 190, 112],
@@ -202,6 +202,26 @@ impl Workspaces {
         }
     }
 
+    /// Renames workspace `ws`. The name must be new: commands find workspaces by name.
+    pub fn rename(&mut self, ws: usize, name: &str) -> Result<(), String> {
+        let name = name.trim();
+        if name.is_empty() {
+            return Err("a workspace needs a name".into());
+        }
+        if self.list.iter().enumerate().any(|(i, w)| i != ws && w.name.eq_ignore_ascii_case(name)) {
+            return Err(format!("there is already a workspace called \"{name}\""));
+        }
+        let w = self.list.get_mut(ws).ok_or("no such workspace")?;
+        w.name = name.to_owned();
+        Ok(())
+    }
+
+    pub fn set_color(&mut self, ws: usize, color: [u8; 3]) {
+        if let Some(w) = self.list.get_mut(ws) {
+            w.color = Some(color);
+        }
+    }
+
     pub fn delete(&mut self, ws: usize) {
         if ws < self.list.len() {
             self.list.remove(ws);
@@ -304,6 +324,21 @@ mod tests {
         assert!(!w.list[a].ordered);
         let old: Workspaces = serde_json::from_str(r#"{"list":[{"name":"x","sessions":[]}]}"#).unwrap();
         assert!(!old.list[0].ordered);
+    }
+
+    #[test]
+    fn rename_keeps_names_unique_and_color_can_be_set() {
+        let mut w = Workspaces::default();
+        let a = w.add("a").unwrap();
+        w.add("b");
+        assert!(w.rename(a, " ").is_err());
+        assert!(w.rename(a, "B").is_err(), "taken, whatever the case");
+        assert!(w.rename(a, "A").is_ok(), "its own name, recased");
+        assert!(w.rename(a, " c ").is_ok());
+        assert_eq!(w.list[a].name, "c");
+        assert!(w.rename(9, "d").is_err());
+        w.set_color(a, [1, 2, 3]);
+        assert_eq!(w.list[a].color, Some([1, 2, 3]));
     }
 
     #[test]

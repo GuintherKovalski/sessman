@@ -59,6 +59,13 @@ impl Overviews {
         self.0.get(name)
     }
 
+    /// Keeps a renamed workspace's entry under its new name.
+    pub fn rename(&mut self, old: &str, new: &str) {
+        if let Some(v) = self.0.remove(old) {
+            self.0.insert(new.to_owned(), v);
+        }
+    }
+
     pub fn set(&mut self, name: &str, s: Summary) {
         self.0.insert(name.to_owned(), s);
     }

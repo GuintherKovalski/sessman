@@ -59,6 +59,11 @@ it to zoom.
   - Drag a session onto a workspace tab to put it there (the tab is outlined while you hover).
   - Or right-click a session → **Move to** → pick a workspace.
   - Inside a workspace tab, right-click a session → **Remove from workspace**.
+  - Right-click a workspace tab → **Rename workspace**: the tab turns into a field with the
+    name selected; **Enter** (or clicking away) saves, **Escape** cancels. A name another
+    workspace has is refused. Its overview summary and orchestration keep following it.
+  - Right-click a workspace tab → **Color**: pick one of the palette's swatches, or any color
+    in the picker below them.
   - Right-click a workspace tab → **Delete workspace** (asks first, unless turned off in
     Settings; the sessions themselves are untouched).
   - A session belongs to at most one workspace; "All sessions" always shows everything.

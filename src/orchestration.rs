@@ -151,6 +151,13 @@ impl Store {
         self.0.entry(name.to_owned()).or_default()
     }
 
+    /// Keeps a renamed workspace's entry under its new name.
+    pub fn rename(&mut self, old: &str, new: &str) {
+        if let Some(v) = self.0.remove(old) {
+            self.0.insert(new.to_owned(), v);
+        }
+    }
+
     pub fn clear(&mut self, name: &str) {
         self.0.remove(name);
     }

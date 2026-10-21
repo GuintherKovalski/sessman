@@ -212,3 +212,30 @@ fn deleting_a_workspace_left_of_the_open_one_keeps_that_one_open() {
     assert!(s.sees("beta prompt"));
     assert!(!s.sees("alpha prompt"));
 }
+
+#[test]
+fn a_workspace_is_renamed_from_its_tab_and_keeps_its_overview() {
+    let mut s = setup()
+        .session(session("s-a", "alpha prompt", 100))
+        .workspaces(&[("Work", &["s-a"]), ("Other", &[])])
+        .config("overview.json", json!({"Work": {"purpose": "p", "now": "n", "heading": "h", "tickets": [], "made": 1, "newest": 1}}))
+        .launch();
+    s.right_click_first("Work");
+    s.click("Rename workspace");
+    s.type_in("workspace-rename", "Job");
+    s.press(Key::Escape);
+    assert_eq!(names(&s), vec!["Work", "Other"], "Escape cancels");
+    s.right_click_first("Work");
+    s.click("Rename workspace");
+    s.type_in("workspace-rename", "Job");
+    s.press(Key::Enter);
+    assert_eq!(names(&s), vec!["Job", "Other"]);
+    assert_eq!(members(&s, "Job"), vec!["s-a"]);
+    let overviews = s.env.config_json("overview.json");
+    assert!(overviews.get("Job").is_some() && overviews.get("Work").is_none(), "the summary follows: {overviews}");
+    s.right_click_first("Job");
+    s.click("Rename workspace");
+    s.type_in("workspace-rename", "other");
+    s.press(Key::Enter);
+    assert_eq!(names(&s), vec!["Job", "Other"], "a name already taken is refused");
+}

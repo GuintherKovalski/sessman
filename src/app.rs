@@ -48,6 +48,8 @@ enum Action {
     /// Ask to move these sessions to the Trash.
     Trash(Vec<String>),
     DeleteWorkspace(usize),
+    RenameWorkspace(usize, String),
+    ColorWorkspace(usize, [u8; 3]),
     Rename(String, String),
     CancelRename,
     /// Back to a new session whose first prompt is running (it isn't on disk yet).
@@ -88,6 +90,8 @@ pub struct App {
     tab: Option<usize>,
     /// Some while the "+" name field is open.
     new_workspace: Option<String>,
+    /// Workspace whose tab is being renamed in place, as in `Renaming`.
+    workspace_rename: Option<(usize, String, bool)>,
     /// Workspace waiting for "Delete?" to be confirmed.
     confirm_delete: Option<usize>,
     /// Sessions picked with Shift/Cmd-click or a drawn box, to move or delete together.
@@ -318,6 +322,7 @@ impl App {
             workspaces: Workspaces::load(&Workspaces::path()),
             tab: None,
             new_workspace: None,
+            workspace_rename: None,
             confirm_delete: None,
             picked: HashSet::new(),
             pick_anchor: None,
@@ -503,9 +508,42 @@ impl App {
             Action::CancelRename => self.renaming = None,
             Action::DeleteWorkspace(w) if self.settings.confirm_delete_workspace => self.confirm_delete = Some(w),
             Action::DeleteWorkspace(w) => self.delete_workspace(w),
+            Action::RenameWorkspace(w, name) => self.rename_workspace(w, &name),
+            Action::ColorWorkspace(w, c) => {
+                if let Some(w) = self.sync_workspaces(Some(w)) {
+                    self.workspaces.set_color(w, c);
+                    self.save_workspaces();
+                }
+            }
             Action::OpenPending(id) => self.open_pending(&id),
             Action::Orchestrate => self.show_orchestration(),
         }
+    }
+
+    /// Renames a workspace, its overview summary and orchestration following it.
+    fn rename_workspace(&mut self, w: usize, name: &str) {
+        self.workspace_rename = None;
+        // Escape, or a name cleared: nothing changes.
+        if name.trim().is_empty() {
+            return;
+        }
+        let Some(w) = self.sync_workspaces(Some(w)) else { return };
+        let old = self.workspaces.list[w].name.clone();
+        if let Err(e) = self.workspaces.rename(w, name) {
+            self.error = Some(format!("could not rename workspace: {e}"));
+            return;
+        }
+        self.save_workspaces();
+        let new = self.workspaces.list[w].name.clone();
+        if new == old {
+            return;
+        }
+        self.overviews.rename(&old, &new);
+        if let Err(e) = self.overviews.save(&Overviews::path()) {
+            self.error = Some(format!("could not save overviews: {e}"));
+        }
+        self.orchestrations.rename(&old, &new);
+        self.save_orchestrations();
     }
 
     fn delete_workspace(&mut self, w: usize) {
@@ -1994,6 +2032,10 @@ impl App {
                 actions.push(Action::Tab(None));
             }
             for (w, ws) in self.workspaces.list.iter().enumerate() {
+                if let Some((_, text, fresh)) = self.workspace_rename.as_mut().filter(|r| r.0 == w) {
+                    workspace_rename_field(ui, w, text, fresh, actions);
+                    continue;
+                }
                 let bg = ui.painter().add(egui::Shape::Noop);
                 let tab = ui.selectable_label(self.tab == Some(w), &ws.name);
                 if let Some(c) = ws.color {
@@ -2012,6 +2054,14 @@ impl App {
                     actions.push(Action::MoveTo((*ids).clone(), w));
                 }
                 tab.context_menu(|ui| {
+                    if ui.button("Rename workspace").clicked() {
+                        self.workspace_rename = Some((w, ws.name.clone(), true));
+                    }
+                    ui.menu_button("Color", |ui| {
+                        if let Some(c) = color_menu(ui, ws.color.unwrap_or([128, 128, 128])) {
+                            actions.push(Action::ColorWorkspace(w, c));
+                        }
+                    });
                     if ui.button("Delete workspace").clicked() {
                         actions.push(Action::DeleteWorkspace(w));
                     }
@@ -3437,6 +3487,52 @@ fn message(ui: &mut egui::Ui, cache: &mut CommonMarkCache, m: &session::Message,
     let stripe = egui::Rect::from_min_max(r.min, egui::pos2(r.left() + 3.0, r.bottom()));
     ui.painter().rect_filled(stripe, egui::CornerRadius { nw: 6, sw: 6, ne: 0, se: 0 }, accent);
     ui.add_space(6.0);
+}
+
+/// Editable name in place of a workspace tab. Enter or clicking away saves; Escape cancels.
+fn workspace_rename_field(ui: &mut egui::Ui, w: usize, text: &mut String, fresh: &mut bool, actions: &mut Vec<Action>) {
+    let id = Id::new("workspace-rename");
+    let width = ui.fonts_mut(|f| f.layout_no_wrap(text.clone(), egui::TextStyle::Button.resolve(ui.style()), Color32::WHITE).size().x);
+    let mut out = egui::TextEdit::singleline(text).id(id).desired_width(width.max(60.0) + 8.0).show(ui);
+    if *fresh {
+        *fresh = false;
+        out.response.request_focus();
+        let all = CCursorRange::two(CCursor::new(0), CCursor::new(text.chars().count()));
+        out.state.cursor.set_char_range(Some(all));
+        out.state.store(ui.ctx(), id);
+    }
+    if out.response.lost_focus() {
+        if ui.input(|i| i.key_pressed(Key::Escape)) {
+            actions.push(Action::RenameWorkspace(w, String::new()));
+        } else {
+            actions.push(Action::RenameWorkspace(w, text.clone()));
+        }
+    }
+}
+
+/// The palette as swatches, then a picker for any color. The color picked, if one was.
+fn color_menu(ui: &mut egui::Ui, current: [u8; 3]) -> Option<[u8; 3]> {
+    let mut picked = None;
+    ui.horizontal(|ui| {
+        ui.spacing_mut().item_spacing.x = 4.0;
+        for c in workspaces::PALETTE {
+            let (rect, resp) = ui.allocate_exact_size(egui::vec2(18.0, 18.0), Sense::click());
+            ui.painter().rect_filled(rect, 3.0, rgb(c));
+            if c == current || resp.hovered() {
+                ui.painter().rect_stroke(rect.expand(2.0), 4.0, Stroke::new(1.5, ui.visuals().text_color()), StrokeKind::Inside);
+            }
+            if resp.clicked() {
+                picked = Some(c);
+                ui.close();
+            }
+        }
+    });
+    ui.separator();
+    let mut c = rgb(current);
+    if egui::widgets::color_picker::color_picker_color32(ui, &mut c, egui::widgets::color_picker::Alpha::Opaque) {
+        picked = Some([c.r(), c.g(), c.b()]);
+    }
+    picked
 }
 
 /// Editable name in place of a session row. Enter or clicking away saves; Escape cancels.
