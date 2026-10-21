@@ -69,6 +69,9 @@ pub struct Settings {
     /// Minutes between automatic orchestration updates while there is new activity; 0 = only
     /// when asked.
     pub orchestration_every: u32,
+    /// Hours without activity after which the overview shows a session in red and offers to
+    /// finish it; 0 = never.
+    pub stale_after_hours: u32,
 }
 
 impl Default for Settings {
@@ -99,6 +102,7 @@ impl Default for Settings {
             search_harness: crate::search::DEFAULT_HARNESS.into(),
             orchestration_model: String::new(),
             orchestration_every: 10,
+            stale_after_hours: 24,
         }
     }
 }
@@ -317,6 +321,12 @@ pub fn ui(ui: &mut egui::Ui, s: &mut Settings, filter: &mut String, about: &Abou
                 s.jira_url = defaults.jira_url.clone();
             }
             ui.add(egui::TextEdit::singleline(&mut s.jira_url).hint_text("https://…atlassian.net").desired_width(260.0));
+        });
+        page.row("Offer to finish sessions idle for (hours)", "Their last interaction shows in red, with Finish session to take them out of the workspace; 0 = never", s.stale_after_hours != defaults.stale_after_hours, |ui, reset| {
+            if reset {
+                s.stale_after_hours = defaults.stale_after_hours;
+            }
+            ui.add(egui::Slider::new(&mut s.stale_after_hours, 0..=168));
         });
 
         page.section("Harness");

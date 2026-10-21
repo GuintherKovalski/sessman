@@ -218,7 +218,7 @@ fn a_workspace_is_renamed_from_its_tab_and_keeps_its_overview() {
     let mut s = setup()
         .session(session("s-a", "alpha prompt", 100))
         .workspaces(&[("Work", &["s-a"]), ("Other", &[])])
-        .config("overview.json", json!({"Work": {"purpose": "p", "now": "n", "heading": "h", "tickets": [], "made": 1, "newest": 1}}))
+        .config("overview.json", json!({"Work": {"scope": "s", "sessions": {}, "tickets": [], "made": 1, "newest": 1}}))
         .launch();
     s.right_click_first("Work");
     s.click("Rename workspace");
