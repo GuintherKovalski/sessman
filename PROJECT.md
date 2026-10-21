@@ -74,17 +74,23 @@ it to zoom.
 In "All sessions", the main area shows an overview of the workspaces until a session is
 opened; clicking "All sessions" again comes back to it.
 - One card per workspace, in its tab's color (a dot by the name, a stripe down the left
-  edge, a light tint). Its header shows how many sessions it has, how recent the latest
-  activity is, a spinner while Claude works in one, and queued prompts. Click the name to
-  open the workspace.
-- Under it: the folder and git branch, then what the helper model made of its 8 newest
-  sessions: **Purpose** (why the work exists), **Now** (what is being done most recently)
-  and **Heading** (the end state it works towards), plus up to 3 Jira tickets, epics and
-  parent tickets first. Only keys that really appear in the sessions or the branch are kept;
-  with a Jira URL in Settings they link to the ticket.
-- Summaries are kept in `~/.config/scope/overview.json` and are written when missing, or
-  again when there was activity since and they are at least 30 min old (up to 3 at a time).
-  **↻** on a card, or **↻ Refresh all**, writes them again now.
+  edge, a light tint). Click the name to open the workspace. Under it, its **scope of work**
+  in one short sentence, and up to 3 Jira tickets, epics and parent tickets first (only keys
+  that really appear in the sessions or the branch; with a Jira URL in Settings they link to
+  the ticket).
+- Then **every session** of the workspace, strictly newest first. Each shows its name, what
+  it is doing, and, in yellow (⚠), any decision or action it needs from you. At its bottom
+  right: `last interaction 5 min ago`, or a spinner while Claude works in it.
+- A session with no activity for 24 hours (Settings → Overview, 0 = never) shows that time in
+  red, with **Finish session**: it leaves the workspace (the session itself is kept).
+- A session whose run ended after you last had it open is outlined in green and marked
+  **✓ Finished** (it is not moved: the order stays newest first); opening it clears the mark.
+  What was last seen is kept in `state.json`.
+- Click a session to open it, in its workspace's tab.
+- What the helper model made of each workspace is kept in `~/.config/scope/overview.json`.
+  It is written when missing, then again (a few minutes apart at most) for the sessions with
+  activity it hasn't seen once their run is over, up to 10 at a time; it keeps what it said of
+  the others. **↻** on a card, or **↻ Refresh all**, asks now.
 
 ### Workspace orchestration
 - In a workspace tab, the first bubble in the list is the workspace itself: **Orchestration**,

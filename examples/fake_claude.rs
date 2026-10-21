@@ -178,7 +178,7 @@ fn helper(fake: &Path, args: &[String], prompt: &str) -> i32 {
             json!({"prompt": format!("Refined: {text}")}).to_string()
         }
         "search" => "1: fake reason".to_owned(),
-        "overview" => json!({"purpose": "Fake purpose", "now": "Fake now", "heading": "Fake heading", "tickets": []}).to_string(),
+        "overview" => json!({"scope": "Fake scope", "sessions": [{"n": 1, "doing": "Fake doing", "needs": "Fake decision"}], "tickets": []}).to_string(),
         "orchestration" => json!({
             "progress": 42,
             "summary": "Fake summary of [[1]]",

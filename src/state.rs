@@ -65,6 +65,10 @@ pub struct State {
     pub search: String,
     pub prompt_height: Option<f32>,
     pub prompt_collapsed: bool,
+    /// Session id → its newest change when it was last open (Unix seconds), and since when
+    /// this is kept: what the overview marks as finished and not yet looked at.
+    pub seen: HashMap<String, u64>,
+    pub seen_from: u64,
 }
 
 pub fn path() -> PathBuf {
@@ -105,6 +109,7 @@ impl State {
     pub fn prune(&mut self, exists: impl Fn(&str) -> bool) {
         self.views.retain(|k, _| k.starts_with("new:") || exists(k));
         self.queues.retain(|k, _| exists(k));
+        self.seen.retain(|k, _| exists(k));
         if self.open.as_deref().is_some_and(|id| !exists(id)) {
             self.open = None;
         }

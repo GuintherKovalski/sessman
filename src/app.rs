@@ -187,6 +187,11 @@ pub struct App {
     overviews: Overviews,
     overview_jobs: HashMap<String, Receiver<Result<overview::Summary, String>>>,
     overview_errors: HashMap<String, String>,
+    /// Session id → its newest change (Unix seconds) when it was last open, and when scope
+    /// started keeping this (sessions it has never had open count as seen then). A session
+    /// changed since is marked finished in the overview.
+    seen: HashMap<String, u64>,
+    seen_from: u64,
     /// The main area shows the open workspace's orchestration page (with no session open).
     orchestrating: bool,
     /// Each workspace's orchestration report and questions (by name), and those in flight.
@@ -378,6 +383,8 @@ impl App {
             overviews: Overviews::load(&Overviews::path()),
             overview_jobs: HashMap::new(),
             overview_errors: HashMap::new(),
+            seen: HashMap::new(),
+            seen_from: 0,
             orchestrating: false,
             orchestrations: orchestration::Store::load(&orchestration::Store::path()),
             orch: orchestration::Jobs::default(),
@@ -388,8 +395,14 @@ impl App {
         if !app.workspaces.list.is_empty() {
             app.save_workspaces();
         }
+        let mut st = State::load(&state::path());
+        app.seen = std::mem::take(&mut st.seen);
+        app.seen_from = match st.seen_from {
+            0 => overview::secs(SystemTime::now()),
+            t => t,
+        };
         if app.settings.restore_state {
-            app.restore(State::load(&state::path()));
+            app.restore(st);
         }
         app
     }
@@ -431,7 +444,29 @@ impl App {
             search: self.search.clone(),
             prompt_height: self.prompt_height,
             prompt_collapsed: self.prompt_collapsed,
+            seen: self.seen.iter().filter(|(id, _)| self.sessions.iter().any(|s| s.id == **id)).map(|(k, v)| (k.clone(), *v)).collect(),
+            seen_from: self.seen_from,
         }
+    }
+
+    /// The open session counts as seen as it is now, once its run is over.
+    fn mark_seen(&mut self) {
+        if self.new_session.is_some() {
+            return;
+        }
+        let Some(s) = self.selected.and_then(|i| self.sessions.get(i)) else { return };
+        let modified = overview::secs(s.modified);
+        if !self.runs.contains_key(&s.id) && self.seen.get(&s.id).is_none_or(|&t| t < modified) {
+            self.seen.insert(s.id.clone(), modified);
+        }
+    }
+
+    /// Its last run ended after it was last open (or, never open here, after scope started
+    /// keeping track), and it isn't working: it waits to be looked at.
+    fn finished_unseen(&self, i: usize) -> bool {
+        let s = &self.sessions[i];
+        let seen = self.seen.get(&s.id).copied().unwrap_or(self.seen_from);
+        !self.runs.contains_key(&s.id) && overview::secs(s.modified) > seen && self.selected != Some(i)
     }
 
     fn save_state(&mut self) {
@@ -1235,16 +1270,28 @@ impl App {
             return;
         }
         let newest = overview::secs(self.sessions[members[0]].modified);
-        let sources = members
-            .iter()
-            .map(|&i| overview::Source {
-                title: self.title(i).to_owned(),
-                goal: self.goals.get(&self.sessions[i].id).map(str::to_owned),
-                path: self.sessions[i].path.clone(),
-            })
-            .collect();
+        let sources = self.overview_sources(&members);
+        let previous = self.overviews.get(&name).cloned();
         self.overview_errors.remove(&name);
-        self.overview_jobs.insert(name, overview::start(self.ctx.clone(), sources, newest));
+        self.overview_jobs.insert(name, overview::start(self.ctx.clone(), sources, previous, newest));
+    }
+
+    /// Sessions (indices into `sessions`) as the overview summarizer reads them.
+    fn overview_sources(&self, members: &[usize]) -> Vec<overview::Source> {
+        members
+            .iter()
+            .map(|&i| {
+                let s = &self.sessions[i];
+                overview::Source {
+                    id: s.id.clone(),
+                    title: self.title(i).to_owned(),
+                    goal: self.goals.get(&s.id).map(str::to_owned),
+                    path: s.path.clone(),
+                    modified: overview::secs(s.modified),
+                    running: self.runs.contains_key(&s.id),
+                }
+            })
+            .collect()
     }
 
     /// The overview in the main area. Missing or stale summaries are written as it shows,
@@ -1255,14 +1302,13 @@ impl App {
         let members: Vec<Vec<usize>> = (0..self.workspaces.list.len()).map(|w| self.workspace_sessions(w)).collect();
         for (w, m) in members.iter().enumerate() {
             let name = &self.workspaces.list[w].name;
-            let newest = m.first().map_or(0, |&i| overview::secs(self.sessions[i].modified));
-            let wanted = !m.is_empty()
-                && !self.overview_errors.contains_key(name)
-                && overview::needs_summary(self.overviews.get(name), newest, now);
+            let wanted = !self.overview_errors.contains_key(name) && overview::needs_summary(self.overviews.get(name), &self.overview_sources(m), now);
             if wanted && self.overview_jobs.len() < AT_ONCE {
                 self.summarize_workspace(w);
             }
         }
+        // Checked again every minute, for "last interaction" and summaries to bring up to date.
+        ui.ctx().request_repaint_after(std::time::Duration::from_secs(60));
         let cards: Vec<overview::Card> = self
             .workspaces
             .list
@@ -1270,13 +1316,27 @@ impl App {
             .zip(&members)
             .map(|(ws, m)| {
                 let ids = || m.iter().map(|&i| &self.sessions[i].id);
+                let rows = m
+                    .iter()
+                    .map(|&i| {
+                        let s = &self.sessions[i];
+                        overview::Row {
+                            id: &s.id,
+                            title: self.title(i),
+                            modified: overview::secs(s.modified),
+                            running: self.runs.contains_key(&s.id),
+                            tool: self.runs.get(&s.id).and_then(|r| r.tool.as_deref()),
+                            queued: self.queues.get(&s.id).map_or(0, |q| q.items.len()),
+                            finished: self.finished_unseen(i),
+                        }
+                    })
+                    .collect();
                 overview::Card {
                     name: &ws.name,
                     color: ws.color.unwrap_or([128, 128, 128]),
-                    sessions: m.len(),
                     running: ids().filter(|id| self.runs.contains_key(*id)).count(),
                     queued: ids().filter_map(|id| self.queues.get(id)).map(|q| q.items.len()).sum(),
-                    newest: m.first().map_or(0, |&i| overview::secs(self.sessions[i].modified)),
+                    rows,
                     summary: self.overviews.get(&ws.name),
                     busy: self.overview_jobs.contains_key(&ws.name),
                     error: self.overview_errors.get(&ws.name).map(String::as_str),
@@ -1285,9 +1345,17 @@ impl App {
             .collect();
         let grouped: HashSet<&String> = self.workspaces.list.iter().flat_map(|w| &w.sessions).collect();
         let loose = self.sessions.iter().filter(|s| !grouped.contains(&s.id)).count();
-        let event = overview::ui(ui, &cards, loose, &self.settings.jira_url);
+        let opts = overview::Options { loose, jira_url: &self.settings.jira_url, stale_after: u64::from(self.settings.stale_after_hours) * 3600 };
+        let event = overview::ui(ui, &cards, &opts);
         match event {
             Some(overview::Event::Open(w)) => self.switch_tab(Some(w)),
+            Some(overview::Event::OpenSession(w, id)) => {
+                if let Some(i) = self.sessions.iter().position(|s| s.id == id) {
+                    self.tab = Some(w);
+                    self.apply(Action::Select(i));
+                }
+            }
+            Some(overview::Event::Finish(id)) => self.apply(Action::Remove(vec![id])),
             Some(overview::Event::Refresh(w)) => self.summarize_workspace(w),
             Some(overview::Event::RefreshAll) => {
                 for w in 0..self.workspaces.list.len() {
@@ -3689,6 +3757,7 @@ impl eframe::App for App {
         self.poll_runner();
         self.poll_summary();
         self.poll_overviews();
+        self.mark_seen();
         self.poll_orchestration();
         self.poll_control();
         self.poll_btw();
