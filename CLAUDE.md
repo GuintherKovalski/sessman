@@ -3,6 +3,23 @@
 scope is the IDE you are probably running in. Read [PROJECT.md](PROJECT.md) for how it is
 built and [ROADMAP.md](ROADMAP.md) for what comes next.
 
+## Branches: feature -> stage -> tests pass -> main
+
+Never commit on `main` or `stage`. Every change goes:
+
+```sh
+scripts/flow.sh new <name>   # feature/<name>, made from origin/stage
+# ...commit there...
+scripts/flow.sh ship         # cargo test, merge into stage, push stage
+```
+
+CI (`.github/workflows/ci.yml`) runs the tests on every push to stage and, when they pass,
+fast-forwards `main` to it. Nobody pushes `main`. The hooks in `.githooks` refuse commits on
+main/stage, pushes to main, direct commits pushed to stage, and pushing branches not named
+`feature/*`; a fresh clone installs them with `scripts/flow.sh setup`. (The repo is private on
+a free plan, so GitHub can't protect the branches itself; CI flags a push to main that skipped
+stage, and refuses pull requests that don't go feature/* -> stage.)
+
 ## Testing changes: always in a new instance, never the running one
 
 The Claude sessions scope runs, this one most likely included, are child processes of the

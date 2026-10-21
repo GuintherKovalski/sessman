@@ -1,0 +1,9 @@
+#!/bin/sh
+# No commits straight on main or stage: work goes on a feature/* branch made from stage
+# (scripts/flow.sh new <name>). Merges into stage don't run this hook.
+branch=$(git symbolic-ref --short -q HEAD)
+case "$branch" in
+main|stage)
+    echo "refused: no commits on $branch. Start a feature branch from stage: scripts/flow.sh new <name>" >&2
+    exit 1 ;;
+esac
