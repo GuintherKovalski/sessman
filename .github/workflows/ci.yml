@@ -1,0 +1,77 @@
+# The road every change takes: feature/* -> stage -> tests pass -> main.
+#
+# - A pull request into stage must come from a feature/* branch; one into main is refused
+#   (main only moves by the promote job below).
+# - Every push to stage runs the test suite; when it passes, main is fast-forwarded to
+#   that commit. main is never pushed to by hand.
+# - A push to main that is not a commit stage already has fails the "guard" job, so a
+#   change that skipped the road shows up red on main.
+name: ci
+
+on:
+  push:
+    branches: [stage, main]
+  pull_request:
+    branches: [stage, main]
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/stage' }}
+
+jobs:
+  route:
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check the pull request follows feature -> stage -> main
+        env:
+          HEAD: ${{ github.head_ref }}
+          BASE: ${{ github.base_ref }}
+        run: |
+          case "$BASE:$HEAD" in
+            stage:feature/*) echo "ok: $HEAD -> stage" ;;
+            main:*) echo "::error::main only moves when stage passes the tests; open the pull request into stage"; exit 1 ;;
+            *) echo "::error::$HEAD -> $BASE: changes reach stage from a feature/* branch made from stage"; exit 1 ;;
+          esac
+
+  guard:
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Check main only holds commits stage has
+        run: |
+          if ! git merge-base --is-ancestor "$GITHUB_SHA" origin/stage; then
+            echo "::error::main got $GITHUB_SHA, which stage does not have: it skipped feature -> stage -> tests"
+            exit 1
+          fi
+
+  test:
+    if: github.ref != 'refs/heads/main'
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo test
+
+  promote:
+    needs: test
+    if: github.event_name == 'push' && github.ref == 'refs/heads/stage'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Fast-forward main to the tested stage commit
+        run: |
+          git fetch origin main
+          if ! git merge-base --is-ancestor origin/main "$GITHUB_SHA"; then
+            echo "::error::main has commits stage lacks; it can't be fast-forwarded. Bring them into stage through a feature branch."
+            exit 1
+          fi
+          git push origin "$GITHUB_SHA:refs/heads/main"
