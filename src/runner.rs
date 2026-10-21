@@ -155,7 +155,8 @@ pub struct Stop(Arc<Mutex<Option<u32>>>);
 impl Stop {
     pub fn stop(&self) {
         let Some(pid) = *self.0.lock().unwrap() else { return };
-        let group = -(pid as i32);
+        // Runs scope starts lead their own group; one started in a terminal may not.
+        let group = if unsafe { libc::getpgid(pid as i32) } == pid as i32 { -(pid as i32) } else { pid as i32 };
         unsafe { libc::kill(group, libc::SIGINT) };
         let me = self.clone();
         std::thread::spawn(move || {
@@ -267,6 +268,112 @@ fn event(v: &Value) -> Option<RunEvent> {
         }
         _ => None,
     }
+}
+
+/// Prompt runs (`claude -p` on a session) this scope did not start, as (session id, pid): a
+/// scope that has quit leaves its runs going (`claude` finishes and saves its reply without
+/// anyone reading it), and another scope or a terminal can start them too.
+fn foreign_runs() -> Vec<(String, u32)> {
+    let out = Command::new("ps").args(["-axww", "-o", "pid=,ppid=,args="]).stdin(Stdio::null()).output();
+    out.map(|o| parse_ps(&String::from_utf8_lossy(&o.stdout), std::process::id())).unwrap_or_default()
+}
+
+/// [`foreign_runs`] in `ps -o pid=,ppid=,args=` output; `me` is this scope (its own runs are
+/// its children). Side questions (`--fork-session`, nothing saved) don't count.
+fn parse_ps(text: &str, me: u32) -> Vec<(String, u32)> {
+    let is_uuid = |s: &str| s.len() == 36 && s.chars().all(|c| c.is_ascii_hexdigit() || c == '-');
+    text.lines()
+        .filter_map(|line| {
+            let mut t = line.split_whitespace();
+            let pid: u32 = t.next()?.parse().ok()?;
+            let ppid: u32 = t.next()?.parse().ok()?;
+            let args: Vec<&str> = t.collect();
+            let claude = args.iter().take(2).any(|a| a.contains("claude"));
+            let print = args.iter().any(|a| matches!(*a, "-p" | "--print"));
+            let side = args.iter().any(|a| matches!(*a, "--fork-session" | "--no-session-persistence"));
+            if ppid == me || !claude || !print || side {
+                return None;
+            }
+            let id = args.windows(2).find(|w| matches!(w[0], "--resume" | "-r" | "--session-id"))?[1];
+            is_uuid(id).then(|| (id.to_owned(), pid))
+        })
+        .collect()
+}
+
+/// Checks for [`foreign_runs`] every 2 s, sending the list each time it changes.
+pub fn watch_runs(ctx: eframe::egui::Context) -> Receiver<Vec<(String, u32)>> {
+    let (tx, rx) = channel();
+    std::thread::spawn(move || {
+        let mut last = None;
+        loop {
+            let runs = foreign_runs();
+            if last.as_ref() != Some(&runs) {
+                if tx.send(runs.clone()).is_err() {
+                    return;
+                }
+                ctx.request_repaint();
+                last = Some(runs);
+            }
+            std::thread::sleep(std::time::Duration::from_secs(2));
+        }
+    });
+    rx
+}
+
+fn alive(pid: u32) -> bool {
+    let ok = unsafe { libc::kill(pid as i32, 0) } == 0;
+    ok || std::io::Error::last_os_error().raw_os_error() == Some(libc::EPERM)
+}
+
+/// Follows a run this scope did not start (see [`foreign_runs`]) through its session file,
+/// from the file's current end until process `pid` ends. Claude saves each step whole, so
+/// there are no `Delta`s; Stop signals the process like one of scope's own runs.
+pub fn follow(ctx: eframe::egui::Context, pid: u32, file: PathBuf) -> (Receiver<RunEvent>, Stop) {
+    let stop = Stop(Arc::new(Mutex::new(Some(pid))));
+    let me = stop.clone();
+    let (tx, rx) = channel();
+    std::thread::spawn(move || {
+        let mut pos = std::fs::metadata(&file).map_or(0, |m| m.len());
+        loop {
+            // Checked before reading, so the lines written just before it ended are read too.
+            let running = alive(pid);
+            pos = read_lines(&file, pos, |v| {
+                if matches!(v["type"].as_str(), Some("assistant" | "user")) && v["isSidechain"].as_bool() != Some(true) {
+                    let _ = tx.send(RunEvent::Line(v));
+                    ctx.request_repaint();
+                }
+            });
+            if !running {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(200));
+        }
+        *me.0.lock().unwrap() = None;
+        let _ = tx.send(RunEvent::Done(Ok(())));
+        ctx.request_repaint();
+    });
+    (rx, stop)
+}
+
+/// The complete lines of `file` after byte `pos`, parsed; returns where the next read starts
+/// (a line still being written is read next time).
+fn read_lines(file: &Path, pos: u64, mut each: impl FnMut(Value)) -> u64 {
+    use std::io::{Seek, SeekFrom};
+    let mut buf = Vec::new();
+    let read = std::fs::File::open(file).and_then(|mut f| {
+        f.seek(SeekFrom::Start(pos))?;
+        f.read_to_end(&mut buf)
+    });
+    if read.is_err() {
+        return pos;
+    }
+    let Some(end) = buf.iter().rposition(|&b| b == b'\n') else { return pos };
+    for line in buf[..end].split(|&b| b == b'\n') {
+        if let Ok(v) = serde_json::from_slice::<Value>(line) {
+            each(v);
+        }
+    }
+    pos + end as u64 + 1
 }
 
 /// A side question with the session's full context, like Claude Code's /btw: the session is
@@ -425,6 +532,43 @@ mod tests {
         let c = Claude::from_settings(&s);
         assert_eq!(c.bin, "claude");
         assert_eq!(c.extra, ["--permission-mode", "acceptEdits"]);
+    }
+
+    #[test]
+    fn foreign_runs_are_prompt_runs_this_scope_did_not_start() {
+        let id = "e2b80fff-329c-4904-92c2-9a3c6afe53c5";
+        let ps = format!(
+            "  101     1 claude -p --resume {id} --output-format stream-json --verbose do it\n\
+               102    50 claude -p --resume {id} mine\n\
+               103     1 claude -p --resume {id} --fork-session --no-session-persistence side\n\
+               104     1 claude --resume {id}\n\
+               105     1 node /x/claude-code/cli.js --print --session-id {id} new one\n\
+               106     1 vim -p --resume {id}\n\
+               107     1 claude -p --resume not-an-id\n"
+        );
+        assert_eq!(parse_ps(&ps, 50), [(id.to_owned(), 101), (id.to_owned(), 105)]);
+    }
+
+    /// A run another scope started: its saved lines arrive, then Done when its process ends.
+    #[test]
+    fn follow_reads_a_foreign_run_until_its_process_ends() {
+        let dir = std::env::temp_dir().join(format!("scope-follow-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("s.jsonl");
+        std::fs::write(&file, "{\"type\":\"user\",\"message\":{\"content\":\"before\"}}\n").unwrap();
+        let mut child = Command::new("sleep").arg("30").spawn().unwrap();
+        let (rx, stop) = follow(eframe::egui::Context::default(), child.id(), file.clone());
+        std::thread::sleep(std::time::Duration::from_millis(300));
+        let mut f = std::fs::OpenOptions::new().append(true).open(&file).unwrap();
+        use std::io::Write;
+        write!(f, "{{\"type\":\"assistant\",\"message\":{{\"content\":[]}}}}\n{{\"type\":\"assistant\",\"isSidechain\":true}}\n{{\"type\":\"user\",\"mess").unwrap();
+        let wait = std::time::Duration::from_secs(5);
+        let line = rx.recv_timeout(wait).expect("the new line");
+        assert!(matches!(line, RunEvent::Line(v) if v["type"] == "assistant"), "only what was written after it started");
+        stop.stop();
+        let _ = child.wait();
+        assert!(matches!(rx.recv_timeout(wait), Ok(RunEvent::Done(Ok(())))), "half a line and sub-agent steps are skipped");
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     /// Regression: Ctrl+C must end a run at once, children included, not when it finishes.

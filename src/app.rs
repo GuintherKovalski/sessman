@@ -169,6 +169,8 @@ pub struct App {
     /// Background indexer: fresh session lists + content index, and a channel to poke it.
     snapshots: Receiver<search::Snapshot>,
     poke_index: std::sync::mpsc::Sender<()>,
+    /// Prompt runs this scope did not start (see `runner::watch_runs`): session id, pid.
+    foreign_runs: Receiver<Vec<(String, u32)>>,
     index: search::Index,
     /// Bumped on every snapshot, so cached search hits know when they're stale.
     generation: u64,
@@ -365,6 +367,7 @@ impl App {
             mic_levels: std::collections::VecDeque::new(),
             snapshots,
             poke_index,
+            foreign_runs: runner::watch_runs(ctx.clone()),
             index: search::Index::new(),
             generation: 0,
             search: String::new(),
@@ -1469,6 +1472,27 @@ impl App {
         }
         let (rx, stop) = runner::send(self.ctx.clone(), id.clone(), cwd.clone(), prompt.clone(), new);
         self.runs.insert(id, Run { rx, live: String::new(), tool: None, new, cwd, prompt, stop, poked: false });
+    }
+
+    /// Takes in prompt runs this scope did not start, such as the ones still going from before a
+    /// restart: they show as working, their steps arrive as Claude saves them, and Stop, the
+    /// queue and notifications work as for scope's own runs.
+    fn adopt_runs(&mut self) {
+        let Some(found) = self.foreign_runs.try_iter().last() else { return };
+        for (id, pid) in found {
+            if self.runs.contains_key(&id) {
+                continue;
+            }
+            let Some(path) = self.sessions.iter().find(|s| s.id == id).map(|s| s.path.clone()) else { continue };
+            let s = session::load(&path).unwrap_or_default();
+            let prompt = s.prompts.last().cloned().unwrap_or_default();
+            let (rx, stop) = runner::follow(self.ctx.clone(), pid, path);
+            self.runs.insert(id.clone(), Run { rx, live: String::new(), tool: None, new: false, cwd: s.cwd, prompt, stop, poked: false });
+            // Following starts at the file's end: the open copy catches up to it first.
+            if self.new_session.is_none() && self.open_id() == Some(id) {
+                self.reload();
+            }
+        }
     }
 
     /// Ctrl+C / Stop: ends the open session's run at once.
@@ -3661,6 +3685,7 @@ impl eframe::App for App {
     /// Before every frame, and also while the window is hidden (behind others or minimized),
     /// when eframe draws nothing: runs, answers and commands keep being taken.
     fn logic(&mut self, _ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        self.adopt_runs();
         self.poll_runner();
         self.poll_summary();
         self.poll_overviews();

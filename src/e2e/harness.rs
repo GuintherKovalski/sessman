@@ -124,6 +124,21 @@ impl Env {
     }
 
     /// The session file of `id`, wherever its project is.
+    /// Starts a prompt run on session `id` the way a scope that has since quit left it: not a
+    /// child of the app (`sh` starts it and exits), so the app finds it like any other run.
+    pub fn run_outside(&self, id: &str, prompt: &str) {
+        let script = r#""$0" -p --resume "$1" --output-format stream-json --verbose "$2" >/dev/null 2>&1 &"#;
+        let status = std::process::Command::new("sh")
+            .args(["-c", script])
+            .arg(fake_claude())
+            .args([id, prompt])
+            .current_dir(&self.proj)
+            .env("HOME", &self.home)
+            .status()
+            .unwrap();
+        assert!(status.success());
+    }
+
     pub fn session_file(&self, id: &str) -> Option<PathBuf> {
         std::fs::read_dir(self.projects()).ok()?.flatten().map(|p| p.path().join(format!("{id}.jsonl"))).find(|p| p.exists())
     }

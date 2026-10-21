@@ -224,13 +224,15 @@ work now. Item 13 is planned.
   change ends every running session, including the one making the change. For now changes are
   tested in a separate instance (`scripts/test-instance.sh`, see CLAUDE.md), and the developer
   restarts their own scope by hand to take them.
-- **Runs outlive the app.** Start each run detached from the app: a small
-  `scope run <id> …` wrapper in its own session (`setsid`) that runs `claude -p` and appends
-  its stream-json lines to `~/.config/scope/runs/<id>.jsonl`, with its pid in
-  `runs/<id>.pid`. The app tails that file instead of a pipe (the same events as today), and
-  Stop signals the pid's process group. On start, scope re-attaches to every run whose pid is
-  still alive and reads what it missed from the file; runs whose process is gone end as they do
-  now (queued prompts go on).
+- **Runs outlive the app** (done). It turned out they already did: `claude -p` keeps going
+  and saves its whole reply when the app reading its output quits; scope only lost track of
+  them. Now scope finds every `claude -p` on a listed session that isn't its own child (`ps`
+  every 2 s) and follows it through the session file until its process ends, with Stop and the
+  queue working on it (PROJECT.md, "Runs scope did not start"). What a restart still loses:
+  the letter-by-letter text of a reply in progress (it arrives a step at a time instead), and
+  restored queues come back paused. If that matters, the next step is the `runs/<id>.jsonl`
+  output file: runs write their stream-json there instead of a pipe, and a restarted scope
+  tails it.
 - **Restart in place.** With runs detached and the state already restored on start (item 8),
   a restart loses nothing. scope watches its own binary (`std::env::current_exe()`): when a
   new build or bundle replaces it, a quiet **Restart to update** button appears in the top bar
@@ -242,5 +244,5 @@ work now. Item 13 is planned.
   sees its change live in the IDE it runs in.
 - Not planned: hot-reloading UI code into the running process (dylib reloading). It is fragile
   with egui's state and saves only the second or two a restart takes.
-- Until this is done, CLAUDE.md's rule stands: every test runs in a new instance of the IDE,
-  never the running one.
+- Until restart-in-place is done, CLAUDE.md's rule stands: every test runs in a new instance
+  of the IDE, never the running one.
