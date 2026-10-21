@@ -379,6 +379,8 @@ pub fn last_interaction(then: u64, now: u64) -> String {
 
 /// One workspace as the overview shows it.
 pub struct Card<'a> {
+    /// Its index among the workspaces (cards are not in their tabs' order).
+    pub w: usize,
     pub name: &'a str,
     pub color: [u8; 3],
     pub running: usize,
@@ -422,6 +424,13 @@ pub struct Options<'a> {
     pub stale_after: u64,
 }
 
+/// Cards in the order the overview shows them: the workspace whose session went idle most
+/// recently first (sessions still working don't count); those with none idle last.
+pub fn sort(cards: &mut [Card]) {
+    let idle = |c: &Card| c.rows.iter().filter(|r| !r.running).map(|r| r.modified).max().unwrap_or(0);
+    cards.sort_by_key(|c| std::cmp::Reverse(idle(c)));
+}
+
 /// The whole overview: a header with totals, then the cards in as many columns as fit.
 pub fn ui(ui: &mut egui::Ui, cards: &[Card], opts: &Options) -> Option<Event> {
     let mut event = None;
@@ -457,8 +466,8 @@ pub fn ui(ui: &mut egui::Ui, cards: &[Card], opts: &Options) -> Option<Event> {
     egui::ScrollArea::vertical().id_salt("overview").auto_shrink(false).show(ui, |ui| {
         let columns = ((ui.available_width() / 460.0) as usize).clamp(1, 2);
         ui.columns(columns, |cols| {
-            for (w, card) in cards.iter().enumerate() {
-                if let Some(e) = card_ui(&mut cols[w % columns], w, card, now, opts) {
+            for (k, card) in cards.iter().enumerate() {
+                if let Some(e) = card_ui(&mut cols[k % columns], card.w, card, now, opts) {
                     event = Some(e);
                 }
             }
@@ -710,6 +719,15 @@ mod tests {
         let r = request("S", Some("Old scope"), Some("feat/PAY-1"), &["PAY-1".into()], &[1, 3]);
         assert!(r.contains("Jira keys mentioned: PAY-1") && r.contains("branch: feat/PAY-1") && r.ends_with("S"));
         assert!(r.contains("only these sessions, whose conversation is shown: 1, 3.") && r.contains("before (keep it unless the work has changed): Old scope"));
+    }
+
+    #[test]
+    fn workspaces_are_sorted_by_their_latest_idle_session() {
+        let row = |modified, running| Row { id: "x", title: "x", modified, running, tool: None, queued: 0, finished: false };
+        let card = |w, rows| Card { w, name: "n", color: [0; 3], running: 0, queued: 0, rows, summary: None, busy: false, error: None };
+        let mut cards = vec![card(0, vec![row(100, false)]), card(1, vec![row(900, true), row(50, false)]), card(2, vec![]), card(3, vec![row(300, false)])];
+        sort(&mut cards);
+        assert_eq!(cards.iter().map(|c| c.w).collect::<Vec<_>>(), [3, 0, 1, 2], "a working session doesn't count");
     }
 
     #[test]

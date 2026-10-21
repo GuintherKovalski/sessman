@@ -1309,12 +1309,13 @@ impl App {
         }
         // Checked again every minute, for "last interaction" and summaries to bring up to date.
         ui.ctx().request_repaint_after(std::time::Duration::from_secs(60));
-        let cards: Vec<overview::Card> = self
+        let mut cards: Vec<overview::Card> = self
             .workspaces
             .list
             .iter()
             .zip(&members)
-            .map(|(ws, m)| {
+            .enumerate()
+            .map(|(w, (ws, m))| {
                 let ids = || m.iter().map(|&i| &self.sessions[i].id);
                 let rows = m
                     .iter()
@@ -1332,6 +1333,7 @@ impl App {
                     })
                     .collect();
                 overview::Card {
+                    w,
                     name: &ws.name,
                     color: ws.color.unwrap_or([128, 128, 128]),
                     running: ids().filter(|id| self.runs.contains_key(*id)).count(),
@@ -1343,6 +1345,7 @@ impl App {
                 }
             })
             .collect();
+        overview::sort(&mut cards);
         let grouped: HashSet<&String> = self.workspaces.list.iter().flat_map(|w| &w.sessions).collect();
         let loose = self.sessions.iter().filter(|s| !grouped.contains(&s.id)).count();
         let opts = overview::Options { loose, jira_url: &self.settings.jira_url, stale_after: u64::from(self.settings.stale_after_hours) * 3600 };

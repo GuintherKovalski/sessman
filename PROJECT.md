@@ -73,7 +73,8 @@ it to zoom.
 ### Middle: workspaces overview (All sessions)
 In "All sessions", the main area shows an overview of the workspaces until a session is
 opened; clicking "All sessions" again comes back to it.
-- One card per workspace, in its tab's color (a dot by the name, a stripe down the left
+- One card per workspace, the one whose session went idle most recently first (sessions
+  still working don't count; workspaces with none idle come last), in its tab's color (a dot by the name, a stripe down the left
   edge, a light tint). Click the name to open the workspace. Under it, its **scope of work**
   in one short sentence, and up to 3 Jira tickets, epics and parent tickets first (only keys
   that really appear in the sessions or the branch; with a Jira URL in Settings they link to

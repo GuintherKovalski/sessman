@@ -93,6 +93,18 @@ fn a_failed_summary_shows_why() {
 }
 
 #[test]
+fn the_workspace_with_the_latest_idle_session_comes_first() {
+    let mut s = setup()
+        .session(session("s-a", "alpha prompt", 900))
+        .session(session("s-b", "beta prompt", 100))
+        .workspaces(&[("Work", &["s-a"]), ("Play", &["s-b"])])
+        .launch();
+    s.frames(10);
+    assert!(s.shows_before("beta prompt", "alpha prompt"));
+    assert!(s.shows_before("last interaction 1 min ago", "last interaction 15 min ago"), "Play's card, though its tab is second");
+}
+
+#[test]
 fn clicking_a_card_name_opens_its_workspace() {
     let mut s = two_workspaces();
     s.click_last("Play");
