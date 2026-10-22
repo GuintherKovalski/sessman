@@ -3739,11 +3739,13 @@ fn known_limits(usage: Option<&(Vec<status::Window>, SystemTime)>) -> Option<(Ve
 /// numbers are.
 fn limit_bars(ui: &mut egui::Ui, windows: &[status::Window], at: SystemTime, labels: bool) {
     let now = SystemTime::now();
+    let mut shown = 0;
     for w in windows {
         let reset = w.resets_at.map(|t| UNIX_EPOCH + std::time::Duration::from_secs(t));
         if reset.is_some_and(|r| r <= now) {
             continue; // window has reset since the payload was written
         }
+        shown += 1;
         if labels {
             ui.label(&w.label);
         }
@@ -3752,6 +3754,10 @@ fn limit_bars(ui: &mut egui::Ui, windows: &[status::Window], at: SystemTime, lab
     }
     let age = now.duration_since(at).unwrap_or_default();
     let ago = if age.as_secs() < 60 { format!("{}s", age.as_secs()) } else { short_duration(age) };
+    if shown == 0 && !windows.is_empty() {
+        ui.label(RichText::new(format!("Reset since they were read {ago} ago; the next reading shows the new numbers.")).weak());
+        return;
+    }
     ui.label(RichText::new(format!("Updated {ago} ago")).weak().small());
 }
 

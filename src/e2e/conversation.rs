@@ -52,6 +52,10 @@ fn usage_limits_show_once_the_status_line_is_enabled() {
     assert!(s.sees("Weekly"));
     assert!(s.sees("41% used · 59% left"));
     assert!(s.sees("50k / 400k tokens (12%)"), "the exact window from the status line");
+    // Limits that have all reset since the status line saw them say so instead of vanishing.
+    std::fs::write(status.join("latest.json"), json!({"rate_limits": {"seven_day": {"used_percentage": 11, "resets_at": 1000}}}).to_string()).unwrap();
+    s.wait_to_see("Reset since they were read");
+    assert!(s.sees("Not known yet"));
 }
 
 #[test]
