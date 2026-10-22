@@ -40,6 +40,9 @@ pub struct Session {
     pub model: Option<String>,
     /// Tokens in context at the latest assistant reply (input incl. cache, as Claude Code counts it).
     pub context_tokens: u64,
+    /// Images in the prompts that aren't saved in the images folder yet: (name, base64 data),
+    /// for `images::save_all` when the session is shown.
+    pub images: Vec<(String, String)>,
 }
 
 pub fn projects_dir() -> PathBuf {
@@ -87,7 +90,7 @@ fn scan_title(path: &Path) -> Option<String> {
                 has_messages = true;
                 if first_prompt.is_none() {
                     if let Ok(v) = serde_json::from_str::<Value>(&line) {
-                        first_prompt = typed_prompt(&v);
+                        first_prompt = typed_prompt(&v, None);
                     }
                 }
             }
@@ -127,7 +130,7 @@ impl Session {
         }
         match v["type"].as_str() {
             Some("user") => {
-                if let Some(p) = typed_prompt(v) {
+                if let Some(p) = typed_prompt(v, Some(&mut self.images)) {
                     self.push_prompt(p);
                 }
             }
@@ -190,20 +193,32 @@ pub fn digest(messages: &[Message], per_message: usize, max: usize) -> String {
     format!("{head}\n[…]\n{tail}")
 }
 
-/// The text a human typed, or None for tool results, meta lines and command wrappers.
-fn typed_prompt(v: &Value) -> Option<String> {
+/// The text a human typed, or None for tool results, meta lines and command wrappers. With
+/// `images`, its images are markers in the text (see `images`); those not saved yet are added.
+fn typed_prompt(v: &Value, mut images: Option<&mut Vec<(String, String)>>) -> Option<String> {
     if v["type"] != "user" || v["isMeta"].as_bool() == Some(true) {
         return None;
     }
     let content = &v["message"]["content"];
     let text = match content {
         Value::String(s) => s.clone(),
-        Value::Array(blocks) => blocks
-            .iter()
-            .filter(|b| b["type"] == "text")
-            .map(|b| str_of(&b["text"]))
-            .collect::<Vec<_>>()
-            .join("\n"),
+        Value::Array(blocks) => {
+            let mut pieces = Vec::new();
+            for b in blocks {
+                if b["type"] == "text" {
+                    pieces.push(str_of(&b["text"]));
+                } else if b["type"] == "image"
+                    && let Some(out) = images.as_deref_mut()
+                    && let Some((name, data)) = crate::images::from_block(b)
+                {
+                    pieces.push(crate::images::marker(&name));
+                    if let Some(data) = data.filter(|_| !out.iter().any(|(n, _)| *n == name)) {
+                        out.push((name, data));
+                    }
+                }
+            }
+            crate::images::join(&pieces)
+        }
         _ => return None,
     };
     let t = text.trim();
@@ -285,6 +300,25 @@ mod tests {
         assert_eq!(s.messages[1].text, "working\n[tool: Edit]");
         assert_eq!(s.changes.len(), 1);
         assert_eq!(s.model.as_deref(), Some("claude-a"));
+    }
+
+    #[test]
+    fn images_in_prompts_are_markers_and_their_data_is_kept_once() {
+        let line = r#"{"type":"user","message":{"content":[{"type":"text","text":"what is "},{"type":"image","source":{"type":"base64","media_type":"image/png","data":"iVBORw0K"}},{"type":"text","text":" here"},{"type":"image","source":{"type":"base64","media_type":"image/png","data":"iVBORw0K"}}]}}"#;
+        let s = run(&[line]);
+        let name = crate::images::from_block(&serde_json::json!({"source": {"type": "base64", "media_type": "image/png", "data": "iVBORw0K"}})).unwrap().0;
+        let marker = crate::images::marker(&name);
+        assert_eq!(s.prompts, vec![format!("what is {marker} here {marker}")]);
+        assert_eq!(s.images.len(), 1, "the same image is saved once");
+        assert_eq!(scan_title_of(line), "what is  here", "titles leave images out");
+    }
+
+    fn scan_title_of(line: &str) -> String {
+        let path = std::env::temp_dir().join(format!("scope-title-{}.jsonl", std::process::id()));
+        std::fs::write(&path, line).unwrap();
+        let t = scan_title(&path).unwrap();
+        let _ = std::fs::remove_file(&path);
+        t
     }
 
     #[test]

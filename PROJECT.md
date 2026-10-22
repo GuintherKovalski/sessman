@@ -133,6 +133,12 @@ opened; clicking "All sessions" again comes back to it.
   - The short bar on its top edge is a drag handle, like the side panels': drag it to make the
     input taller or shorter; double-click it for the automatic size. The ▾ at its right
     collapses the input to one line (▴ expands it). The size is kept across restarts.
+  - **Images**: **Cmd+V** pastes an image (a screenshot, Copy Image, or image files copied
+    in Finder), and image files dropped on the window join the prompt too. Each goes in at
+    the cursor as a marker, `[image:1a2b3c4d.png]`, shown as a chip; type around it as you
+    like, the image is sent where its marker is. Thumbnails of the prompt's images sit above
+    the text: hover for a bigger view, click to open it in Preview, `×` takes it out (its
+    marker too). Big or unusual images (TIFF, BMP, HEIC, over 2000 px) are converted first.
   - **Up / Down** step through the prompts you sent earlier in this session (like shell
     history) while the input is a single line. Going past the newest brings back what you
     were typing.
@@ -161,6 +167,8 @@ opened; clicking "All sessions" again comes back to it.
     session shows what it has done so far and keeps streaming.
 - **Pinned "You"**: the prompt that the reply at the top of your view answers stays pinned
   above the conversation, so you always know what a long reply is about.
+- Images in your prompts (also ones pasted in a terminal Claude Code) show as thumbnails
+  where they were; hover for a bigger view, click to open.
 - The conversation itself: one card per message (blue accent for you, orange for Claude),
   rendered as Markdown: headings, lists, bold/italic, links, including bare URLs like
   `https://…` and `www.…` (highlighted, underlined on hover, click to open in the browser),
@@ -232,6 +240,7 @@ moved aside (`state.json.bad`) and the app starts fresh.
 | Prompt history | The prompts you typed in that session (tool results and slash-command wrappers are skipped). |
 | Diffs | The `Edit` / `MultiEdit` / `Write` tool calls recorded in the session, diffed line by line. |
 | Sending a prompt | Runs `claude -p [extra args] --resume <session-id> [--model <m>] --output-format stream-json --verbose --include-partial-messages "<prompt>"` in the session's folder, in its own process group, in the background; its streamed lines update the open conversation as they arrive. |
+| Images in prompts | Kept in `~/.config/scope/images/`, named after their data, and written in the prompt as `[image:<name>]`. A prompt with images goes to `claude -p --input-format stream-json` on stdin, as one user message of text and image blocks in order. Claude Code keeps them in the session file; reading it back turns them into the same markers (and saves the files of images pasted elsewhere). Cmd+V is seen through an AppKit key monitor (egui only hears about pastes with text); the image comes from the macOS pasteboard. |
 | Runs scope did not start | Every 2 s `ps` lists `claude -p` processes on a listed session (`--resume` / `--session-id <id>`) that aren't scope's own children: runs a scope left going when it quit (`claude` finishes and saves its reply with no one reading its output), or ones another scope or a terminal started. Each shows as working; its steps are read from the session file as Claude saves them (whole steps, no letter-by-letter text), until its process ends. Stop, the queue and notifications work as for scope's own runs. So quitting or restarting scope loses no run. |
 | Stopping (Ctrl+C) | SIGINT to that process group (SIGKILL after 2 s). Claude Code saves the partial reply and an `[Request interrupted by user]` marker, shown as ⏹ Interrupted. |
 | Queue | Kept per session in memory and in `state.json`; the next prompt is sent when a run ends normally. |
@@ -270,6 +279,7 @@ src/
 ├── app.rs         the panels, tabs, drag-and-drop, prompt input (queue, stop, refine), pinned prompt
 ├── session.rs     finds and parses Claude Code session files
 ├── history.rs     Up/Down prompt history
+├── images.rs      images in prompts: markers, the images folder, clipboard, stream-json message
 ├── names.rs       custom session names and goals
 ├── goal.rs        goal + subgoal checklist format
 ├── diffview.rs    changes grouped by file, diff cards, read-only file viewer

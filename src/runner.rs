@@ -1,5 +1,5 @@
 use serde_json::Value;
-use std::io::{BufRead, BufReader, Read};
+use std::io::{BufRead, BufReader, Read, Write};
 use std::path::{Path, PathBuf};
 use std::os::unix::process::CommandExt;
 use std::process::{Command, Stdio};
@@ -143,7 +143,12 @@ pub fn send_args(c: &Claude, id: &str, prompt: &str, new: bool) -> Vec<String> {
         args.extend(["--model".into(), c.model.clone()]);
     }
     args.extend(["--output-format", "stream-json", "--verbose", "--include-partial-messages"].map(String::from));
-    args.push(prompt.into());
+    // A prompt with images goes in on stdin, as a message with image blocks.
+    if crate::images::has_images(prompt) {
+        args.extend(["--input-format", "stream-json"].map(String::from));
+    } else {
+        args.push(prompt.into());
+    }
     args
 }
 
@@ -193,18 +198,19 @@ pub fn send(ctx: eframe::egui::Context, id: String, cwd: Option<PathBuf>, prompt
     if let Some(dir) = cwd {
         cmd.current_dir(dir);
     }
-    spawn_stream(ctx, cmd)
+    let input = crate::images::has_images(&prompt).then_some(prompt);
+    spawn_stream(ctx, cmd, input)
 }
 
 /// Runs `cmd` on a thread in its own process group (so Stop reaches its children too),
-/// streaming its events.
-fn spawn_stream(ctx: eframe::egui::Context, mut cmd: Command) -> (Receiver<RunEvent>, Stop) {
-    cmd.stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped()).process_group(0);
+/// streaming its events. With `input`, a prompt with images, it is written to claude's stdin.
+fn spawn_stream(ctx: eframe::egui::Context, mut cmd: Command, input: Option<String>) -> (Receiver<RunEvent>, Stop) {
+    cmd.stdin(if input.is_some() { Stdio::piped() } else { Stdio::null() }).stdout(Stdio::piped()).stderr(Stdio::piped()).process_group(0);
     let stop = Stop::default();
     let pid = stop.clone();
     let (tx, rx) = channel();
     std::thread::spawn(move || {
-        let done = stream(&mut cmd, &pid, |event| {
+        let done = stream(&mut cmd, input.as_deref(), &pid, |event| {
             let _ = tx.send(event);
             ctx.request_repaint();
         });
@@ -215,9 +221,17 @@ fn spawn_stream(ctx: eframe::egui::Context, mut cmd: Command) -> (Receiver<RunEv
     (rx, stop)
 }
 
-fn stream(cmd: &mut Command, pid: &Stop, mut emit: impl FnMut(RunEvent)) -> Result<(), String> {
+fn stream(cmd: &mut Command, input: Option<&str>, pid: &Stop, mut emit: impl FnMut(RunEvent)) -> Result<(), String> {
+    let line = input.map(crate::images::user_line).transpose()?;
     let mut child = cmd.spawn().map_err(|e| format!("failed to run claude: {e}"))?;
     *pid.0.lock().unwrap() = Some(child.id());
+    if let (Some(line), Some(mut stdin)) = (line, child.stdin.take()) {
+        // On its own thread: a big image fills the pipe before claude reads it. Closing
+        // stdin ends the input, so claude answers and exits.
+        std::thread::spawn(move || {
+            let _ = writeln!(stdin, "{line}");
+        });
+    }
     let mut stderr = child.stderr.take();
     let err_reader = std::thread::spawn(move || {
         let mut s = String::new();
@@ -577,7 +591,7 @@ mod tests {
         let mut cmd = Command::new("sh");
         cmd.args(["-c", "sleep 30 & echo '{\"type\":\"assistant\",\"message\":{\"content\":[]}}'; wait"]);
         let ctx = eframe::egui::Context::default();
-        let (rx, stop) = spawn_stream(ctx, cmd);
+        let (rx, stop) = spawn_stream(ctx, cmd, None);
         let first = rx.recv_timeout(std::time::Duration::from_secs(5)).expect("first line");
         assert!(matches!(first, RunEvent::Line(_)));
         let started = std::time::Instant::now();

@@ -7,6 +7,7 @@ mod dictation;
 mod find;
 mod goal;
 mod history;
+mod images;
 mod names;
 mod orchestration;
 mod overview;
@@ -33,6 +34,7 @@ fn main() -> eframe::Result {
     }
     settings::adopt_old_config();
     runner::fix_path();
+    images::watch_paste();
     let options = eframe::NativeOptions {
         viewport: viewport(),
         // Window size and position, panel widths and scroll positions (egui's own memory).
