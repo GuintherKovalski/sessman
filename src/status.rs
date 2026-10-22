@@ -61,7 +61,7 @@ pub struct Window {
 }
 
 pub fn limits(v: &Value) -> Vec<Window> {
-    [("five_hour", "5-hour session", "5h"), ("seven_day", "Weekly", "7d"), ("spend_limit", "Spend limit", "spend")]
+    [("five_hour", "Session (5-hour)", "5h"), ("seven_day", "Weekly", "7d"), ("spend_limit", "Spend limit", "spend")]
         .into_iter()
         .filter_map(|(key, label, short)| {
             let w = &v["rate_limits"][key];
@@ -72,7 +72,7 @@ pub fn limits(v: &Value) -> Vec<Window> {
 
 /// The account's limits as `/usage` shows them, from the reply of its endpoint.
 pub fn usage_limits(v: &Value) -> Vec<Window> {
-    let mut out: Vec<Window> = [("five_hour", "5-hour session", "5h"), ("seven_day", "Weekly", "7d")]
+    let mut out: Vec<Window> = [("five_hour", "Session (5-hour)", "5h"), ("seven_day", "Weekly", "7d")]
         .into_iter()
         .filter_map(|(key, label, short)| {
             let w = &v[key];
@@ -241,7 +241,7 @@ mod tests {
         .unwrap();
         let l = limits(&v);
         assert_eq!(l.len(), 2);
-        assert_eq!((l[0].label.as_str(), l[0].resets_at), ("5-hour session", Some(1738425600)));
+        assert_eq!((l[0].label.as_str(), l[0].resets_at), ("Session (5-hour)", Some(1738425600)));
         assert_eq!(line(&v), "Opus · ctx 18% · 5h 24% · 7d 41%");
         assert_eq!(line(&json!({})), "Claude");
     }
@@ -260,7 +260,7 @@ mod tests {
         let got: Vec<_> = l.iter().map(|w| (w.label.as_str(), w.used, w.resets_at)).collect();
         assert_eq!(
             got,
-            [("5-hour session", 53.0, Some(1792600799)), ("Weekly", 31.0, Some(1792663199)), ("Weekly (Fable)", 4.0, Some(1792663200))]
+            [("Session (5-hour)", 53.0, Some(1792600799)), ("Weekly", 31.0, Some(1792663199)), ("Weekly (Fable)", 4.0, Some(1792663200))]
         );
         assert_eq!(unix_time("1970-01-01T01:00:00+01:00"), Some(0));
         assert_eq!(unix_time("2000-03-01T00:00:00Z"), Some(951868800));

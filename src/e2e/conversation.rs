@@ -47,9 +47,10 @@ fn usage_limits_show_once_the_status_line_is_enabled() {
     let reset = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs() + 3 * 3600;
     std::fs::write(status.join("latest.json"), json!({"rate_limits": {"five_hour": {"used_percentage": 23.5, "resets_at": reset}, "seven_day": {"used_percentage": 41.0}}}).to_string()).unwrap();
     std::fs::write(status.join("s-a.json"), json!({"context_window": {"context_window_size": 400_000}}).to_string()).unwrap();
-    s.wait_to_see("5-hour session");
-    assert!(s.sees("24% · resets in 2h 59m") || s.sees("24% · resets in 3h 0m"));
+    s.wait_to_see("Session (5-hour)");
+    assert!(s.sees("24% used · 76% left · resets in 2h 59m") || s.sees("24% used · 76% left · resets in 3h 0m"));
     assert!(s.sees("Weekly"));
+    assert!(s.sees("41% used · 59% left"));
     assert!(s.sees("50k / 400k tokens (12%)"), "the exact window from the status line");
 }
 

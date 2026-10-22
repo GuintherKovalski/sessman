@@ -3722,15 +3722,22 @@ fn limit_bars(ui: &mut egui::Ui, windows: &[status::Window], at: SystemTime) {
             continue; // window has reset since the payload was written
         }
         ui.label(&w.label);
-        let text = match reset.and_then(|r| r.duration_since(now).ok()) {
-            Some(d) => format!("{:.0}% · resets in {}", w.used, short_duration(d)),
-            None => format!("{:.0}%", w.used),
-        };
+        let text = limit_text(w.used, reset.and_then(|r| r.duration_since(now).ok()));
         ui.add(egui::ProgressBar::new((w.used / 100.0) as f32).text(text));
     }
     let age = now.duration_since(at).unwrap_or_default();
     let ago = if age.as_secs() < 60 { format!("{}s", age.as_secs()) } else { short_duration(age) };
     ui.label(RichText::new(format!("Updated {ago} ago")).weak().small());
+}
+
+/// 45% used, resets in 4h 7m → "45% used · 55% left · resets in 4h 7m"
+fn limit_text(used: f64, resets_in: Option<std::time::Duration>) -> String {
+    let used = used.clamp(0.0, 100.0);
+    let text = format!("{used:.0}% used · {:.0}% left", 100.0 - used.round());
+    match resets_in {
+        Some(d) => format!("{text} · resets in {}", short_duration(d)),
+        None => text,
+    }
 }
 
 /// 14_200 → "13.9 KB"
@@ -3894,6 +3901,13 @@ impl eframe::App for App {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn limit_text_shows_used_and_left() {
+        assert_eq!(limit_text(45.0, Some(std::time::Duration::from_secs(4 * 3600 + 7 * 60))), "45% used · 55% left · resets in 4h 7m");
+        assert_eq!(limit_text(3.4, None), "3% used · 97% left");
+        assert_eq!(limit_text(104.0, None), "100% used · 0% left");
+    }
 
     #[test]
     fn input_grows_to_its_limit_or_keeps_the_dragged_height() {
