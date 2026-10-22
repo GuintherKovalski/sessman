@@ -339,6 +339,18 @@ impl Drop for Scope {
     }
 }
 
+#[derive(Debug)]
+struct Dropped(PathBuf);
+
+impl egui::DroppedFile for Dropped {
+    fn path(&self) -> &Path {
+        &self.0
+    }
+    fn bytes(&self) -> Result<Vec<u8>, String> {
+        std::fs::read(&self.0).map_err(|e| e.to_string())
+    }
+}
+
 struct NoStorage;
 
 impl eframe::Storage for NoStorage {
@@ -710,6 +722,12 @@ impl Scope {
     /// Types into the prompt input.
     pub fn type_prompt(&mut self, text: &str) {
         self.type_in("prompt-input", text);
+    }
+
+    /// Drops a file on the window, as from Finder.
+    pub fn drop_file(&mut self, path: &Path) {
+        self.h.input_mut().dropped_files.push(std::sync::Arc::new(Dropped(path.to_path_buf())));
+        self.frames(3);
     }
 
     /// Types `text` into the prompt and presses Enter.

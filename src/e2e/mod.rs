@@ -17,6 +17,7 @@ mod changes;
 mod commands;
 mod conversation;
 mod find;
+mod images;
 mod foreign_runs;
 mod info;
 mod new_session;

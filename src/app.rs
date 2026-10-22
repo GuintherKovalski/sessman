@@ -4,6 +4,7 @@ use crate::dictation;
 use crate::find::{self, Find};
 use crate::goal;
 use crate::history::History;
+use crate::images;
 use crate::markdown;
 use crate::names::Names;
 use crate::orchestration;
@@ -313,6 +314,8 @@ enum ModelPrompt {
 
 impl App {
     pub fn new(ctx: &egui::Context) -> Self {
+        // Thumbnails of the images in prompts (`file://` URIs).
+        egui_extras::install_image_loaders(ctx);
         let (snapshots, poke_index) = search::spawn_indexer(ctx.clone());
         let settings = Settings::load(&settings::path());
         let mut app = Self {
@@ -1458,7 +1461,8 @@ impl App {
         }
         let Some(meta) = self.selected.and_then(|i| self.sessions.get(i)) else { return };
         match session::load(&meta.path) {
-            Ok(s) => {
+            Ok(mut s) => {
+                images::save_all(&mut s.images);
                 self.history = History::new(s.prompts.clone());
                 self.open = Some(s);
                 self.pinned = None;
@@ -1767,6 +1771,33 @@ impl App {
         // The cursor goes after the new text, once the input has been redrawn.
         let mut state = egui::TextEdit::load_state(&self.ctx, id).unwrap_or_default();
         state.cursor.set_char_range(Some(CCursorRange::one(CCursor::new(end))));
+        state.store(&self.ctx, id);
+        self.focus_prompt = true;
+    }
+
+    /// Pasted or dropped images: their markers go in at the cursor, a space after them to go on
+    /// typing. Ones that couldn't be read show as the error above the input.
+    fn insert_images(&mut self, added: Vec<Result<String, String>>) {
+        let mut markers = Vec::new();
+        for a in added {
+            match a {
+                Ok(m) => markers.push(m),
+                Err(e) => self.error = Some(e),
+            }
+        }
+        if markers.is_empty() {
+            return;
+        }
+        let text = markers.join(" ") + " ";
+        let id = Id::new("prompt-input");
+        let chars = self.input.chars().count();
+        let at = egui::TextEdit::load_state(&self.ctx, id).and_then(|s| s.cursor.char_range()).map_or(chars, |r| usize::from(r.primary.index).min(chars));
+        let (input, end) = dictation::insert_at(&self.input, at, &text);
+        let rest = input.chars().nth(end);
+        // insert_at trims: the space goes back unless one follows already.
+        self.input = if rest.is_some_and(char::is_whitespace) { input } else { insert_char(&input, end, ' ') };
+        let mut state = egui::TextEdit::load_state(&self.ctx, id).unwrap_or_default();
+        state.cursor.set_char_range(Some(CCursorRange::one(CCursor::new(end + 1))));
         state.store(&self.ctx, id);
         self.focus_prompt = true;
     }
@@ -2521,6 +2552,16 @@ impl App {
         } else {
             (false, false)
         };
+        // Cmd+V with images on the clipboard: they go in as markers, instead of any text that
+        // came with them (a copied file's name).
+        if images::paste_pressed()
+            && focused
+            && enabled
+            && let Some(added) = images::from_clipboard()
+        {
+            ui.input_mut(|i| i.events.retain(|e| !matches!(e, egui::Event::Paste(_))));
+            self.insert_images(added);
+        }
         // Cmd+Z right after a refine brings the original text back.
         if focused
             && let Some((original, refined)) = self.refine_undo.clone()
@@ -2570,6 +2611,29 @@ impl App {
             .inner_margin(egui::Margin::symmetric(10, 8))
             .corner_radius(4.0)
             .show(ui, |ui| {
+                // The prompt's images, in order: hover for a bigger view, click to open, × to
+                // take one out (its marker in the text goes too).
+                let names: Vec<String> = images::names(&self.input).into_iter().map(String::from).collect();
+                if !names.is_empty() {
+                    let mut remove = None;
+                    ui.horizontal_wrapped(|ui| {
+                        for (n, name) in names.iter().enumerate() {
+                            ui.push_id(n, |ui| {
+                                let r = image_thumb(ui, name, 64.0);
+                                let x = egui::Rect::from_min_size(egui::pos2(r.rect.right() - 16.0, r.rect.top()), egui::vec2(16.0, 16.0));
+                                let close = egui::Button::new(RichText::new("×").small().color(Color32::WHITE)).fill(Color32::from_black_alpha(160)).corner_radius(8.0);
+                                if ui.put(x, close).on_hover_text("Remove this image").clicked() {
+                                    remove = Some(n);
+                                }
+                            });
+                        }
+                    });
+                    if let Some(n) = remove {
+                        self.input = images::remove(&self.input, n);
+                        self.focus_prompt = true;
+                    }
+                    ui.add_space(4.0);
+                }
                 ui.horizontal_top(|ui| {
                     ui.label(RichText::new(">").monospace().strong().color(pal.prompt_sign));
                     let send_key = if self.settings.send_with_modifier { "cmd+enter" } else { "enter" };
@@ -2599,6 +2663,13 @@ impl App {
                         .max_height(height)
                         .stick_to_bottom(true)
                         .show(ui, |ui| {
+                            // Image markers show as chips in the text.
+                            let font = egui::TextStyle::Monospace.resolve(ui.style());
+                            let (text_color, chip) = (pal.prompt_text, pal.user.gamma_multiply(0.3));
+                            let mut chips = move |ui: &egui::Ui, buf: &dyn egui::TextBuffer, wrap: f32| {
+                                ui.fonts_mut(|f| f.layout_job(images::layout(buf.as_str(), font.clone(), text_color, chip, wrap)))
+                            };
+                            let has_images = images::has_images(&self.input);
                             let edit = egui::TextEdit::multiline(&mut self.input)
                                 .id(id)
                                 .frame(egui::Frame::NONE)
@@ -2612,6 +2683,7 @@ impl App {
                                     Some(egui::KeyboardShortcut::new(Modifiers::SHIFT, Key::Enter))
                                 })
                                 .desired_width(width);
+                            let edit = if has_images { edit.layouter(&mut chips) } else { edit };
                             ui.add_enabled(enabled, edit)
                         });
                     self.prompt_measured = out.inner_rect.height();
@@ -3576,12 +3648,62 @@ fn message(ui: &mut egui::Ui, cache: &mut CommonMarkCache, m: &session::Message,
         .show(ui, |ui| {
             ui.set_width(ui.available_width());
             ui.label(RichText::new(who).strong().color(accent));
-            markdown::show(ui, cache, &m.text);
+            if m.role == Role::User && images::has_images(&m.text) {
+                with_images(ui, cache, &m.text);
+            } else {
+                markdown::show(ui, cache, &m.text);
+            }
         });
     let r = card.response.rect;
     let stripe = egui::Rect::from_min_max(r.min, egui::pos2(r.left() + 3.0, r.bottom()));
     ui.painter().rect_filled(stripe, egui::CornerRadius { nw: 6, sw: 6, ne: 0, se: 0 }, accent);
     ui.add_space(6.0);
+}
+
+/// A prompt's text with its images as thumbnails, where they were in it.
+fn with_images(ui: &mut egui::Ui, cache: &mut CommonMarkCache, text: &str) {
+    let parts = images::parts(text);
+    let mut i = 0;
+    while i < parts.len() {
+        ui.push_id(i, |ui| match parts[i] {
+            images::Part::Text(t) => {
+                if !t.trim().is_empty() {
+                    markdown::show(ui, cache, t.trim());
+                }
+                i += 1;
+            }
+            images::Part::Image(_) => {
+                ui.horizontal_wrapped(|ui| {
+                    while let Some(images::Part::Image(name)) = parts.get(i) {
+                        ui.push_id(i, |ui| image_thumb(ui, name, 140.0));
+                        i += 1;
+                    }
+                });
+            }
+        });
+    }
+}
+
+/// An image in a prompt, at most `height` tall: hover shows it bigger, a click opens it.
+fn image_thumb(ui: &mut egui::Ui, name: &str, height: f32) -> egui::Response {
+    let uri = images::uri(name);
+    let r = ui
+        .add(egui::Image::new(uri.clone()).max_size(egui::vec2(height * 2.5, height)).corner_radius(4.0).alt_text(format!("Image {name}")).sense(egui::Sense::click()))
+        .on_hover_cursor(egui::CursorIcon::PointingHand);
+    ui.painter().rect_stroke(r.rect, 4.0, Stroke::new(1.0, ui.visuals().widgets.noninteractive.bg_stroke.color), egui::StrokeKind::Outside);
+    if r.clicked() {
+        images::open(name);
+    }
+    r.on_hover_ui(|ui| {
+        ui.add(egui::Image::new(uri).max_size(egui::vec2(520.0, 520.0)));
+        ui.label(RichText::new("Click to open").small().weak());
+    })
+}
+
+/// `text` with `c` put in at a character index.
+fn insert_char(text: &str, at: usize, c: char) -> String {
+    let byte = text.char_indices().nth(at).map_or(text.len(), |(b, _)| b);
+    format!("{}{c}{}", &text[..byte], &text[byte..])
 }
 
 /// Editable name in place of a workspace tab. Enter or clicking away saves; Escape cancels.
@@ -3773,6 +3895,11 @@ impl eframe::App for App {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         let ctx = ui.ctx().clone();
         self.global_keys(&ctx);
+        // Image files dropped on the window join the prompt.
+        let dropped: Vec<PathBuf> = ctx.input(|i| i.raw.dropped_files.iter().map(|f| f.path().to_path_buf()).filter(|p| images::is_image_file(p)).collect());
+        if !dropped.is_empty() && self.open.is_some() {
+            self.insert_images(dropped.iter().map(|p| images::add_file(p)).collect());
+        }
         self.keep_zoom(&ctx);
         // First, so it spans the whole width above the side panels.
         egui::Panel::top("title-bar").exact_size(TITLE_BAR_HEIGHT).resizable(false).show(ui, |ui| self.title_bar(ui));
@@ -3834,6 +3961,8 @@ impl eframe::App for App {
         self.confirm_delete_modal(&ctx);
         self.confirm_trash_modal(&ctx);
         self.model_prompt_modal(&ctx);
+        // A Cmd+V the input didn't take (it wasn't focused) is over.
+        images::paste_pressed();
     }
 
     fn save(&mut self, _storage: &mut dyn eframe::Storage) {

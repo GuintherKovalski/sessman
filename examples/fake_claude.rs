@@ -8,7 +8,9 @@
 //!   the app's Markdown shows them as they are): `HOLD` waits (after writing "Partial reply")
 //!   while `$HOME/fake/hold` exists, `TOOL` starts a Bash tool call first, `EDIT` edits
 //!   `notes.txt` in the session's folder, `FAIL` ends with an error, `NOFILE` fails before
-//!   writing anything (so a new session never gets a file).
+//!   writing anything (so a new session never gets a file). With `--input-format stream-json`
+//!   the prompt is the user message on stdin: its text, then `(N images)` when it has images,
+//!   and the session file gets its content blocks as they came.
 //! - A helper question (`--no-session-persistence`) gets a fixed reply in the format its
 //!   parser expects (goal, refine, search, overview, orchestration, ask, btw), or the
 //!   contents of `$HOME/fake/<kind>` when that file exists. It waits while
@@ -27,13 +29,34 @@ fn main() {
     let _ = std::fs::create_dir_all(&fake);
     log_call(&fake, &args);
 
-    let prompt = args.last().cloned().unwrap_or_default();
+    let (prompt, content) = if args.iter().any(|a| a == "--input-format") {
+        stdin_prompt()
+    } else {
+        let p = args.last().cloned().unwrap_or_default();
+        (p.clone(), Value::String(p))
+    };
     let code = if args.iter().any(|a| a == "--output-format") {
-        run(&home, &fake, &args, &prompt)
+        run(&home, &fake, &args, &prompt, content)
     } else {
         helper(&fake, &args, &prompt)
     };
     std::process::exit(code);
+}
+
+/// The prompt of a `--input-format stream-json` run, and its message content.
+fn stdin_prompt() -> (String, Value) {
+    let mut line = String::new();
+    let _ = std::io::stdin().read_line(&mut line);
+    let v: Value = serde_json::from_str(&line).unwrap_or_default();
+    let content = v["message"]["content"].clone();
+    let blocks = content.as_array().cloned().unwrap_or_default();
+    let text: Vec<&str> = blocks.iter().filter_map(|b| b["text"].as_str()).map(str::trim).collect();
+    let n = blocks.iter().filter(|b| b["type"] == "image" && b["source"]["data"].as_str().is_some_and(|d| !d.is_empty())).count();
+    let mut prompt = text.join(" ");
+    if n > 0 {
+        prompt.push_str(&format!(" ({n} images)"));
+    }
+    (prompt, content)
 }
 
 fn log_call(fake: &Path, args: &[String]) {
@@ -76,7 +99,7 @@ fn append(file: &Path, v: &Value) {
     writeln!(f, "{v}").expect("write session line");
 }
 
-fn run(home: &Path, fake: &Path, args: &[String], prompt: &str) -> i32 {
+fn run(home: &Path, fake: &Path, args: &[String], prompt: &str, content: Value) -> i32 {
     let projects = home.join(".claude/projects");
     let cwd = std::env::current_dir().unwrap_or_default();
     let (id, file) = match (value_after(args, "--session-id"), value_after(args, "--resume")) {
@@ -110,7 +133,7 @@ fn run(home: &Path, fake: &Path, args: &[String], prompt: &str) -> i32 {
         return 1;
     }
     let cwd_s = cwd.display().to_string();
-    let user = json!({"type": "user", "sessionId": id, "cwd": cwd_s, "message": {"role": "user", "content": prompt}});
+    let user = json!({"type": "user", "sessionId": id, "cwd": cwd_s, "message": {"role": "user", "content": content}});
     append(&file, &user);
     emit(json!({"type": "system", "subtype": "init", "session_id": id}));
 

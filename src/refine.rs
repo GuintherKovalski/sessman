@@ -24,6 +24,9 @@ pub fn request(text: &str, goal: Option<&str>, recent: &[String], answers: Optio
          language, add nothing the developer did not ask for, fix typos, and use short steps or \
          bullet points when it has several parts. Write it in the developer's voice.\n",
     );
+    if crate::images::has_images(text) {
+        p.push_str("Markers like [image:1a2b3c4d.png] are images attached to the prompt: keep each one, exactly as written, where it belongs in the text.\n");
+    }
     match answers {
         None => p.push_str(
             "If the prompt is ambiguous in a way that changes what should be done, ask up to 3 \
