@@ -3113,6 +3113,15 @@ impl App {
                 ui.label(RichText::new("As of the latest reply").weak().small());
             }
 
+            // The 5-hour session limit gets its own bar under the context; the weekly ones below.
+            section(ui, "Session limit");
+            match known_limits(self.usage.as_ref()).and_then(|(w, at)| Some((w.into_iter().find(|w| w.short == "5h")?, at))) {
+                Some((w, at)) => limit_bars(ui, std::slice::from_ref(&w), at, false),
+                None => {
+                    ui.label(RichText::new("Not known yet (see Usage limits)").weak());
+                }
+            }
+
             section(ui, "Usage limits");
             if limits_ui(ui, self.usage.as_ref(), self.usage_error.as_deref()) {
                 match status::enable() {
@@ -3684,8 +3693,9 @@ fn rename_field(ui: &mut egui::Ui, r: &mut Renaming, project: &str, actions: &mu
 fn limits_ui(ui: &mut egui::Ui, usage: Option<&(Vec<status::Window>, SystemTime)>, error: Option<&str>) -> bool {
     // Keeps "resets in" and "updated ago" current, and re-reads the status-line file.
     ui.ctx().request_repaint_after(std::time::Duration::from_secs(5));
+    let weekly = |windows: &[status::Window]| windows.iter().filter(|w| w.short != "5h").cloned().collect::<Vec<_>>();
     if let Some((windows, at)) = usage {
-        limit_bars(ui, windows, *at);
+        limit_bars(ui, &weekly(windows), *at, true);
         if let Some(e) = error {
             ui.label(RichText::new(format!("Last refresh failed: {e}")).weak().small());
         }
@@ -3709,19 +3719,34 @@ fn limits_ui(ui: &mut egui::Ui, usage: Option<&(Vec<status::Window>, SystemTime)
         ui.label(RichText::new("Enabled. Limits appear after your next reply in an interactive Claude Code session (Pro/Max plans only).").weak());
         return false;
     };
-    limit_bars(ui, &status::limits(&v), at);
+    limit_bars(ui, &weekly(&status::limits(&v)), at, true);
     false
 }
 
-/// One bar per limit window that hasn't reset yet, and how old the numbers are.
-fn limit_bars(ui: &mut egui::Ui, windows: &[status::Window], at: SystemTime) {
+/// The account's limits and when they were read: from the usage endpoint, else from the
+/// status line's latest payload.
+fn known_limits(usage: Option<&(Vec<status::Window>, SystemTime)>) -> Option<(Vec<status::Window>, SystemTime)> {
+    if let Some((windows, at)) = usage {
+        return Some((windows.clone(), *at));
+    }
+    if !matches!(status::setup(), status::Setup::Enabled) {
+        return None;
+    }
+    status::load(&status::dir().join("latest.json")).map(|(v, at)| (status::limits(&v), at))
+}
+
+/// One bar per limit window that hasn't reset yet (with its name if `labels`), and how old the
+/// numbers are.
+fn limit_bars(ui: &mut egui::Ui, windows: &[status::Window], at: SystemTime, labels: bool) {
     let now = SystemTime::now();
     for w in windows {
         let reset = w.resets_at.map(|t| UNIX_EPOCH + std::time::Duration::from_secs(t));
         if reset.is_some_and(|r| r <= now) {
             continue; // window has reset since the payload was written
         }
-        ui.label(&w.label);
+        if labels {
+            ui.label(&w.label);
+        }
         let text = limit_text(w.used, reset.and_then(|r| r.duration_since(now).ok()));
         ui.add(egui::ProgressBar::new((w.used / 100.0) as f32).text(text));
     }

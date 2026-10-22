@@ -53,6 +53,7 @@ pub fn line(v: &Value) -> String {
     parts.join(" · ")
 }
 
+#[derive(Clone)]
 pub struct Window {
     pub label: String,
     pub short: &'static str,
