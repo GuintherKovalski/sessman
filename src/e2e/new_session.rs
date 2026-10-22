@@ -47,6 +47,21 @@ fn the_first_prompt_creates_the_session_in_the_workspace() {
 }
 
 #[test]
+fn haiku_names_the_session_after_its_first_answer() {
+    let mut s = workspace_with_folder();
+    s.env.reply("name", "\"Start new thing.\"");
+    s.click("+  New session");
+    s.send("please start the new thing for me");
+    s.wait_to_see("Start new thing");
+    let (id, _) = s.env.runs().pop().unwrap();
+    assert_eq!(s.env.config_json("names.json")[id.as_str()], "Start new thing");
+    let call = s.env.calls().into_iter().rfind(|c| c["args"].as_array().unwrap().iter().any(|a| a.as_str().unwrap().contains("Name this coding session"))).unwrap();
+    let args = call["args"].as_array().unwrap();
+    assert!(args.windows(2).any(|w| w[0] == "--model" && w[1] == "haiku"));
+    assert!(args.last().unwrap().as_str().unwrap().contains("Echo: please start the new thing for me"), "it sees the answer");
+}
+
+#[test]
 fn a_starting_session_can_be_left_and_opened_again() {
     let mut s = workspace_with_folder();
     s.click("+  New session");

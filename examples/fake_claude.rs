@@ -12,8 +12,8 @@
 //!   the prompt is the user message on stdin: its text, then `(N images)` when it has images,
 //!   and the session file gets its content blocks as they came.
 //! - A helper question (`--no-session-persistence`) gets a fixed reply in the format its
-//!   parser expects (goal, refine, search, overview, orchestration, ask, btw), or the
-//!   contents of `$HOME/fake/<kind>` when that file exists. It waits while
+//!   parser expects (goal, refine, search, overview, orchestration, ask, btw; an empty
+//!   name), or the contents of `$HOME/fake/<kind>` when that file exists. It waits while
 //!   `$HOME/fake/<kind>.hold` exists.
 //!
 //! Every call is logged as a JSON file in `$HOME/fake/calls/`, named in call order.
@@ -183,6 +183,8 @@ fn helper(fake: &Path, args: &[String], prompt: &str) -> i32 {
         "overview"
     } else if prompt.contains("Answer the developer's QUESTION") {
         "ask"
+    } else if prompt.contains("Name this coding session") {
+        "name"
     } else if prompt.contains("\"progress\": <0 to 100") {
         "orchestration"
     } else {
@@ -211,6 +213,8 @@ fn helper(fake: &Path, args: &[String], prompt: &str) -> i32 {
         })
         .to_string(),
         "ask" => "Fake answer about [[1]]".to_owned(),
+        // Empty, so new sessions keep their first prompt as name unless a test sets one.
+        "name" => String::new(),
         _ => {
             eprintln!("fake claude: unknown helper question");
             return 3;

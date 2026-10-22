@@ -418,6 +418,20 @@ pub fn summarize_goal(ctx: eframe::egui::Context, digest: String) -> Receiver<Re
     ask_haiku(ctx, prompt)
 }
 
+/// Asks the helper model for a short name for a new session, from its first prompt and answer.
+pub fn name_session(ctx: eframe::egui::Context, prompt: &str, answer: &str) -> Receiver<Result<String, String>> {
+    let cut = |t: &str, n: usize| t.chars().take(n).collect::<String>();
+    let prompt = format!(
+        "Name this coding session in at most 4 words: concise, simple and direct about the thing \
+         it addresses (e.g. \"Fix login redirect\", \"Usage limits bar\"). No quotes, no \
+         punctuation at the end. Reply with the name only.\n\n\
+         USER:\n{}\n\nCLAUDE:\n{}",
+        cut(prompt, 2000),
+        cut(answer, 2000)
+    );
+    ask_haiku(ctx, prompt)
+}
+
 /// A one-off question to the helper model (Haiku by default), outside any session.
 pub fn ask_haiku(ctx: eframe::egui::Context, prompt: String) -> Receiver<Result<String, String>> {
     ask_model(ctx, "", prompt)

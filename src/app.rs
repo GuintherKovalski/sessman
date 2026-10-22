@@ -6,7 +6,7 @@ use crate::goal;
 use crate::history::History;
 use crate::images;
 use crate::markdown;
-use crate::names::Names;
+use crate::names::{self, Names};
 use crate::orchestration;
 use crate::overview::{self, Overviews};
 use crate::queue::Queue;
@@ -124,6 +124,8 @@ pub struct App {
     goals: Names,
     /// Session id whose goal is being summarized, and the pending result.
     summarizing: Option<(String, Receiver<Result<String, String>>)>,
+    /// New sessions whose name the helper model is writing after their first answer.
+    naming: Vec<(String, Receiver<Result<String, String>>)>,
     /// Side questions per session id, oldest first; kept until closed with their ×.
     btw: HashMap<String, Vec<Btw>>,
     /// Text in the Info tab's "ask about this goal" field.
@@ -220,6 +222,8 @@ struct Run {
     stop: runner::Stop,
     /// The indexer was poked once the new session's file appeared.
     poked: bool,
+    /// Text Claude has written in this run (capped), to name a new session after it.
+    answer: String,
 }
 
 /// An Enter-search: Haiku picks sessions from a catalog. Results are kept as session ids, so
@@ -356,6 +360,7 @@ impl App {
             right_tab: RightTab::Changes,
             goals: Names::load(&Names::goals_path()),
             summarizing: None,
+            naming: Vec::new(),
             btw: HashMap::new(),
             goal_question: String::new(),
             info_height: 0.0,
@@ -1466,6 +1471,26 @@ impl App {
         }
     }
 
+    /// Names written for new sessions. One renamed meanwhile keeps its name; a failure only
+    /// leaves the first prompt as the name, so it isn't reported.
+    fn poll_naming(&mut self) {
+        let mut named = false;
+        self.naming.retain(|(id, rx)| match rx.try_recv() {
+            Ok(result) => {
+                if let Some(name) = result.ok().and_then(|r| names::clean(&r)).filter(|_| self.names.get(id).is_none()) {
+                    self.names.set(id, &name);
+                    named = true;
+                }
+                false
+            }
+            Err(std::sync::mpsc::TryRecvError::Empty) => true,
+            Err(_) => false,
+        });
+        if named && let Err(e) = self.names.save(&Names::path()) {
+            self.error = Some(format!("could not save names: {e}"));
+        }
+    }
+
     fn reload(&mut self) {
         for tab in &mut self.file_tabs {
             tab.contents = diffview::read(&tab.path);
@@ -1557,7 +1582,7 @@ impl App {
             self.history = History::new(s.prompts.clone());
         }
         let (rx, stop) = runner::send(self.ctx.clone(), id.clone(), cwd.clone(), prompt.clone(), new);
-        self.runs.insert(id, Run { rx, live: String::new(), tool: None, new, cwd, prompt, stop, poked: false });
+        self.runs.insert(id, Run { rx, live: String::new(), tool: None, new, cwd, prompt, stop, poked: false, answer: String::new() });
     }
 
     /// Takes in prompt runs this scope did not start, such as the ones still going from before a
@@ -1573,7 +1598,7 @@ impl App {
             let s = session::load(&path).unwrap_or_default();
             let prompt = s.prompts.last().cloned().unwrap_or_default();
             let (rx, stop) = runner::follow(self.ctx.clone(), pid, path);
-            self.runs.insert(id.clone(), Run { rx, live: String::new(), tool: None, new: false, cwd: s.cwd, prompt, stop, poked: false });
+            self.runs.insert(id.clone(), Run { rx, live: String::new(), tool: None, new: false, cwd: s.cwd, prompt, stop, poked: false, answer: String::new() });
             // Following starts at the file's end: the open copy catches up to it first.
             if self.new_session.is_none() && self.open_id() == Some(id) {
                 self.reload();
@@ -1616,6 +1641,12 @@ impl App {
                         }
                         run.live.clear();
                         run.tool = None;
+                        if run.new && v["type"] == "assistant" && run.answer.len() < 4000 {
+                            for text in v["message"]["content"].as_array().into_iter().flatten().filter_map(|c| c["text"].as_str()) {
+                                run.answer.push_str(text);
+                                run.answer.push('\n');
+                            }
+                        }
                         // The new session's file exists now: list it without waiting.
                         if run.new && !run.poked {
                             run.poked = true;
@@ -1641,6 +1672,10 @@ impl App {
         let Some(run) = self.runs.remove(id) else { return };
         if run.new && !self.sessions.iter().any(|s| s.id == id) {
             self.unlisted.push((id.to_owned(), run.prompt.clone(), run.cwd.clone()));
+        }
+        // After the first answer, the helper model names the session (unless it has a name).
+        if run.new && !stopped && result.is_ok() && self.names.get(id).is_none() {
+            self.naming.push((id.to_owned(), runner::name_session(self.ctx.clone(), &run.prompt, &run.answer)));
         }
         if stopped {
             run.stop.stop();
@@ -3962,6 +3997,7 @@ impl eframe::App for App {
         self.adopt_runs();
         self.poll_runner();
         self.poll_summary();
+        self.poll_naming();
         self.poll_overviews();
         self.mark_seen();
         self.poll_orchestration();
@@ -4123,6 +4159,7 @@ mod tests {
             prompt: prompt.into(),
             stop: runner::Stop::default(),
             poked: false,
+            answer: String::new(),
         };
         let mut runs = HashMap::new();
         runs.insert("n1".to_owned(), run(true, "build it\nwith details"));
