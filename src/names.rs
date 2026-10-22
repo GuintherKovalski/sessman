@@ -41,6 +41,16 @@ impl Names {
     }
 }
 
+/// A session name from the helper model's reply: its first line, without a label, quotes
+/// or end punctuation, and at most 4 words. None when nothing is left.
+pub fn clean(reply: &str) -> Option<String> {
+    let line = reply.lines().map(str::trim).find(|l| !l.is_empty())?;
+    let line = line.strip_prefix("Name:").or_else(|| line.strip_prefix("Title:")).unwrap_or(line);
+    let line = line.trim_matches(|c: char| c.is_whitespace() || "\"'`*#.:;!".contains(c));
+    let name = line.split_whitespace().take(4).collect::<Vec<_>>().join(" ");
+    (!name.is_empty()).then_some(name)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -56,5 +66,13 @@ mod tests {
         std::fs::remove_file(path).unwrap();
         n.set("s1", "");
         assert_eq!(n.get("s1"), None);
+    }
+
+    #[test]
+    fn cleans_a_written_name() {
+        assert_eq!(clean("Fix login redirect"), Some("Fix login redirect".into()));
+        assert_eq!(clean("\n\"Usage limits bar.\"\nmore"), Some("Usage limits bar".into()));
+        assert_eq!(clean("Title: **Add dark mode toggle to settings**"), Some("Add dark mode toggle".into()));
+        assert_eq!(clean("  \n "), None);
     }
 }
