@@ -28,9 +28,11 @@ start)
     cargo build
     rm -rf "$dir"
     mkdir -p "$dir/config" "$dir/proj"
-    # A copy of your config, without the Whisper models (linked) and anything in flight.
-    # (~/.config/sessman until your own scope has run once since the rename.)
-    own="$HOME/.config/scope"
+    # A copy of your config, without the Whisper models (linked) and anything in flight: the
+    # one the scope you work in uses ($SCOPE_CONFIG, inherited by its sessions), unless that
+    # is this instance's own. (~/.config/sessman until your scope has run since the rename.)
+    own="${SCOPE_CONFIG:-$HOME/.config/scope}"
+    case "$own" in "$dir"/*|"$dir") own="$HOME/.config/scope" ;; esac
     [ -d "$own" ] || own="$HOME/.config/sessman"
     for f in "$own"/*; do
         case "$(basename "$f")" in
