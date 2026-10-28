@@ -56,6 +56,7 @@ pub struct Settings {
     /// the last one chosen); empty = the open session's folder.
     pub default_folder: String,
     pub confirm_delete_workspace: bool,
+    pub confirm_delete_message: bool,
     pub restore_state: bool,
     pub notify_when_done: bool,
     /// Jira site the overview's ticket keys link to, e.g. https://acme.atlassian.net.
@@ -94,6 +95,7 @@ impl Default for Settings {
             extra_args: String::new(),
             default_folder: String::new(),
             confirm_delete_workspace: true,
+            confirm_delete_message: true,
             restore_state: true,
             notify_when_done: false,
             jira_url: String::new(),
@@ -301,6 +303,12 @@ pub fn ui(ui: &mut egui::Ui, s: &mut Settings, filter: &mut String, about: &Abou
                 s.confirm_delete_workspace = defaults.confirm_delete_workspace;
             }
             ui.checkbox(&mut s.confirm_delete_workspace, "");
+        });
+        page.row("Confirm before deleting a message", "From a session's context, with 🗑 on the message", s.confirm_delete_message != defaults.confirm_delete_message, |ui, reset| {
+            if reset {
+                s.confirm_delete_message = defaults.confirm_delete_message;
+            }
+            ui.checkbox(&mut s.confirm_delete_message, "");
         });
         page.row("Restore the previous state at start", "Open session, tabs, drafts and queues", s.restore_state != defaults.restore_state, |ui, reset| {
             if reset {

@@ -104,6 +104,8 @@ pub struct App {
     lasso: Option<(egui::Vec2, HashSet<String>)>,
     /// Sessions waiting for "Move to Trash?" to be confirmed.
     confirm_trash: Vec<String>,
+    /// Message waiting for "Delete from the context?": session id, index, text (as in `session::delete_message`).
+    confirm_delete_message: Option<(String, usize, String)>,
     /// Index into the open session's messages of the "You" prompt pinned above the conversation.
     pinned: Option<usize>,
     /// Whether a "You" prompt was on screen in the conversation last frame; the pinned one hides then.
@@ -349,6 +351,7 @@ impl App {
             pick_anchor: None,
             lasso: None,
             confirm_trash: Vec::new(),
+            confirm_delete_message: None,
             pinned: None,
             inline_you: false,
             names: Names::load(&Names::path()),
@@ -2299,6 +2302,34 @@ impl App {
         }
     }
 
+    /// "Delete from the context?" for a message's 🗑, when the setting asks for it.
+    fn confirm_delete_message_modal(&mut self, ctx: &egui::Context) {
+        let Some((id, i, text)) = self.confirm_delete_message.clone() else { return };
+        let (mut delete, mut cancel) = (false, false);
+        let modal = egui::Modal::new(Id::new("confirm-delete-message")).show(ctx, |ui| {
+            ui.set_max_width(440.0);
+            ui.label(RichText::new("Delete this message from the context?").strong());
+            let shown = text.lines().find(|l| !l.trim().is_empty() && !l.starts_with("[tool:")).unwrap_or("(tool calls only)");
+            let snippet: String = shown.chars().take(120).collect();
+            ui.label(RichText::new(if snippet.len() < shown.len() { format!("{snippet}…") } else { snippet }).italics().weak());
+            ui.add_space(4.0);
+            ui.label("Claude won't see it from the next prompt on. A reply goes with its tool calls and their results; files it changed stay as they are.");
+            let backups = settings::config_dir().join("backups");
+            ui.label(RichText::new(format!("The session file as it was is kept in {}.", backups.display())).weak().small());
+            ui.add_space(8.0);
+            ui.horizontal(|ui| {
+                delete = ui.button("Delete").clicked();
+                cancel = ui.button("Cancel").clicked();
+            });
+        });
+        if delete {
+            self.delete_message(&id, i, &text);
+        }
+        if delete || cancel || modal.should_close() {
+            self.confirm_delete_message = None;
+        }
+    }
+
     /// "Move to Trash?" for sessions picked to delete.
     fn confirm_trash_modal(&mut self, ctx: &egui::Context) {
         if self.confirm_trash.is_empty() {
@@ -2847,6 +2878,9 @@ impl App {
         self.heights.resize(s.messages.len(), 0.0);
         let mut top_prompt = None;
         let mut inline_you = false;
+        let mut delete = None;
+        // Deleting rewrites the session file: not while a run writes to it, nor before it exists.
+        let deletable = !self.open_running() && self.new_session.is_none() && self.selected.is_some();
         let open_id = self.open_id();
         let key = self.view_key();
         let mut find = self.find.open.then_some(&mut self.find);
@@ -2865,7 +2899,11 @@ impl App {
                 let rect = if skip {
                     ui.allocate_space(egui::vec2(ui.available_width(), h)).1
                 } else {
-                    let rect = ui.push_id(i, |ui| message(ui, &mut self.md_cache, m, &pal)).response.rect;
+                    let card = ui.push_id(i, |ui| message(ui, &mut self.md_cache, m, &pal, Some(deletable)));
+                    if card.inner {
+                        delete = Some(i);
+                    }
+                    let rect = card.response.rect;
                     self.heights[i] = rect.height().max(1.0);
                     rect
                 };
@@ -2886,7 +2924,7 @@ impl App {
                 // The reply as it is being written, then what Claude is doing right now.
                 if !run.live.is_empty() {
                     let m = session::Message { role: Role::Assistant, text: run.live.clone() };
-                    ui.push_id("live", |ui| message(ui, &mut self.md_cache, &m, &pal));
+                    ui.push_id("live", |ui| message(ui, &mut self.md_cache, &m, &pal, None));
                 }
                 ui.horizontal(|ui| {
                     ui.spinner();
@@ -2901,7 +2939,7 @@ impl App {
                 // What Claude had written when it was stopped, then the mark.
                 if !partial.is_empty() {
                     let m = session::Message { role: Role::Assistant, text: partial.clone() };
-                    ui.push_id("interrupted", |ui| message(ui, &mut self.md_cache, &m, &pal));
+                    ui.push_id("interrupted", |ui| message(ui, &mut self.md_cache, &m, &pal, None));
                 }
                 ui.label(RichText::new("⏹ Interrupted").color(pal.note).monospace());
             }
@@ -2910,6 +2948,38 @@ impl App {
             self.pinned = top_prompt;
             self.inline_you = inline_you;
             ui.ctx().request_repaint();
+        }
+        if let Some(i) = delete {
+            self.ask_delete_message(i);
+        }
+    }
+
+    /// 🗑 on message `i` of the open session: asks first when the setting says so.
+    fn ask_delete_message(&mut self, i: usize) {
+        let Some(text) = self.open.as_ref().and_then(|s| s.messages.get(i)).map(|m| m.text.clone()) else { return };
+        let Some(id) = self.open_id() else { return };
+        if self.settings.confirm_delete_message {
+            self.confirm_delete_message = Some((id, i, text));
+        } else {
+            self.delete_message(&id, i, &text);
+        }
+    }
+
+    /// Takes message `i` (saying `text`) of session `id` out of its file, so Claude no longer
+    /// sees it (see `session::delete_message`); the file as it was goes to the config folder's
+    /// `backups`. The open session then shows what is left.
+    fn delete_message(&mut self, id: &str, i: usize, text: &str) {
+        if self.runs.contains_key(id) {
+            self.error = Some("Claude is working in this session; delete the message once it has finished".into());
+            return;
+        }
+        let Some(path) = self.sessions.iter().find(|s| s.id == id).map(|s| s.path.clone()) else { return };
+        let stamp = SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_millis()).unwrap_or(0);
+        let backup = settings::config_dir().join("backups").join(format!("{id}-{stamp}.jsonl"));
+        match session::delete_message(&path, i, text, &backup) {
+            Ok(()) if self.open_id().as_deref() == Some(id) => self.reload(),
+            Ok(()) => {}
+            Err(e) => self.error = Some(format!("could not delete the message: {e}")),
         }
     }
 
@@ -3681,27 +3751,29 @@ fn session_bubble(ui: &mut egui::Ui, selected: bool, title: &str, note: Option<&
 }
 
 /// One message as a card: role label and accent stripe, then its rendered Markdown.
-/// Messages that are only tool calls show as a single dimmed line.
-fn message(ui: &mut egui::Ui, cache: &mut CommonMarkCache, m: &session::Message, pal: &theme::Palette) {
+/// Messages that are only tool calls show as a single dimmed line. With `delete` (whether
+/// deleting is possible now), the label's row ends in Copy and Delete; true when Delete is clicked.
+fn message(ui: &mut egui::Ui, cache: &mut CommonMarkCache, m: &session::Message, pal: &theme::Palette, delete: Option<bool>) -> bool {
     if m.role == Role::User && is_interrupt_marker(&m.text) {
         // Claude's record of a stop: alone, after the prompt it stopped, or (merged by the
-        // parser) before the next prompt. Each part shows in its place.
+        // parser) before the next prompt. Each part shows in its place; Delete takes the whole.
         let (before, after) = split_interrupt_marker(&m.text);
+        let mut clicked = false;
         if !before.is_empty() {
-            ui.push_id("before", |ui| message(ui, cache, &session::Message { role: Role::User, text: before }, pal));
+            clicked |= ui.push_id("before", |ui| message(ui, cache, &session::Message { role: Role::User, text: before }, pal, delete)).inner;
         }
         ui.label(RichText::new("⏹ Interrupted").color(pal.note).monospace());
         ui.add_space(6.0);
         if !after.is_empty() {
-            ui.push_id("after", |ui| message(ui, cache, &session::Message { role: Role::User, text: after }, pal));
+            clicked |= ui.push_id("after", |ui| message(ui, cache, &session::Message { role: Role::User, text: after }, pal, delete)).inner;
         }
-        return;
+        return clicked;
     }
     if m.role == Role::Assistant && m.text.lines().all(|l| l.starts_with("[tool:")) {
         if markdown::SHOW_TOOLS.load(std::sync::atomic::Ordering::Relaxed) {
             egui::Frame::new().inner_margin(egui::Margin { left: 14, right: 0, top: 0, bottom: 6 }).show(ui, |ui| markdown::show(ui, cache, &m.text));
         }
-        return;
+        return false;
     }
     let (who, accent) = match m.role {
         Role::User => ("You", pal.user),
@@ -3711,13 +3783,19 @@ fn message(ui: &mut egui::Ui, cache: &mut CommonMarkCache, m: &session::Message,
         Role::User => accent.gamma_multiply(0.08),
         Role::Assistant => ui.visuals().faint_bg_color,
     };
+    let mut clicked = false;
     let card = egui::Frame::new()
         .fill(fill)
         .corner_radius(6.0)
         .inner_margin(egui::Margin { left: 14, right: 10, top: 6, bottom: 8 })
         .show(ui, |ui| {
             ui.set_width(ui.available_width());
-            ui.label(RichText::new(who).strong().color(accent));
+            ui.horizontal(|ui| {
+                ui.label(RichText::new(who).strong().color(accent));
+                if let Some(can_delete) = delete {
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| clicked = message_buttons(ui, m, can_delete));
+                }
+            });
             if m.role == Role::User && images::has_images(&m.text) {
                 with_images(ui, cache, &m.text);
             } else {
@@ -3728,6 +3806,34 @@ fn message(ui: &mut egui::Ui, cache: &mut CommonMarkCache, m: &session::Message,
     let stripe = egui::Rect::from_min_max(r.min, egui::pos2(r.left() + 3.0, r.bottom()));
     ui.painter().rect_filled(stripe, egui::CornerRadius { nw: 6, sw: 6, ne: 0, se: 0 }, accent);
     ui.add_space(6.0);
+    clicked
+}
+
+/// Copy and Delete at the right end of a message's label row (laid out right to left), small
+/// and without a frame until hovered. True when Delete is clicked.
+fn message_buttons(ui: &mut egui::Ui, m: &session::Message, can_delete: bool) -> bool {
+    let icon = |s: &str| egui::Button::new(RichText::new(s).small().weak()).small().frame_when_inactive(false);
+    let delete = ui
+        .add_enabled(can_delete, icon("🗑"))
+        .on_hover_text("Delete from the context: Claude won't see this message from the next prompt on")
+        .on_disabled_hover_text("Claude is working in this session; delete once it has finished");
+    let copied_id = ui.id().with("copied");
+    let now = ui.input(|i| i.time);
+    let copied = ui.data(|d| d.get_temp::<f64>(copied_id)).is_some_and(|t| now - t < 1.5);
+    if ui.add(icon(if copied { "✔" } else { "📋" })).on_hover_text("Copy the message").clicked() {
+        ui.ctx().copy_text(copy_text(m));
+        ui.data_mut(|d| d.insert_temp(copied_id, now));
+    }
+    if copied {
+        ui.ctx().request_repaint_after(std::time::Duration::from_millis(300));
+    }
+    delete.clicked()
+}
+
+/// What Copy on a message puts on the clipboard: its text, without Claude's tool lines.
+fn copy_text(m: &session::Message) -> String {
+    let lines: Vec<&str> = m.text.lines().filter(|l| m.role == Role::User || !l.starts_with("[tool:")).collect();
+    lines.join("\n").trim().to_owned()
 }
 
 /// A prompt's text with its images as thumbnails, where they were in it.
@@ -4078,6 +4184,7 @@ impl eframe::App for App {
         }
         self.confirm_delete_modal(&ctx);
         self.confirm_trash_modal(&ctx);
+        self.confirm_delete_message_modal(&ctx);
         self.model_prompt_modal(&ctx);
         // A Cmd+V the input didn't take (it wasn't focused) is over.
         images::paste_pressed();
@@ -4144,6 +4251,13 @@ mod tests {
         assert_eq!(pinned_text(&m(Role::User, "[Request interrupted by user]\nReply five")).as_deref(), Some("Reply five"));
         assert_eq!(pinned_text(&m(Role::User, "write it")).as_deref(), Some("write it"));
         assert_eq!(pinned_text(&m(Role::Assistant, "hi")), None);
+    }
+
+    #[test]
+    fn copy_leaves_out_claudes_tool_lines() {
+        let m = |role, text: &str| session::Message { role, text: text.into() };
+        assert_eq!(copy_text(&m(Role::Assistant, "[tool: Read]\nFound it.\n[tool: Edit]\nFixed.")), "Found it.\nFixed.");
+        assert_eq!(copy_text(&m(Role::User, "[tool: x] is literal here")), "[tool: x] is literal here");
     }
 
     /// Regression (item 5): a new session shows in the list as soon as its first prompt is
