@@ -85,6 +85,17 @@ pub fn split_path(file: &str) -> (&str, &str) {
     }
 }
 
+/// The file's folder as the file list shows it: relative to the session's folder ("./" for
+/// the folder itself), or in full when the file is outside it.
+pub fn folder_in(file: &str, cwd: Option<&Path>) -> String {
+    let (_, dir) = split_path(file);
+    match cwd.and_then(|c| Path::new(dir).strip_prefix(c).ok()) {
+        Some(rel) if rel.as_os_str().is_empty() => "./".to_owned(),
+        Some(rel) => rel.display().to_string(),
+        None => dir.to_owned(),
+    }
+}
+
 /// (edits, lines added, lines removed) for one file across the session's changes.
 pub fn stats(changes: &[Change], file: &str) -> (usize, usize, usize) {
     changes.iter().filter(|c| c.file == file).fold((0, 0, 0), |(n, a, r), c| {
@@ -337,6 +348,15 @@ mod tests {
         assert_eq!(g[0].edits, vec![0, 2]);
         assert_eq!((g[0].added, g[0].removed), (3, 2));
         assert_eq!(split_path("/a/x.rs"), ("x.rs", "/a"));
+    }
+
+    #[test]
+    fn folders_are_relative_to_the_session_folder() {
+        let cwd = Some(Path::new("/a/proj"));
+        assert_eq!(folder_in("/a/proj/x.rs", cwd), "./");
+        assert_eq!(folder_in("/a/proj/src/e2e/x.rs", cwd), "src/e2e");
+        assert_eq!(folder_in("/a/project/x.rs", cwd), "/a/project");
+        assert_eq!(folder_in("/b/x.rs", None), "/b");
     }
 
     #[test]

@@ -181,7 +181,8 @@ opened; clicking "All sessions" again comes back to it.
 - **Changes**: one card per changed file, in order of its first change: file name, folder,
   and `+added -removed` counts, then each edit as diff hunks with syntax highlighting, green /
   red tinted rows for added / removed lines, and unchanged stretches collapsed to 3 lines of
-  context (`⋮` marks a gap). At the bottom, **Files** lists every changed file:
+  context (`⋮` marks a gap). At the bottom, **Files** lists every changed file
+  with its folder (relative to the session's, in full if it's outside it):
   - **click** a file (or a card's header) to show only its changes; click again or
     **Show all** to see everything;
   - **double-click** to open it in the main area (see below).

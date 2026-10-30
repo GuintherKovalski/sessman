@@ -28,6 +28,7 @@ fn changes_list_each_changed_file_with_counts() {
     assert!(s.sees("README.md"));
     assert!(s.sees("+1 -1"));
     assert!(s.sees("+3 -0"));
+    assert!(s.sees("./"), "each file's folder, relative to the session's");
 }
 
 #[test]
