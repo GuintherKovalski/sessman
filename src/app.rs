@@ -3305,6 +3305,7 @@ impl App {
             egui::ScrollArea::vertical().auto_shrink(false).show(ui, |ui| {
                 for f in &files {
                     let (name, dir) = diffview::split_path(&f.file);
+                    let folder = diffview::folder_in(&f.file, s.cwd.as_deref());
                     let selected = self.changes_filter.as_deref() == Some(f.file.as_str());
                     let row = ui
                         .horizontal(|ui| {
@@ -3314,6 +3315,7 @@ impl App {
                         })
                         .inner
                         .on_hover_text(format!("{dir}\nClick: show its changes · Double-click: open it"));
+                    ui.add(egui::Label::new(RichText::new(folder).weak().small()).truncate());
                     if row.double_clicked() {
                         open = Some(f.file.clone());
                     } else if row.clicked() {
