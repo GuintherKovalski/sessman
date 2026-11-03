@@ -1948,8 +1948,7 @@ impl App {
         self.ai = Some(AiSearch { query, ids, rx: Some(rx), result: None });
     }
 
-    /// The search field at the bottom of the sidebar, with the AI search status above it, and
-    /// the Settings button next to it.
+    /// The search field at the bottom of the sidebar, with the AI search status above it.
     fn search_bar(&mut self, ui: &mut egui::Ui) {
         let query = self.search.trim().to_owned();
         if let Some(ai) = self.ai.as_ref().filter(|a| a.query == query) {
@@ -1975,7 +1974,7 @@ impl App {
             let edit = egui::TextEdit::singleline(&mut self.search)
                 .id(Id::new("search"))
                 .hint_text("🔍 Search · Enter asks Haiku")
-                .desired_width(ui.available_width() - 34.0);
+                .desired_width(ui.available_width());
             let resp = ui.add(edit);
             if resp.lost_focus() && ui.input(|i| i.key_pressed(Key::Escape)) {
                 self.search.clear();
@@ -1983,10 +1982,6 @@ impl App {
             if resp.lost_focus() && ui.input(|i| i.key_pressed(Key::Enter)) {
                 self.ask_ai(ui.ctx());
                 resp.request_focus();
-            }
-            let cmd = if cfg!(target_os = "macos") { "Cmd" } else { "Ctrl" };
-            if ui.button("⚙").on_hover_text(format!("Settings ({cmd}+,)")).clicked() {
-                self.open_settings();
             }
         });
     }
@@ -3451,7 +3446,8 @@ impl App {
     }
 
     /// The bar along the top of the window, under the macOS window buttons: drag it to move
-    /// the window, double-click to zoom.
+    /// the window, double-click to zoom. The Settings ⚙ sits at its right end, dimmed until
+    /// hovered; it is added after the drag area so it takes its own clicks.
     fn title_bar(&mut self, ui: &mut egui::Ui) {
         let rect = ui.max_rect();
         let resp = ui.interact(rect, Id::new("title-bar"), Sense::click_and_drag());
@@ -3461,6 +3457,15 @@ impl App {
         if resp.double_clicked() {
             let zoomed = ui.input(|i| i.viewport().maximized.unwrap_or(false));
             ui.ctx().send_viewport_cmd(egui::ViewportCommand::Maximized(!zoomed));
+        }
+        let size = egui::vec2(TITLE_BAR_HEIGHT, rect.height());
+        let gear_rect = egui::Rect::from_min_size(egui::pos2(rect.right() - size.x - 4.0, rect.top()), size);
+        let lit = ui.rect_contains_pointer(gear_rect) || (self.settings_tab && self.settings_active);
+        let color = if lit { ui.visuals().strong_text_color() } else { ui.visuals().weak_text_color() };
+        let gear = egui::Button::new(RichText::new("⚙").size(15.0).color(color)).frame(false);
+        let cmd = if cfg!(target_os = "macos") { "Cmd" } else { "Ctrl" };
+        if ui.put(gear_rect, gear).on_hover_text(format!("Settings ({cmd}+,)")).clicked() {
+            self.open_settings();
         }
     }
 
