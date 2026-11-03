@@ -3721,7 +3721,7 @@ fn message(ui: &mut egui::Ui, cache: &mut CommonMarkCache, m: &session::Message,
             ui.set_width(ui.available_width());
             ui.horizontal(|ui| {
                 ui.label(RichText::new(who).strong().color(accent));
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| copy_button(ui, m));
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| copy_button(ui, m, fill));
             });
             if m.role == Role::User && images::has_images(&m.text) {
                 with_images(ui, cache, &m.text);
@@ -3735,24 +3735,44 @@ fn message(ui: &mut egui::Ui, cache: &mut CommonMarkCache, m: &session::Message,
     ui.add_space(6.0);
 }
 
-/// 📋 at the right end of a message's label row: copies the whole message, then shows ✔ for
-/// a moment. Small and without a frame until hovered.
-fn copy_button(ui: &mut egui::Ui, m: &session::Message) {
+/// Copy at the right end of a message's label row: two overlapping rounded squares, drawn
+/// (no font has them), then a check mark for a moment after copying. `fill` is the card's
+/// background, which the front square is filled with so it covers the back one.
+fn copy_button(ui: &mut egui::Ui, m: &session::Message, fill: Color32) {
     let copied_id = ui.id().with("copied");
     let now = ui.input(|i| i.time);
     let copied = ui.data(|d| d.get_temp::<f64>(copied_id)).is_some_and(|t| now - t < 1.5);
-    let icon = if copied { "✔" } else { "📋" };
-    let button = egui::Button::new(RichText::new(icon).small().weak()).small().frame_when_inactive(false);
-    if ui.add(button).on_hover_text("Copy the message").clicked() {
+    let (rect, resp) = ui.allocate_exact_size(egui::vec2(20.0, 18.0), egui::Sense::click());
+    resp.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, "Copy"));
+    let resp = resp.on_hover_text("Copy the message").on_hover_cursor(egui::CursorIcon::PointingHand);
+    if resp.clicked() {
         ui.ctx().copy_text(copy_text(m));
         ui.data_mut(|d| d.insert_temp(copied_id, now));
     }
+    let v = ui.visuals();
+    let bg = if resp.hovered() { v.widgets.hovered.weak_bg_fill } else { fill };
+    let color = if resp.hovered() { v.strong_text_color() } else { v.weak_text_color() };
+    let stroke = Stroke::new(1.3, color);
+    let p = ui.painter();
+    if resp.hovered() {
+        p.rect_filled(rect, 4.0, bg);
+    }
+    let c = rect.center();
     if copied {
+        let pts = vec![c + egui::vec2(-4.5, 0.0), c + egui::vec2(-1.5, 3.0), c + egui::vec2(4.5, -3.5)];
+        p.add(egui::Shape::line(pts, stroke));
         ui.ctx().request_repaint_after(std::time::Duration::from_millis(300));
+    } else {
+        let (side, shift) = (8.5, 3.5);
+        let back = egui::Rect::from_min_size(c + egui::vec2(-side / 2.0 - shift / 2.0 + shift, -side / 2.0 - shift / 2.0), egui::vec2(side, side));
+        let front = back.translate(egui::vec2(-shift, shift));
+        p.rect_stroke(back, 2.5, stroke, egui::StrokeKind::Middle);
+        p.rect_filled(front, 2.5, bg);
+        p.rect_stroke(front, 2.5, stroke, egui::StrokeKind::Middle);
     }
 }
 
-/// What 📋 on a message puts on the clipboard: its text, without Claude's tool lines.
+/// What Copy on a message puts on the clipboard: its text, without Claude's tool lines.
 fn copy_text(m: &session::Message) -> String {
     let lines: Vec<&str> = m.text.lines().filter(|l| m.role == Role::User || !l.starts_with("[tool:")).collect();
     lines.join("\n").trim().to_owned()
