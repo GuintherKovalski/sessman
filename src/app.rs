@@ -3653,18 +3653,17 @@ fn session_bubble(ui: &mut egui::Ui, selected: bool, title: &str, note: Option<&
             v.selection.bg_fill
         } else if row.hovered() {
             v.widgets.hovered.weak_bg_fill
-        } else if let Some(c) = color {
-            tint(c, 45)
         } else {
             v.faint_bg_color
         };
-        let stroke = match color {
-            Some(c) => Stroke::new(1.0, rgb(c)),
-            None if selected => v.selection.stroke,
-            None => v.widgets.noninteractive.bg_stroke,
-        };
+        let stroke = if selected { v.selection.stroke } else { v.widgets.noninteractive.bg_stroke };
         let radius = 10.0;
         ui.painter().rect(rect, radius, fill, stroke, StrokeKind::Inside);
+        // The workspace a session belongs to shows only as a bar down its left edge.
+        if let Some(c) = color {
+            let bar = egui::Rect::from_min_max(egui::pos2(rect.left() + 3.0, rect.top() + 5.0), egui::pos2(rect.left() + 6.0, rect.bottom() - 5.0));
+            ui.painter().rect_filled(bar, 1.5, rgb(c));
+        }
         let text_color = if selected { v.selection.stroke.color } else { v.text_color() };
         let mut pos = rect.min + PAD;
         let galley_height = galley.size().y;
