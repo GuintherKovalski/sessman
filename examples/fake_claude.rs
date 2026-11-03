@@ -12,7 +12,7 @@
 //!   the prompt is the user message on stdin: its text, then `(N images)` when it has images,
 //!   and the session file gets its content blocks as they came.
 //! - A helper question (`--no-session-persistence`) gets a fixed reply in the format its
-//!   parser expects (goal, refine, search, overview, orchestration, ask, btw; an empty
+//!   parser expects (goal, refine, search, overview, orchestration, ask, btw, verdict; an empty
 //!   name), or the contents of `$HOME/fake/<kind>` when that file exists. It waits while
 //!   `$HOME/fake/<kind>.hold` exists.
 //!
@@ -185,6 +185,8 @@ fn helper(fake: &Path, args: &[String], prompt: &str) -> i32 {
         "ask"
     } else if prompt.contains("Name this coding session") {
         "name"
+    } else if prompt.contains("Has this Claude Code session finished") {
+        "verdict"
     } else if prompt.contains("\"progress\": <0 to 100") {
         "orchestration"
     } else {
@@ -213,6 +215,7 @@ fn helper(fake: &Path, args: &[String], prompt: &str) -> i32 {
         })
         .to_string(),
         "ask" => "Fake answer about [[1]]".to_owned(),
+        "verdict" => json!({"state": "done", "why": "Fake work shipped"}).to_string(),
         // Empty, so new sessions keep their first prompt as name unless a test sets one.
         "name" => String::new(),
         _ => {

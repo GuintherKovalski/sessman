@@ -562,6 +562,9 @@ pub struct Live<'a> {
     pub modified: u64,
     /// Goal checklist (done, total), if summarized.
     pub checklist: Option<(usize, usize)>,
+    /// Whether its work looks finished, read from its newest change (verdict.rs); None while
+    /// running.
+    pub verdict: Option<&'a crate::verdict::Verdict>,
 }
 
 /// Everything the page shows.
@@ -780,7 +783,8 @@ pub fn ui(ui: &mut egui::Ui, page: &Page, question: &mut String, renaming: &mut 
         ui.columns(columns, |cols| {
             for (k, s) in page.sessions.iter().enumerate() {
                 let status = report.and_then(|r| r.sessions.iter().find(|x| x.id == s.id));
-                let card = Card { s, k, count: page.sessions.len(), sessions: page.sessions, status, now, accent };
+                let covered = page.orch.and_then(|o| o.covered.get(s.id)).copied().unwrap_or(0);
+                let card = Card { s, k, count: page.sessions.len(), sessions: page.sessions, status, covered, now, accent };
                 if let Some(e) = session_card(&mut cols[k % columns], &card, renaming) {
                     event = Some(e);
                 }
@@ -884,6 +888,8 @@ struct Card<'a> {
     count: usize,
     sessions: &'a [Live<'a>],
     status: Option<&'a Status>,
+    /// The session's newest change the report has read.
+    covered: u64,
     now: u64,
     accent: Color32,
 }
@@ -891,10 +897,22 @@ struct Card<'a> {
 /// A session's card. Clicking opens the session, dragging it onto another card moves it there
 /// in the bar, the pencil renames it, and right-click has all of these.
 fn session_card(ui: &mut egui::Ui, card: &Card, renaming: &mut Option<Rename>) -> Option<Event> {
-    let Card { s, k, count, sessions, status, now, accent } = *card;
+    let Card { s, k, count, sessions, status, covered, now, accent } = *card;
     let mut event = None;
     let pal = theme::palette(ui.visuals());
-    let state = if s.running { "working" } else { status.map_or("", |x| x.state.as_str()) };
+    // Working is a live fact: a report's "working" on a session that has stopped is out of
+    // date. Its verdict, which has read its newest change, says how it ended instead.
+    let state = match (s.running, s.verdict) {
+        (true, _) => "working",
+        (false, Some(v)) => v.state.as_str(),
+        (false, None) => match status.map_or("", |x| x.state.as_str()) {
+            "working" => "idle",
+            st => st,
+        },
+    };
+    // What it did: the report's line, unless the verdict read activity the report hasn't.
+    let newer = s.verdict.filter(|v| !s.running && v.at > covered && !v.why.is_empty());
+    let status = if newer.is_some() { None } else { status };
     let state_color = match state {
         "working" => pal.user,
         "waiting" => pal.note,
@@ -957,6 +975,9 @@ fn session_card(ui: &mut egui::Ui, card: &Card, renaming: &mut Option<Rename>) -
                 });
                 if let Some(tool) = s.tool.filter(|_| s.running) {
                     ui.label(RichText::new(format!("⚙ {tool}…")).monospace().weak().small());
+                }
+                if let Some(v) = newer {
+                    ui.label(&v.why);
                 }
                 if let Some(st) = status {
                     let mut open = |id: Option<String>| {
