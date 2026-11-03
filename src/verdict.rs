@@ -5,7 +5,7 @@
 use crate::{overview, runner, session};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::sync::mpsc::{self, Receiver};
 
 /// "done", "waiting" or "blocked".
@@ -34,24 +34,15 @@ impl Verdict {
     }
 }
 
-/// Session id → verdict, saved as JSON.
-#[derive(Default, Debug)]
+/// Session id → verdict, saved as JSON (shared by every scope on the config folder:
+/// `shared::Shared`).
+#[derive(Serialize, Deserialize, Default, Debug)]
+#[serde(transparent)]
 pub struct Verdicts(HashMap<String, Verdict>);
 
 impl Verdicts {
     pub fn path() -> PathBuf {
         crate::settings::config_dir().join("verdicts.json")
-    }
-
-    pub fn load(path: &Path) -> Self {
-        Self(std::fs::read_to_string(path).ok().and_then(|s| serde_json::from_str(&s).ok()).unwrap_or_default())
-    }
-
-    pub fn save(&self, path: &Path) -> std::io::Result<()> {
-        if let Some(dir) = path.parent() {
-            std::fs::create_dir_all(dir)?;
-        }
-        std::fs::write(path, serde_json::to_string_pretty(&self.0)?)
     }
 
     pub fn set(&mut self, id: &str, v: Verdict) {

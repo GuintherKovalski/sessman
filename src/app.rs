@@ -217,7 +217,7 @@ pub struct App {
     /// Whether each session's work looks finished (verdict.rs), the checks under way, the
     /// checks that failed (id → the change they read; not retried until there is a newer one),
     /// and when workspace sessions were last looked over for checks to start.
-    verdicts: Verdicts,
+    verdicts: Shared<Verdicts>,
     judging: Vec<(String, Receiver<Result<Verdict, String>>)>,
     judge_failed: HashMap<String, u64>,
     last_sweep: Option<std::time::Instant>,
@@ -357,7 +357,7 @@ impl App {
         let check_for_updates = settings.check_for_updates;
         let shared_changes = shared::watch(
             ctx.clone(),
-            vec![Workspaces::path(), Names::path(), Names::goals_path(), settings::path(), Overviews::path(), orchestration::Store::path()],
+            vec![Workspaces::path(), Names::path(), Names::goals_path(), settings::path(), Overviews::path(), orchestration::Store::path(), Verdicts::path()],
         );
         let usage_busy = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
         let mut app = Self {
@@ -443,7 +443,7 @@ impl App {
             overview_errors: HashMap::new(),
             seen: HashMap::new(),
             seen_from: 0,
-            verdicts: Verdicts::load(&Verdicts::path()),
+            verdicts: Shared::load(Verdicts::path()),
             judging: Vec::new(),
             judge_failed: HashMap::new(),
             last_sweep: None,
@@ -566,8 +566,8 @@ impl App {
     }
 
     /// Takes what other scopes saved to the config files they share with this one: workspaces
-    /// (members, order, names, colors), session names, goals, settings, overviews and
-    /// orchestrations, so every scope on one config folder shows the same.
+    /// (members, order, names, colors), session names, goals, settings, overviews,
+    /// orchestrations and session tags, so every scope on one config folder shows the same.
     fn poll_shared(&mut self) {
         if self.shared_changes.try_iter().count() == 0 {
             return;
@@ -583,6 +583,7 @@ impl App {
         self.goals.refresh();
         self.overviews.refresh();
         self.orchestrations.refresh();
+        self.verdicts.refresh();
         if self.settings.refresh() {
             self.apply_settings();
         }
@@ -1570,7 +1571,6 @@ impl App {
         const EVERY: u64 = 10;
         const WINDOW: u64 = 3 * 24 * 3600;
         const AT_ONCE: usize = 2;
-        let mut changed = false;
         let mut done = Vec::new();
         self.judging.retain(|(id, rx)| match rx.try_recv() {
             Ok(r) => {
@@ -1584,17 +1584,15 @@ impl App {
             match result {
                 Ok(v) => {
                     self.judge_failed.remove(&id);
-                    self.verdicts.set(&id, v);
-                    changed = true;
+                    if let Err(e) = self.verdicts.change(|all| all.set(&id, v)) {
+                        self.error = Some(format!("could not save the session tags: {e}"));
+                    }
                 }
                 Err(_) => {
                     let modified = self.sessions.iter().find(|s| s.id == id).map_or(0, |s| overview::secs(s.modified));
                     self.judge_failed.insert(id, modified);
                 }
             }
-        }
-        if changed && let Err(e) = self.verdicts.save(&Verdicts::path()) {
-            self.error = Some(format!("could not save the session tags: {e}"));
         }
         if !self.settings.tag_finished || self.judging.len() >= AT_ONCE || self.last_sweep.is_some_and(|t| t.elapsed().as_secs() < EVERY) {
             return;

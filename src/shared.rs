@@ -1,7 +1,7 @@
 //! The config files every scope on one config folder shares (several windows, or a scope
-//! started while another runs): names, goals, settings, overviews, orchestrations, and
-//! workspaces (`Workspaces` keeps its own copy of this). Each keeps the text it last read or
-//! wrote, so it can tell when another scope changed the file: [`watch`] notices that within
+//! started while another runs): names, goals, settings, overviews, orchestrations, session
+//! tags, and workspaces (`Workspaces` keeps its own copy of this). Each keeps the text it
+//! last read or wrote, so it can tell when another scope changed the file: [`watch`] notices that within
 //! half a second and the app takes the change, and a change made here is made on top of the
 //! file's latest contents (refresh, change, save), not over them.
 use eframe::egui;
