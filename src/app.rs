@@ -167,6 +167,7 @@ pub struct App {
     dictation: Dictation,
     /// The "download the Whisper model?" modal, shown when the mic is used without the model.
     model_prompt: Option<ModelPrompt>,
+    updater: crate::update::Updater,
     /// Recent microphone levels (0..1, oldest first) for the meter shown while recording.
     mic_levels: std::collections::VecDeque<f32>,
     /// Background indexer: fresh session lists + content index, and a channel to poke it.
@@ -328,6 +329,7 @@ impl App {
         egui_extras::install_image_loaders(ctx);
         let (snapshots, poke_index) = search::spawn_indexer(ctx.clone());
         let settings = Settings::load(&settings::path());
+        let check_for_updates = settings.check_for_updates;
         let usage_busy = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
         let mut app = Self {
             ctx: ctx.clone(),
@@ -384,6 +386,7 @@ impl App {
             refine_undo: None,
             dictation: Dictation::Idle,
             model_prompt: None,
+            updater: crate::update::Updater::new(check_for_updates),
             mic_levels: std::collections::VecDeque::new(),
             snapshots,
             poke_index,
@@ -502,6 +505,7 @@ impl App {
 
     fn apply_settings(&mut self) {
         self.settings.apply(&self.ctx);
+        self.updater.auto_check = self.settings.check_for_updates;
         runner::configure(runner::Claude::from_settings(&self.settings));
         markdown::SHOW_TOOLS.store(self.settings.show_tool_lines, std::sync::atomic::Ordering::Relaxed);
     }
@@ -3015,8 +3019,8 @@ impl App {
             status::Setup::NotSet => "Not enabled (Enable it in the Info tab, under Usage limits)".to_owned(),
             status::Setup::Other(cmd) => format!("Your own status line is set (`{cmd}`)"),
         };
-        let about = settings::About { status_line: &status_line };
-        if settings::ui(ui, &mut self.settings, &mut self.settings_filter, &about) {
+        let mut about = settings::About { status_line: &status_line, updater: &mut self.updater };
+        if settings::ui(ui, &mut self.settings, &mut self.settings_filter, &mut about) {
             self.apply_settings();
             if let Err(e) = self.settings.save(&settings::path()) {
                 self.error = Some(format!("could not save settings: {e}"));
@@ -3467,6 +3471,16 @@ impl App {
         let cmd = if cfg!(target_os = "macos") { "Cmd" } else { "Ctrl" };
         if ui.put(gear_rect, gear).on_hover_text(format!("Settings ({cmd}+,)")).clicked() {
             self.open_settings();
+        }
+        // A newer scope: a quiet note left of the ⚙, opening Settings → About to install it.
+        if let Some(version) = self.updater.available().map(|r| r.version.clone()) {
+            let note_rect = egui::Rect::from_min_max(rect.left_top(), egui::pos2(gear_rect.left() - 4.0, rect.bottom()));
+            let mut bar = ui.new_child(egui::UiBuilder::new().max_rect(note_rect).layout(egui::Layout::right_to_left(egui::Align::Center)));
+            let note = egui::Button::new(RichText::new(format!("scope {version} is available")).small()).frame(false);
+            if bar.add(note).on_hover_text("Open Settings to install it").clicked() {
+                self.settings_filter.clear();
+                self.open_settings();
+            }
         }
     }
 
@@ -4085,6 +4099,11 @@ impl eframe::App for App {
         self.poll_runner();
         self.poll_summary();
         self.poll_naming();
+        self.updater.poll(&self.ctx);
+        if std::mem::take(&mut self.updater.restart) {
+            // Quits like Cmd+Q; the sessions it runs go on and the new scope picks them up.
+            self.ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+        }
         self.poll_overviews();
         self.mark_seen();
         self.poll_orchestration();

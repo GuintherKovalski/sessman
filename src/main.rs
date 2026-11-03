@@ -21,6 +21,7 @@ mod settings;
 mod state;
 mod status;
 mod theme;
+mod update;
 mod workspaces;
 
 fn main() -> eframe::Result {

@@ -22,6 +22,9 @@ while read -r local_ref local_sha remote_ref remote_sha; do
             fi
         done ;;
     feature/*) ;;
+    refs/tags/v*)
+        echo "refused: release tags are made by CI when a version bump reaches main: scripts/flow.sh release <version>" >&2
+        exit 1 ;;
     *)
         echo "refused: '$branch' is not a feature/* branch. Start one from stage: scripts/flow.sh new <name>" >&2
         exit 1 ;;
