@@ -523,7 +523,7 @@ impl App {
 
     fn save_workspaces(&mut self) {
         if let Err(e) = self.workspaces.save(&Workspaces::path()) {
-            self.error = Some(format!("could not save workspaces: {e}"));
+            self.error = Some(format!("could not save scopes: {e}"));
         }
     }
 
@@ -587,7 +587,7 @@ impl App {
         let Some(w) = self.sync_workspaces(Some(w)) else { return };
         let old = self.workspaces.list[w].name.clone();
         if let Err(e) = self.workspaces.rename(w, name) {
-            self.error = Some(format!("could not rename workspace: {e}"));
+            self.error = Some(format!("could not rename scope: {e}"));
             return;
         }
         self.save_workspaces();
@@ -1087,7 +1087,7 @@ impl App {
                 .iter()
                 .position(|w| w.name.eq_ignore_ascii_case(n))
                 .map(Some)
-                .ok_or_else(|| format!("no workspace is called \"{n}\"; there are: {}", list.iter().map(|w| w.name.as_str()).collect::<Vec<_>>().join(", ")));
+                .ok_or_else(|| format!("no scope is called \"{n}\"; there are: {}", list.iter().map(|w| w.name.as_str()).collect::<Vec<_>>().join(", ")));
         }
         let of_caller = caller.and_then(|c| list.iter().position(|w| w.sessions.iter().any(|s| s == c)));
         Ok(of_caller.or(self.tab.filter(|&t| t < list.len())))
@@ -1162,9 +1162,9 @@ impl App {
                 format!("Renamed \"{before}\" to \"{}\"", self.name_of(&id))
             }),
             Command::Move { session, to } => self.find_session(&session).and_then(|id| {
-                let w = self.workspaces.list.iter().position(|w| w.sessions.contains(&id)).ok_or("that session is in no workspace, so it has no place in a bar to move to")?;
+                let w = self.workspaces.list.iter().position(|w| w.sessions.contains(&id)).ok_or("that session is in no scope, so it has no place in a bar to move to")?;
                 let mut order = self.bar_ids(w);
-                let from = order.iter().position(|x| *x == id).ok_or("that session isn't in its workspace's bar")?;
+                let from = order.iter().position(|x| *x == id).ok_or("that session isn't in its scope's bar")?;
                 let at = control::place(&to, from, order.len())?;
                 order.remove(from);
                 order.insert(at, id.clone());
@@ -1189,7 +1189,7 @@ impl App {
             }),
             Command::Ask { question, workspace } => {
                 let asked = self.find_workspace(workspace.as_deref(), caller).and_then(|w| {
-                    let w = w.ok_or("which workspace? none is open; use --workspace")?;
+                    let w = w.ok_or("which scope? none is open; use --scope")?;
                     self.ask_orchestrator(w, question)?;
                     Ok(self.workspaces.list[w].name.clone())
                 });
@@ -1216,7 +1216,7 @@ impl App {
             let picked = self.workspaces.list[w].folder.clone().filter(|d| d.is_dir());
             picked.or_else(|| self.workspace_sessions(w).into_iter().find_map(|i| session::load(&self.sessions[i].path).ok()?.cwd.filter(|d| d.is_dir())))
         });
-        of_workspace.or(cwd.filter(|d| d.is_dir())).ok_or_else(|| "which folder? the workspace has none yet; use --folder".to_owned())
+        of_workspace.or(cwd.filter(|d| d.is_dir())).ok_or_else(|| "which folder? the scope has none yet; use --folder".to_owned())
     }
 
     /// `scope list`: each workspace (or the one asked for) with its sessions in bar order.
@@ -1239,7 +1239,7 @@ impl App {
             }
         }
         if out.is_empty() {
-            out.push_str("No workspaces yet.\n");
+            out.push_str("No scopes yet.\n");
         }
         Ok(out.trim_end().to_owned())
     }
@@ -2034,7 +2034,7 @@ impl App {
             ui.label(RichText::new("No matches. Press Enter to ask Haiku.").weak());
         } else if rows.is_empty() && pending.is_empty() {
             ui.label(if self.tab.is_some() {
-                "Empty workspace. Drag sessions onto its tab, or right-click a session and choose Move to."
+                "Empty scope. Drag sessions onto its tab, or right-click a session and choose Move to."
             } else {
                 "No sessions found in ~/.claude/projects"
             });
@@ -2148,7 +2148,7 @@ impl App {
                     }
                     ui.menu_button("Move to", |ui| {
                         if self.workspaces.list.is_empty() {
-                            ui.label("No workspaces yet. Create one with +");
+                            ui.label("No scopes yet. Create one with +");
                         }
                         for (w, ws) in self.workspaces.list.iter().enumerate() {
                             if ui.button(&ws.name).clicked() {
@@ -2156,7 +2156,7 @@ impl App {
                             }
                         }
                     });
-                    if self.tab.is_some() && ui.button("Remove from workspace").clicked() {
+                    if self.tab.is_some() && ui.button("Remove from scope").clicked() {
                         actions.push(Action::Remove(dragging.clone()));
                     }
                     ui.separator();
@@ -2214,7 +2214,7 @@ impl App {
 
     fn tabs(&mut self, ui: &mut egui::Ui, actions: &mut Vec<Action>) {
         ui.horizontal_wrapped(|ui| {
-            let all = ui.selectable_label(self.tab.is_none(), "All sessions").on_hover_text("Every session, and an overview of the workspaces");
+            let all = ui.selectable_label(self.tab.is_none(), "Scopes").on_hover_text("Every session, and an overview of the scopes");
             if all.clicked() {
                 actions.push(Action::Tab(None));
             }
@@ -2241,7 +2241,7 @@ impl App {
                     actions.push(Action::MoveTo((*ids).clone(), w));
                 }
                 tab.context_menu(|ui| {
-                    if ui.button("Rename workspace").clicked() {
+                    if ui.button("Rename scope").clicked() {
                         self.workspace_rename = Some((w, ws.name.clone(), true));
                     }
                     ui.menu_button("Color", |ui| {
@@ -2249,18 +2249,18 @@ impl App {
                             actions.push(Action::ColorWorkspace(w, c));
                         }
                     });
-                    if ui.button("Delete workspace").clicked() {
+                    if ui.button("Delete scope").clicked() {
                         actions.push(Action::DeleteWorkspace(w));
                     }
                 });
             }
-            if ui.button("+").on_hover_text("New workspace").clicked() {
+            if ui.button("+").on_hover_text("New scope").clicked() {
                 self.new_workspace = Some(String::new());
             }
         });
         let Some(name) = &mut self.new_workspace else { return };
         let id = Id::new("new-workspace");
-        let resp = ui.add(egui::TextEdit::singleline(name).id(id).hint_text("Workspace name, Enter to create"));
+        let resp = ui.add(egui::TextEdit::singleline(name).id(id).hint_text("Scope name, Enter to create"));
         if !resp.has_focus() && !resp.lost_focus() {
             resp.request_focus();
         }
@@ -2283,8 +2283,8 @@ impl App {
         let name = self.workspaces.list.get(w).map(|w| w.name.clone()).unwrap_or_default();
         let (mut delete, mut cancel) = (false, false);
         let modal = egui::Modal::new(Id::new("confirm-delete")).show(ctx, |ui| {
-            ui.label(RichText::new(format!("Delete workspace \"{name}\"?")).strong());
-            ui.label("Its sessions are not deleted; they stay in All sessions.");
+            ui.label(RichText::new(format!("Delete scope \"{name}\"?")).strong());
+            ui.label("Its sessions are not deleted; they stay in Scopes.");
             ui.add_space(8.0);
             ui.horizontal(|ui| {
                 delete = ui.button("Delete").clicked();
@@ -2810,7 +2810,7 @@ impl App {
     fn conversation(&mut self, ui: &mut egui::Ui) {
         let Some(s) = &self.open else {
             ui.centered_and_justified(|ui| ui.label(if self.tab.is_some() && self.visible().is_empty() {
-                "This workspace is empty"
+                "This scope is empty"
             } else {
                 "Select a session on the left"
             }));

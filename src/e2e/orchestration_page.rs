@@ -39,7 +39,7 @@ fn the_workspace_bubble_opens_the_page_which_writes_its_first_report() {
 #[test]
 fn the_tab_reopens_on_the_page() {
     let mut s = on_page();
-    s.click("All sessions");
+    s.click("Scopes");
     s.click_first("Work");
     assert!(s.sees("Fake summary of "));
     assert_eq!(s.env.config_json("workspaces.json")["list"][0]["last"], "@orchestration");
@@ -103,5 +103,5 @@ fn a_report_it_cannot_read_shows_why() {
 fn an_empty_workspace_page_says_how_to_fill_it() {
     let mut s = setup().workspaces(&[("Empty", &[])]).launch();
     s.click_first("Empty");
-    assert!(s.sees("No sessions in this workspace yet."));
+    assert!(s.sees("No sessions in this scope yet."));
 }

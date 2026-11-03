@@ -296,7 +296,7 @@ pub fn ui(ui: &mut egui::Ui, s: &mut Settings, filter: &mut String, about: &Abou
         });
 
         page.section("Behaviour");
-        page.row("Confirm before deleting a workspace", "", s.confirm_delete_workspace != defaults.confirm_delete_workspace, |ui, reset| {
+        page.row("Confirm before deleting a scope", "", s.confirm_delete_workspace != defaults.confirm_delete_workspace, |ui, reset| {
             if reset {
                 s.confirm_delete_workspace = defaults.confirm_delete_workspace;
             }
@@ -316,13 +316,13 @@ pub fn ui(ui: &mut egui::Ui, s: &mut Settings, filter: &mut String, about: &Abou
         });
 
         page.section("Overview");
-        page.row("Jira URL", "Ticket keys in the workspaces overview link here, e.g. https://acme.atlassian.net", s.jira_url != defaults.jira_url, |ui, reset| {
+        page.row("Jira URL", "Ticket keys in the scopes overview link here, e.g. https://acme.atlassian.net", s.jira_url != defaults.jira_url, |ui, reset| {
             if reset {
                 s.jira_url = defaults.jira_url.clone();
             }
             ui.add(egui::TextEdit::singleline(&mut s.jira_url).hint_text("https://…atlassian.net").desired_width(260.0));
         });
-        page.row("Offer to finish sessions idle for (hours)", "Their last interaction shows in red, with Finish session to take them out of the workspace; 0 = never", s.stale_after_hours != defaults.stale_after_hours, |ui, reset| {
+        page.row("Offer to finish sessions idle for (hours)", "Their last interaction shows in red, with Finish session to take them out of the scope; 0 = never", s.stale_after_hours != defaults.stale_after_hours, |ui, reset| {
             if reset {
                 s.stale_after_hours = defaults.stale_after_hours;
             }
@@ -330,7 +330,7 @@ pub fn ui(ui: &mut egui::Ui, s: &mut Settings, filter: &mut String, about: &Abou
         });
 
         page.section("Harness");
-        page.row("Workspace orchestration", "What the orchestrator of each workspace is told to do; the reply format and the sessions are added after it", s.orchestration_harness != defaults.orchestration_harness, |ui, reset| {
+        page.row("Scope orchestration", "What the orchestrator of each scope is told to do; the reply format and the sessions are added after it", s.orchestration_harness != defaults.orchestration_harness, |ui, reset| {
             if reset {
                 s.orchestration_harness = defaults.orchestration_harness.clone();
             }
@@ -468,7 +468,7 @@ mod tests {
         assert_eq!(s.search_harness, crate::search::DEFAULT_HARNESS);
         assert_eq!(Settings::harness("  \n", "D"), "D");
         assert_eq!(Settings::harness("mine", "D"), "mine");
-        assert!(matches("harness", "Harness", "Workspace orchestration"));
+        assert!(matches("harness", "Harness", "Scope orchestration"));
     }
 
     #[test]
