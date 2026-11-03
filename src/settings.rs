@@ -156,6 +156,8 @@ pub fn shortcuts(s: &Settings) -> Vec<(&'static str, String)> {
         ("Send the prompt (queued while Claude works)", send),
         ("New line in the prompt", newline),
         ("Refine the prompt", refine),
+        ("Refine the prompt, wherever the focus is", format!("{cmd}+R")),
+        ("Dictate: start, or stop and transcribe", format!("{cmd}+D")),
         ("Stop Claude", "Ctrl+C".to_owned()),
         ("Previous / next prompt (or pull back a queued one)", "Up / Down".to_owned()),
         ("Open settings", format!("{cmd}+,")),
@@ -483,6 +485,7 @@ mod tests {
     fn shortcuts_follow_the_send_setting() {
         let mut s = Settings::default();
         assert!(shortcuts(&s).iter().any(|(_, k)| k == "Enter"));
+        assert!(shortcuts(&s).iter().any(|(w, k)| w.starts_with("Dictate") && k.ends_with("+D")));
         s.send_with_modifier = true;
         assert!(shortcuts(&s).iter().any(|(w, k)| w.starts_with("Refine") && k.ends_with("Shift+Enter")));
     }

@@ -156,7 +156,7 @@ opened; clicking "All sessions" again comes back to it.
     What it had written stays, marked **⏹ Interrupted**; the stopped prompt comes back into
     the input to fix and resend; the queue **pauses** (with **Resume queue**) so nothing else
     is sent unasked. A failed run pauses the queue the same way.
-  - **✨ Refine** (the button at the input's right, or **Cmd+Enter**) asks the helper model
+  - **✨ Refine** (the button at the input's right, **Cmd+Enter** in the input, or **Cmd+R** wherever the focus is) asks the helper model
     (Haiku by default) to rewrite the prompt clearly, using the session's goal and recent
     prompts as context. If the prompt is ambiguous it first asks up to 3 questions above the
     input, each with suggested answers, an "Other…" field and **Skip**; **Skip all** refines

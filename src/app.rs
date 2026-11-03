@@ -2613,6 +2613,17 @@ impl App {
         } else {
             (false, false)
         };
+        // Cmd+D dictates (starts, or stops and transcribes) and Cmd+R refines, wherever the
+        // focus is; the input has it afterwards.
+        let (dictate_key, refine_anywhere) = ui.input_mut(|i| {
+            (dictation::AVAILABLE && i.consume_key(Modifiers::COMMAND, Key::D), i.consume_key(Modifiers::COMMAND, Key::R))
+        });
+        let recording_now = matches!(self.dictation, Dictation::Recording(_));
+        let dictate_key = dictate_key && (recording_now || enabled);
+        let refine_key = refine_key || (refine_anywhere && !self.input.trim().is_empty());
+        if dictate_key || refine_anywhere {
+            self.focus_prompt = true;
+        }
         // Cmd+V with images on the clipboard: they go in as markers, instead of any text that
         // came with them (a copied file's name).
         if images::paste_pressed()
@@ -2764,7 +2775,7 @@ impl App {
                         let refine = egui::Button::new("✨").frame(false);
                         refine_click = ui
                             .add_enabled(enabled && !waiting && !self.input.trim().is_empty(), refine)
-                            .on_hover_text(format!("Refine the prompt ({keys})"))
+                            .on_hover_text(format!("Refine the prompt ({keys} or {cmd}+R)"))
                             .on_disabled_hover_text("Type a prompt to refine it")
                             .clicked();
                         // Added after refine, so it sits to the left of it.
@@ -2772,7 +2783,11 @@ impl App {
                             let transcribing = matches!(self.dictation, Dictation::Transcribing(_));
                             let (icon, color) = if recording { ("⏹", pal.error) } else { ("🎤", ui.visuals().text_color()) };
                             let mic = egui::Button::new(RichText::new(icon).color(color)).frame(false);
-                            let hover = if recording { "Stop dictation" } else { "Dictate: click to start, click again to stop" };
+                            let hover = if recording {
+                                format!("Stop dictation ({cmd}+D)")
+                            } else {
+                                format!("Dictate ({cmd}+D): click to start, click again to stop")
+                            };
                             dictate_click = ui
                                 .add_enabled(recording || (enabled && !transcribing), mic)
                                 .on_hover_text(hover)
@@ -2796,7 +2811,7 @@ impl App {
         if stop {
             self.stop_open();
         }
-        if dictate_click {
+        if dictate_click || dictate_key {
             self.toggle_dictation();
         }
         if enabled && (refine_key || refine_click) && self.refine.as_ref().is_none_or(|r| r.rx.is_none()) {
