@@ -2,6 +2,30 @@
 
 A small desktop app for browsing and continuing Claude Code sessions.
 
+## Install
+
+Needs macOS 11 or later (Apple Silicon or Intel) and [Claude Code](https://docs.claude.com/en/docs/claude-code).
+In a terminal:
+
+```sh
+curl -fsSL https://github.com/GuintherKovalski/sessman/releases/latest/download/install.sh | sh
+```
+
+It downloads the latest scope (checking its checksum and signature), puts it in /Applications,
+downloads the speech model for dictation, installs Claude Code if it's missing, and opens scope.
+Run it again any time to update. Or:
+
+- **Homebrew**: `brew install --cask guintherkovalski/scope/scope`
+- **By hand**: download `scope-<version>.dmg` from the [latest release](https://github.com/GuintherKovalski/sessman/releases/latest),
+  open it and drag scope to Applications.
+
+That's all: nothing to compile, no Rust or cmake. scope updates itself: when a new version is
+out, the top bar says so, and **Settings → About** installs it and restarts (your sessions keep
+running). Installed another way, dictation (🎤) offers to download its speech model (about
+150 MB) the first time you use it; the first recording asks for microphone access.
+
+## Features
+
 - **Top**: a thin bar that holds the macOS window buttons (drag to move, double-click to zoom)
 - **Left**: a **+ New session** button (native folder picker), then your sessions from `~/.claude/projects`, newest first (refreshes on its own), with scope tabs (+ to create, drag or right-click → Move to). Shift-click (range), Cmd-click, or drag a box from an unselected row to pick several sessions; drag the picked ones onto a tab, or right-click them to move, remove or move to the Trash (Esc clears the picks). **Search** at the bottom: type to filter by name, goal, then content; Enter asks Haiku
 - **Orchestration**: in each scope tab, a bubble above its sessions (filled with the scope color, with a ◆ mark and a progress line) opens the scope's orchestration page: overall progress, what needs you, next steps, and a card per session (live state, what it is doing, its next step, goal checklist). The helper model writes the report and updates it with only the new activity; **Clear & re-summarize** starts it over from scratch. Ask the orchestrator questions at the bottom of the page
@@ -12,31 +36,30 @@ A small desktop app for browsing and continuing Claude Code sessions.
 - **Restart-proof**: the open scope and session, tabs, drafts, queues and layout come back after a restart; each scope reopens its last session
 - **Right**: tabs. **Changes**: code changes grouped by file with syntax highlighting, and a file list (click to filter, double-click to open the file read-only in a main-area tab). **Info**: session goal with a subgoal checklist and a field to ask about it, model, context usage, usage limits
 
+## Build from source
+
+Needs [Rust](https://rustup.rs) and `brew install cmake` (it builds the Whisper engine,
+whisper.cpp with Metal, for dictation).
+
 ```sh
 cargo run --release
 cargo test
 scripts/bundle.sh     # builds scope.app with its icon into ~/Applications (or a dir you pass)
+scripts/release.sh    # the release files (universal .dmg and .zip) into dist/
 ```
+
+Pin `~/Applications/scope.app` in the Dock, not `target/release/scope`: a bare binary shows
+the generic executable icon whenever the app isn't running.
 
 **Testing changes**: always in a new instance of scope, never the one running your sessions
 (restarting it ends them): `scripts/test-instance.sh start`, then `stop`. See
 [CLAUDE.md](CLAUDE.md). Taking changes live without a restart is on the
 [roadmap](ROADMAP.md#13-live-changes-scope-updates-without-ending-its-sessions).
 
-Pin `~/Applications/scope.app` in the Dock, not `target/release/scope`: a bare binary shows
-the generic executable icon whenever the app isn't running.
+**Releasing**: `scripts/flow.sh release 0.2.0`; CI builds, signs, notarizes and publishes it.
+The one-time setup (Developer ID certificate, secrets, Homebrew tap) is in [RELEASING.md](RELEASING.md).
 
-Dictation (the 🎤 button by the prompt) needs a few things on macOS, once:
-
-- `brew install cmake`, which builds the Whisper engine (whisper.cpp, with Metal) for `cargo build`
-- The Whisper model, about 150 MB, in `~/.config/scope/models/`:
-
-  ```sh
-  mkdir -p ~/.config/scope/models
-  curl -L -o ~/.config/scope/models/ggml-base.bin https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-base.bin
-  ```
-
-The first recording asks for microphone access. Linux is not supported yet.
+Linux is not supported yet.
 
 Specs, plan, and tasks are in `specs/001-session-manager-ui/` (Spec Kit). The open questions to
 settle by using the app are in `research.md`.

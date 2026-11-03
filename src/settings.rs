@@ -72,6 +72,8 @@ pub struct Settings {
     /// Hours without activity after which the overview shows a session in red and offers to
     /// finish it; 0 = never.
     pub stale_after_hours: u32,
+    /// Look for a newer scope on GitHub at start and twice a day (Settings → About).
+    pub check_for_updates: bool,
 }
 
 impl Default for Settings {
@@ -103,6 +105,7 @@ impl Default for Settings {
             orchestration_model: String::new(),
             orchestration_every: 10,
             stale_after_hours: 24,
+            check_for_updates: true,
         }
     }
 }
@@ -170,6 +173,7 @@ pub fn shortcuts(s: &Settings) -> Vec<(&'static str, String)> {
 /// What the Settings page shows besides the settings themselves.
 pub struct About<'a> {
     pub status_line: &'a str,
+    pub updater: &'a mut crate::update::Updater,
 }
 
 /// True if `query` matches a setting's label or section (case-insensitive, every word).
@@ -179,7 +183,7 @@ pub fn matches(query: &str, section: &str, label: &str) -> bool {
 }
 
 /// The Settings page. Returns true when a setting changed (to save and apply it).
-pub fn ui(ui: &mut egui::Ui, s: &mut Settings, filter: &mut String, about: &About) -> bool {
+pub fn ui(ui: &mut egui::Ui, s: &mut Settings, filter: &mut String, about: &mut About) -> bool {
     let before = s.clone();
     let defaults = Settings::default();
     ui.horizontal(|ui| {
@@ -371,6 +375,13 @@ pub fn ui(ui: &mut egui::Ui, s: &mut Settings, filter: &mut String, about: &Abou
         page.section("About");
         page.row("Version", "", false, |ui, _| {
             ui.label(env!("CARGO_PKG_VERSION"));
+            update_status(ui, about.updater);
+        });
+        page.row("Check for updates automatically", "At start and twice a day, on GitHub; installing always waits for you", s.check_for_updates != defaults.check_for_updates, |ui, reset| {
+            if reset {
+                s.check_for_updates = defaults.check_for_updates;
+            }
+            ui.checkbox(&mut s.check_for_updates, "");
         });
         page.row("Config folder", "", false, |ui, _| {
             let dir = config_dir();
@@ -387,6 +398,55 @@ pub fn ui(ui: &mut egui::Ui, s: &mut Settings, filter: &mut String, about: &Abou
         }
     });
     *s != before
+}
+
+/// Where updates stand, with the button for the next step (check, install, retry).
+fn update_status(ui: &mut egui::Ui, u: &mut crate::update::Updater) {
+    use crate::update::State;
+    let ctx = ui.ctx().clone();
+    let page = |ui: &mut egui::Ui, url: &str| {
+        if !url.is_empty() && ui.small_button("What's new").clicked() {
+            let _ = std::process::Command::new("open").arg(url).spawn();
+        }
+    };
+    match &u.state {
+        State::Idle => {
+            if ui.small_button("Check for updates").clicked() {
+                u.check_now(&ctx);
+            }
+        }
+        State::Checking => {
+            ui.spinner();
+            ui.label(RichText::new("checking…").weak());
+        }
+        State::UpToDate => {
+            ui.label(RichText::new("up to date").weak());
+            if ui.small_button("Check again").clicked() {
+                u.check_now(&ctx);
+            }
+        }
+        State::Available(r) => {
+            let (version, url) = (r.version.clone(), r.page.clone());
+            ui.label(RichText::new(format!("{version} is available")).strong());
+            if ui.button(format!("Install {version} and restart")).clicked() {
+                u.install(&ctx);
+            }
+            page(ui, &url);
+        }
+        State::Installing(r) => {
+            ui.spinner();
+            ui.label(format!("installing {}…", r.version));
+        }
+        State::Ready(r) => {
+            ui.label(format!("{} installed, restarting…", r.version));
+        }
+        State::Failed(e) => {
+            ui.label(RichText::new(e).color(ui.visuals().error_fg_color));
+            if ui.small_button("Try again").clicked() {
+                u.check_now(&ctx);
+            }
+        }
+    }
 }
 
 /// A harness's text: several lines, wide enough to read and edit as a paragraph. Emptying it

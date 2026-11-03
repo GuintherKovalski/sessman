@@ -228,6 +228,12 @@ the settings; each changed setting has a ↺ to reset it. Changes apply and save
   notify when a run finishes while scope is in the background.
 - **Keyboard shortcuts** (a list) and **About** (version, config folder with Open in Finder,
   status line).
+- **Updates** (under About): scope looks for a newer GitHub release at start and every 12 hours
+  (only when it runs as an installed scope.app; off with *Check for updates automatically*).
+  When there is one, the top bar shows *scope X is available* on the right, which opens
+  Settings; **Install X and restart** downloads the release's `.zip`, checks its signature
+  (same Developer ID team as the running app), swaps it in place of scope.app and restarts
+  into it. Quitting doesn't end the sessions scope runs; the new scope picks them up.
 
 ### Restarting
 Closing and opening scope brings everything back: window size and position, panel widths,
@@ -297,6 +303,7 @@ src/
 ├── runner.rs      runs `claude -p` (streaming send, stop, helper questions), folder picker, notifications
 ├── search.rs      session search: background index, matching and ranking, Haiku search format
 ├── status.rs      `scope statusline`: saves Claude Code's status data; usage limits
+├── update.rs      finds newer releases on GitHub, installs one in place of scope.app
 └── workspaces.rs  workspaces: create, move, remove, delete, load/save
 ```
 
