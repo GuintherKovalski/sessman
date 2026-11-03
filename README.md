@@ -53,7 +53,8 @@ the generic executable icon whenever the app isn't running.
 
 **Testing changes**: always in a new instance of scope, never the one running your sessions
 (restarting it ends them): `scripts/test-instance.sh start`, then `stop`. See
-[CLAUDE.md](CLAUDE.md). Taking changes live without a restart is on the
+[CLAUDE.md](CLAUDE.md). Several features at once, each with its own worktree, build and test
+window: `scripts/feature.sh`, see [WORKTREES.md](WORKTREES.md). Taking changes live without a restart is on the
 [roadmap](ROADMAP.md#13-live-changes-scope-updates-without-ending-its-sessions).
 
 **Releasing**: `scripts/flow.sh release 0.2.0`; CI builds, signs, notarizes and publishes it.

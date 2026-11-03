@@ -6,8 +6,9 @@ built and [ROADMAP.md](ROADMAP.md) for what comes next.
 ## Branches: feature -> stage -> tests pass -> main
 
 Never commit on `main` or `stage`, and never work in the main checkout: it holds the
-developer's (and other agents') uncommitted changes. Make each change in its own git worktree;
-[WORKTREES.md](WORKTREES.md) has the steps. Every change goes:
+developer's (and other agents') uncommitted changes. Make each change in its own git worktree
+with its own build and test instance: `scripts/feature.sh new|list|run|stop|ship|rm <name>`;
+[WORKTREES.md](WORKTREES.md) has the details. Every change goes:
 
 ```sh
 scripts/flow.sh new <name>   # feature/<name>, made from origin/stage
