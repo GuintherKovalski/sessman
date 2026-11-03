@@ -1,6 +1,6 @@
 use eframe::egui::{self, RichText, ThemePreference};
 use serde::{Deserialize, Serialize};
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 /// scope's own folder: `~/.config/scope`, or `$SCOPE_CONFIG` (used to run a test copy
 /// of the app next to the real one).
@@ -111,17 +111,6 @@ impl Default for Settings {
 }
 
 impl Settings {
-    pub fn load(path: &Path) -> Self {
-        std::fs::read_to_string(path).ok().and_then(|s| serde_json::from_str(&s).ok()).unwrap_or_default()
-    }
-
-    pub fn save(&self, path: &Path) -> std::io::Result<()> {
-        if let Some(dir) = path.parent() {
-            std::fs::create_dir_all(dir)?;
-        }
-        std::fs::write(path, serde_json::to_string_pretty(self)?)
-    }
-
     /// The harness text, or `default` when it was emptied.
     pub fn harness<'a>(text: &'a str, default: &'a str) -> &'a str {
         if text.trim().is_empty() { default } else { text }
@@ -509,16 +498,16 @@ mod tests {
     fn old_theme_only_file_loads_with_defaults() {
         let path = std::env::temp_dir().join(format!("scope-settings-{}.json", std::process::id()));
         std::fs::write(&path, r#"{"theme":"dark"}"#).unwrap();
-        let s = Settings::load(&path);
+        let load = || crate::shared::Shared::<Settings>::load(path.clone());
+        let mut s = load();
         assert_eq!(s.theme(), ThemePreference::Dark);
         assert_eq!(s.helper_model, "haiku");
         assert!(s.restore_state);
-        let mut s2 = s.clone();
-        s2.zoom = 1.25;
-        s2.save(&path).unwrap();
-        assert_eq!(Settings::load(&path), s2);
+        s.zoom = 1.25;
+        s.save().unwrap();
+        assert_eq!(*load(), *s);
         std::fs::write(&path, "not json").unwrap();
-        assert_eq!(Settings::load(&path), Settings::default());
+        assert_eq!(*load(), Settings::default());
         std::fs::remove_file(path).unwrap();
     }
 

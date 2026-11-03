@@ -27,7 +27,7 @@ use eframe::egui::{self, Color32, Id, Key, Modifiers, RichText, Sense, Stroke, S
 use egui_commonmark::CommonMarkCache;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::sync::mpsc::{self, Receiver};
 use std::time::SystemTime;
 
@@ -124,23 +124,13 @@ impl Orchestration {
 }
 
 /// Workspace name → its orchestration, saved as JSON.
-#[derive(Default, Debug)]
+#[derive(Default, Debug, Serialize, Deserialize)]
+#[serde(transparent)]
 pub struct Store(HashMap<String, Orchestration>);
 
 impl Store {
     pub fn path() -> PathBuf {
         crate::settings::config_dir().join("orchestration.json")
-    }
-
-    pub fn load(path: &Path) -> Self {
-        Self(std::fs::read_to_string(path).ok().and_then(|s| serde_json::from_str(&s).ok()).unwrap_or_default())
-    }
-
-    pub fn save(&self, path: &Path) -> std::io::Result<()> {
-        if let Some(dir) = path.parent() {
-            std::fs::create_dir_all(dir)?;
-        }
-        std::fs::write(path, serde_json::to_string_pretty(&self.0)?)
     }
 
     pub fn get(&self, name: &str) -> Option<&Orchestration> {
@@ -1053,6 +1043,7 @@ fn plural(n: usize, word: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::shared::Shared;
 
     fn member(id: &str, modified: u64) -> Member {
         Member { id: id.into(), title: format!("T {id}"), goal: None, path: PathBuf::new(), modified, running: false, queued: 0 }
@@ -1157,10 +1148,9 @@ mod tests {
     #[test]
     fn store_roundtrips_and_clears() {
         let path = std::env::temp_dir().join(format!("scope-orch-{}.json", std::process::id()));
-        let mut s = Store::default();
-        s.entry("W").answered("q".into(), "a".into(), vec!["did".into()], 1);
-        s.save(&path).unwrap();
-        let mut back = Store::load(&path);
+        let mut s: Shared<Store> = Shared::load(path.clone());
+        s.change(|s| s.entry("W").answered("q".into(), "a".into(), vec!["did".into()], 1)).unwrap();
+        let mut back: Shared<Store> = Shared::load(path.clone());
         assert_eq!(back.get("W"), s.get("W"));
         back.clear("W");
         assert!(back.get("W").is_none());

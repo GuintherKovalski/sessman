@@ -72,8 +72,14 @@ pub fn watch(ctx: eframe::egui::Context) -> Receiver<Incoming> {
                 let mut paths: Vec<PathBuf> = entries.flatten().map(|e| e.path()).filter(|p| p.extension().is_some_and(|x| x == "json")).collect();
                 paths.sort();
                 for path in paths {
-                    let text = std::fs::read_to_string(&path);
-                    let _ = std::fs::remove_file(&path);
+                    // Taken by moving it aside first: another scope on the same config folder
+                    // watches this inbox too, and whichever moves it first runs it.
+                    let taken = path.with_extension(format!("taken-{}", std::process::id()));
+                    if std::fs::rename(&path, &taken).is_err() {
+                        continue;
+                    }
+                    let text = std::fs::read_to_string(&taken);
+                    let _ = std::fs::remove_file(&taken);
                     let reply = path.with_extension("reply");
                     match text.map_err(|e| e.to_string()).and_then(|t| serde_json::from_str::<Request>(&t).map_err(|e| e.to_string())) {
                         Ok(request) => {

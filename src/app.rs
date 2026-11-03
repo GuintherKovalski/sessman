@@ -15,6 +15,7 @@ use crate::runner::{self, RunEvent};
 use crate::search::{self, Hit, Source};
 use crate::session::{self, Role, Session, SessionMeta};
 use crate::settings::{self, Settings};
+use crate::shared::{self, Shared};
 use crate::state::{self, OpenFile, State, View, Views};
 use crate::status;
 use crate::theme;
@@ -120,7 +121,7 @@ pub struct App {
     top_message: Option<usize>,
     /// Where the conversation showed this frame (screen), if it did; clicks there go to it.
     conversation_rect: Option<egui::Rect>,
-    names: Names,
+    names: Shared<Names>,
     renaming: Option<Renaming>,
     /// New sessions whose first run ended before the indexer listed them: (id, first prompt,
     /// folder). They stay in the bar as starting until it does.
@@ -133,7 +134,7 @@ pub struct App {
     focus_prompt: bool,
     right_tab: RightTab,
     /// AI-written one-line goals, keyed by session id.
-    goals: Names,
+    goals: Shared<Names>,
     /// Session id whose goal is being summarized, and the pending result.
     summarizing: Option<(String, Receiver<Result<String, String>>)>,
     /// New sessions whose name the helper model is writing after their first answer.
@@ -159,7 +160,7 @@ pub struct App {
     heights: Vec<f32>,
     /// Width the heights were measured at.
     heights_width: f32,
-    settings: Settings,
+    settings: Shared<Settings>,
     /// The Settings tab is open in the main area, and whether it is the active tab.
     settings_tab: bool,
     settings_active: bool,
@@ -185,6 +186,10 @@ pub struct App {
     /// Background indexer: fresh session lists + content index, and a channel to poke it.
     snapshots: Receiver<search::Snapshot>,
     poke_index: std::sync::mpsc::Sender<()>,
+    /// A shared config file was written (`shared::watch`), maybe by another scope.
+    shared_changes: Receiver<()>,
+    /// The zoom the window had last frame (see `keep_zoom`).
+    zoom_seen: f32,
     /// Prompt runs this scope did not start (see `runner::watch_runs`): session id, pid.
     foreign_runs: Receiver<Vec<(String, u32)>>,
     index: search::Index,
@@ -200,7 +205,7 @@ pub struct App {
     find: Find,
     /// Workspace summaries for the overview in All sessions, those being written (by
     /// workspace name), and the last failure of each (not retried until asked).
-    overviews: Overviews,
+    overviews: Shared<Overviews>,
     overview_jobs: HashMap<String, Receiver<Result<overview::Summary, String>>>,
     overview_errors: HashMap<String, String>,
     /// Session id → its newest change (Unix seconds) when it was last open, and when scope
@@ -211,7 +216,7 @@ pub struct App {
     /// The main area shows the open workspace's orchestration page (with no session open).
     orchestrating: bool,
     /// Each workspace's orchestration report and questions (by name), and those in flight.
-    orchestrations: orchestration::Store,
+    orchestrations: Shared<orchestration::Store>,
     orch: orchestration::Jobs,
     /// Commands from `scope list|rename|move|new|ask` (control.rs).
     control: Receiver<control::Incoming>,
@@ -340,8 +345,12 @@ impl App {
         // Thumbnails of the images in prompts (`file://` URIs).
         egui_extras::install_image_loaders(ctx);
         let (snapshots, poke_index) = search::spawn_indexer(ctx.clone());
-        let settings = Settings::load(&settings::path());
+        let settings: Shared<Settings> = Shared::load(settings::path());
         let check_for_updates = settings.check_for_updates;
+        let shared_changes = shared::watch(
+            ctx.clone(),
+            vec![Workspaces::path(), Names::path(), Names::goals_path(), settings::path(), Overviews::path(), orchestration::Store::path()],
+        );
         let usage_busy = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
         let mut app = Self {
             ctx: ctx.clone(),
@@ -370,14 +379,14 @@ impl App {
             top_message: None,
             conversation_rect: None,
             inline_you: false,
-            names: Names::load(&Names::path()),
+            names: Shared::load(Names::path()),
             renaming: None,
             unlisted: Vec::new(),
             new_session: None,
             new_id: None,
             focus_prompt: false,
             right_tab: RightTab::Changes,
-            goals: Names::load(&Names::goals_path()),
+            goals: Shared::load(Names::goals_path()),
             summarizing: None,
             naming: Vec::new(),
             btw: HashMap::new(),
@@ -407,6 +416,8 @@ impl App {
             mic_levels: std::collections::VecDeque::new(),
             snapshots,
             poke_index,
+            shared_changes,
+            zoom_seen: ctx.zoom_factor(),
             foreign_runs: runner::watch_runs(ctx.clone()),
             usage_rx: status::watch_usage(ctx.clone(), usage_busy.clone()),
             usage: None,
@@ -419,13 +430,13 @@ impl App {
             ai: None,
             saved_state: String::new(),
             find: Find::default(),
-            overviews: Overviews::load(&Overviews::path()),
+            overviews: Shared::load(Overviews::path()),
             overview_jobs: HashMap::new(),
             overview_errors: HashMap::new(),
             seen: HashMap::new(),
             seen_from: 0,
             orchestrating: false,
-            orchestrations: orchestration::Store::load(&orchestration::Store::path()),
+            orchestrations: Shared::load(orchestration::Store::path()),
             orch: orchestration::Jobs::default(),
             control: control::watch(ctx.clone()),
         };
@@ -542,6 +553,29 @@ impl App {
         find(w_name)
     }
 
+    /// Takes what other scopes saved to the config files they share with this one: workspaces
+    /// (members, order, names, colors), session names, goals, settings, overviews and
+    /// orchestrations, so every scope on one config folder shows the same.
+    fn poll_shared(&mut self) {
+        if self.shared_changes.try_iter().count() == 0 {
+            return;
+        }
+        self.sync_workspaces(None);
+        // A session another scope just put in a workspace (one it started, say) is listed as
+        // soon as its file is there, not at the next pass of the indexer.
+        let listed: HashSet<&str> = self.sessions.iter().map(|s| s.id.as_str()).collect();
+        if self.workspaces.list.iter().flat_map(|w| &w.sessions).any(|id| !listed.contains(id.as_str())) {
+            let _ = self.poke_index.send(());
+        }
+        self.names.refresh();
+        self.goals.refresh();
+        self.overviews.refresh();
+        self.orchestrations.refresh();
+        if self.settings.refresh() {
+            self.apply_settings();
+        }
+    }
+
     fn save_workspaces(&mut self) {
         if let Err(e) = self.workspaces.save(&Workspaces::path()) {
             self.error = Some(format!("could not save scopes: {e}"));
@@ -578,8 +612,7 @@ impl App {
             Action::Trash(ids) => self.confirm_trash = ids,
             Action::Rename(id, name) => {
                 self.renaming = None;
-                self.names.set(&id, &name);
-                if let Err(e) = self.names.save(&Names::path()) {
+                if let Err(e) = self.names.change(|n| n.set(&id, &name)) {
                     self.error = Some(format!("could not save names: {e}"));
                 }
             }
@@ -616,10 +649,10 @@ impl App {
         if new == old {
             return;
         }
-        self.overviews.rename(&old, &new);
-        if let Err(e) = self.overviews.save(&Overviews::path()) {
+        if let Err(e) = self.overviews.change(|o| o.rename(&old, &new)) {
             self.error = Some(format!("could not save overviews: {e}"));
         }
+        self.orchestrations.refresh();
         self.orchestrations.rename(&old, &new);
         self.save_orchestrations();
     }
@@ -849,8 +882,10 @@ impl App {
         self.orch.updating.insert(name, rx);
     }
 
+    /// Saves the orchestrations; a change to them is made after `self.orchestrations.refresh()`
+    /// (or within `change`), so it lands on top of what other scopes saved.
     fn save_orchestrations(&mut self) {
-        if let Err(e) = self.orchestrations.save(&orchestration::Store::path()) {
+        if let Err(e) = self.orchestrations.save() {
             self.error = Some(format!("could not save the orchestration: {e}"));
         }
     }
@@ -871,6 +906,7 @@ impl App {
             self.orch.updating.remove(&name);
             match result {
                 Ok(u) => {
+                    self.orchestrations.refresh();
                     self.orchestrations.entry(&name).apply(u, now);
                     changed = true;
                 }
@@ -918,6 +954,7 @@ impl App {
                         }
                         control::write_reply(&path, &Ok(text));
                     }
+                    self.orchestrations.refresh();
                     self.orchestrations.entry(&name).answered(question, answer.text, done, now);
                     changed = true;
                 }
@@ -999,6 +1036,7 @@ impl App {
             },
             Some(orchestration::Event::Update) => self.update_orchestration(w, false),
             Some(orchestration::Event::Clear) => {
+                self.orchestrations.refresh();
                 self.orchestrations.clear(&name);
                 self.orch.ask_errors.remove(&name);
                 self.save_orchestrations();
@@ -1008,6 +1046,7 @@ impl App {
                 let _ = self.ask_orchestrator(w, question);
             }
             Some(orchestration::Event::Forget(i)) => {
+                self.orchestrations.refresh();
                 let log = &mut self.orchestrations.entry(&name).log;
                 if i < log.len() {
                     log.remove(i);
@@ -1288,8 +1327,7 @@ impl App {
             match result {
                 Ok(s) => {
                     self.overview_errors.remove(&name);
-                    self.overviews.set(&name, s);
-                    if let Err(e) = self.overviews.save(&Overviews::path()) {
+                    if let Err(e) = self.overviews.change(|o| o.set(&name, s)) {
                         self.error = Some(format!("could not save the overview: {e}"));
                     }
                 }
@@ -1490,8 +1528,7 @@ impl App {
             self.summarizing = None;
             match result {
                 Ok(goal) => {
-                    self.goals.set(&id, &goal);
-                    if let Err(e) = self.goals.save(&Names::goals_path()) {
+                    if let Err(e) = self.goals.change(|g| g.set(&id, &goal)) {
                         self.error = Some(format!("could not save goal: {e}"));
                     }
                 }
@@ -1503,19 +1540,29 @@ impl App {
     /// Names written for new sessions. One renamed meanwhile keeps its name; a failure only
     /// leaves the first prompt as the name, so it isn't reported.
     fn poll_naming(&mut self) {
-        let mut named = false;
+        let mut written = Vec::new();
         self.naming.retain(|(id, rx)| match rx.try_recv() {
             Ok(result) => {
-                if let Some(name) = result.ok().and_then(|r| names::clean(&r)).filter(|_| self.names.get(id).is_none()) {
-                    self.names.set(id, &name);
-                    named = true;
+                if let Some(name) = result.ok().and_then(|r| names::clean(&r)) {
+                    written.push((id.clone(), name));
                 }
                 false
             }
             Err(std::sync::mpsc::TryRecvError::Empty) => true,
             Err(_) => false,
         });
-        if named && let Err(e) = self.names.save(&Names::path()) {
+        if written.is_empty() {
+            return;
+        }
+        // Renamed meanwhile also counts a rename made in another scope.
+        let saved = self.names.change(|n| {
+            for (id, name) in &written {
+                if n.get(id).is_none() {
+                    n.set(id, name);
+                }
+            }
+        });
+        if let Err(e) = saved {
             self.error = Some(format!("could not save names: {e}"));
         }
     }
@@ -3094,20 +3141,26 @@ impl App {
         let mut about = settings::About { status_line: &status_line, updater: &mut self.updater };
         if settings::ui(ui, &mut self.settings, &mut self.settings_filter, &mut about) {
             self.apply_settings();
-            if let Err(e) = self.settings.save(&settings::path()) {
+            if let Err(e) = self.settings.save() {
                 self.error = Some(format!("could not save settings: {e}"));
             }
         }
     }
 
     /// Zoom is changed with Cmd +/- (no slider); keep the one in use so the next launch has it.
+    /// Only a change made here is saved: a zoom another scope saved takes a frame to apply,
+    /// and saving the old one meanwhile would undo it.
     fn keep_zoom(&mut self, ctx: &egui::Context) {
         let zoom = ctx.zoom_factor();
+        if (zoom - self.zoom_seen).abs() < 0.001 {
+            return;
+        }
+        self.zoom_seen = zoom;
         if (zoom - self.settings.zoom).abs() < 0.001 {
             return;
         }
         self.settings.zoom = zoom;
-        if let Err(e) = self.settings.save(&settings::path()) {
+        if let Err(e) = self.settings.save() {
             self.error = Some(format!("could not save settings: {e}"));
         }
     }
@@ -3314,9 +3367,7 @@ impl App {
             ui.ctx().request_repaint();
         }
         if let (Some(i), Some(id)) = (toggled, &id) {
-            let raw = goal::toggle(self.goals.get(id).unwrap_or_default(), i);
-            self.goals.set(id, &raw);
-            if let Err(e) = self.goals.save(&Names::goals_path()) {
+            if let Err(e) = self.goals.change(|g| g.set(id, &goal::toggle(g.get(id).unwrap_or_default(), i))) {
                 self.error = Some(format!("could not save goal: {e}"));
             }
         }
@@ -4218,6 +4269,7 @@ impl eframe::App for App {
         self.poll_control();
         self.poll_btw();
         self.poll_snapshots();
+        self.poll_shared();
         self.poll_ai();
         self.poll_refine();
         self.poll_dictation();

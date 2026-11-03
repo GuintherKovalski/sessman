@@ -471,6 +471,11 @@ impl Scope {
         out.join("\n")
     }
 
+    /// The window's zoom factor.
+    pub fn zoom(&self) -> f32 {
+        self.h.ctx.zoom_factor()
+    }
+
     /// Whether `text` shows anywhere (part of a label, a field's contents or its hint).
     pub fn sees(&self, text: &str) -> bool {
         self.h.query_all_by(|_| true).any(|n| {
