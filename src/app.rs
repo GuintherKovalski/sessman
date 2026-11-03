@@ -3719,7 +3719,10 @@ fn message(ui: &mut egui::Ui, cache: &mut CommonMarkCache, m: &session::Message,
         .inner_margin(egui::Margin { left: 14, right: 10, top: 6, bottom: 8 })
         .show(ui, |ui| {
             ui.set_width(ui.available_width());
-            ui.label(RichText::new(who).strong().color(accent));
+            ui.horizontal(|ui| {
+                ui.label(RichText::new(who).strong().color(accent));
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| copy_button(ui, m));
+            });
             if m.role == Role::User && images::has_images(&m.text) {
                 with_images(ui, cache, &m.text);
             } else {
@@ -3730,6 +3733,29 @@ fn message(ui: &mut egui::Ui, cache: &mut CommonMarkCache, m: &session::Message,
     let stripe = egui::Rect::from_min_max(r.min, egui::pos2(r.left() + 3.0, r.bottom()));
     ui.painter().rect_filled(stripe, egui::CornerRadius { nw: 6, sw: 6, ne: 0, se: 0 }, accent);
     ui.add_space(6.0);
+}
+
+/// 📋 at the right end of a message's label row: copies the whole message, then shows ✔ for
+/// a moment. Small and without a frame until hovered.
+fn copy_button(ui: &mut egui::Ui, m: &session::Message) {
+    let copied_id = ui.id().with("copied");
+    let now = ui.input(|i| i.time);
+    let copied = ui.data(|d| d.get_temp::<f64>(copied_id)).is_some_and(|t| now - t < 1.5);
+    let icon = if copied { "✔" } else { "📋" };
+    let button = egui::Button::new(RichText::new(icon).small().weak()).small().frame_when_inactive(false);
+    if ui.add(button).on_hover_text("Copy the message").clicked() {
+        ui.ctx().copy_text(copy_text(m));
+        ui.data_mut(|d| d.insert_temp(copied_id, now));
+    }
+    if copied {
+        ui.ctx().request_repaint_after(std::time::Duration::from_millis(300));
+    }
+}
+
+/// What 📋 on a message puts on the clipboard: its text, without Claude's tool lines.
+fn copy_text(m: &session::Message) -> String {
+    let lines: Vec<&str> = m.text.lines().filter(|l| m.role == Role::User || !l.starts_with("[tool:")).collect();
+    lines.join("\n").trim().to_owned()
 }
 
 /// A prompt's text with its images as thumbnails, where they were in it.
@@ -4146,6 +4172,13 @@ mod tests {
         assert_eq!(pinned_text(&m(Role::User, "[Request interrupted by user]\nReply five")).as_deref(), Some("Reply five"));
         assert_eq!(pinned_text(&m(Role::User, "write it")).as_deref(), Some("write it"));
         assert_eq!(pinned_text(&m(Role::Assistant, "hi")), None);
+    }
+
+    #[test]
+    fn copy_leaves_out_claudes_tool_lines() {
+        let m = |role, text: &str| session::Message { role, text: text.into() };
+        assert_eq!(copy_text(&m(Role::Assistant, "[tool: Read]\nFound it.\n[tool: Edit]\nFixed.")), "Found it.\nFixed.");
+        assert_eq!(copy_text(&m(Role::User, "[tool: x] is literal here")), "[tool: x] is literal here");
     }
 
     /// Regression (item 5): a new session shows in the list as soon as its first prompt is
