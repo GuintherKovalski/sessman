@@ -30,4 +30,5 @@ mod search;
 mod sessions;
 mod settings_page;
 mod startup;
+mod sync;
 mod workspaces;

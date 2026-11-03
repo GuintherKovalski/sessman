@@ -53,23 +53,13 @@ pub struct Note {
 }
 
 /// Workspace name → its summary, saved as JSON.
-#[derive(Default, Debug)]
+#[derive(Default, Debug, Serialize, Deserialize)]
+#[serde(transparent)]
 pub struct Overviews(HashMap<String, Summary>);
 
 impl Overviews {
     pub fn path() -> PathBuf {
         crate::settings::config_dir().join("overview.json")
-    }
-
-    pub fn load(path: &Path) -> Self {
-        Self(std::fs::read_to_string(path).ok().and_then(|s| serde_json::from_str(&s).ok()).unwrap_or_default())
-    }
-
-    pub fn save(&self, path: &Path) -> std::io::Result<()> {
-        if let Some(dir) = path.parent() {
-            std::fs::create_dir_all(dir)?;
-        }
-        std::fs::write(path, serde_json::to_string_pretty(&self.0)?)
     }
 
     pub fn get(&self, name: &str) -> Option<&Summary> {

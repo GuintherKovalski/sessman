@@ -246,6 +246,14 @@ positions, drafts and queued prompts (queues come back paused), the right panel 
 search text. Sessions or files that no longer exist are skipped; a damaged state file is
 moved aside (`state.json.bad`) and the app starts fresh.
 
+### Several windows
+Every scope running on the same config folder (two windows, or one started while another
+runs) shows the same workspaces (members, order, names, colors), session names, goals,
+settings, overviews and orchestrations: what one saves, the others take within half a second,
+without a restart. A change is made on top of what the others saved, so two windows never
+undo each other's work. `scope` commands are run by whichever window takes them first, once.
+What each window shows (its open tab and session, panels, drafts) stays its own.
+
 ## How it works
 
 | What | Where it comes from |
@@ -301,6 +309,7 @@ src/
 ├── markdown.rs    Markdown rendering: tables and tool lines drawn by scope, the rest by egui_commonmark
 ├── theme.rs       the colors for dark and light
 ├── settings.rs    the Settings page, its file, and the config folder
+├── shared.rs      config files every scope on one config folder shares: refresh, save, watch
 ├── state.rs       what is restored after a restart; per-session views (file tabs, draft)
 ├── queue.rs       prompts waiting for a session's run
 ├── refine.rs      Refine prompt: the request to the helper model and its reply

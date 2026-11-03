@@ -18,6 +18,7 @@ mod search;
 mod markdown;
 mod session;
 mod settings;
+mod shared;
 mod state;
 mod status;
 mod theme;
