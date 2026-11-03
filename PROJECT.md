@@ -68,7 +68,8 @@ it to zoom.
     Settings; the sessions themselves are untouched).
   - A session belongs to at most one workspace; "All sessions" always shows everything.
   - Every workspace has its own color (no two share one). Its tab is tinted with it, and in
-    "All sessions" each session in a workspace gets a colored stripe and tint (the ▌ above).
+    "All sessions" each session in a workspace gets a bar in its color down its left edge and
+    is otherwise drawn like any other (the ▌ above).
 
 ### Middle: workspaces overview (All sessions)
 In "All sessions", the main area shows an overview of the workspaces until a session is
