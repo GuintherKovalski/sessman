@@ -176,8 +176,8 @@ opened; clicking "All sessions" again comes back to it.
   aligned columns, scroll sideways when wide). Tool calls are a small dimmed line
   (`⚙ Read · Edit`). Only messages near the visible area are drawn, so long sessions scroll
   smoothly.
-- **📋** at the top right of every You / Claude card copies the whole message as its
-  Markdown source (Claude's without its tool lines); it shows ✔ for a moment after.
+- A **copy** button (two overlapping squares) at the top right of every You / Claude card copies the whole message as its
+  Markdown source (Claude's without its tool lines); it shows a check mark for a moment after.
 
 ### Right: Changes and Info tabs
 - **Changes**: one card per changed file, in order of its first change: file name, folder,
