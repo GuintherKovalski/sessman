@@ -11,8 +11,9 @@ In a terminal:
 curl -fsSL https://github.com/GuintherKovalski/sessman/releases/latest/download/install.sh | sh
 ```
 
-It downloads the latest scope, checks its checksum and signature, puts it in /Applications and
-opens it. Run it again any time to update. Or:
+It downloads the latest scope (checking its checksum and signature), puts it in /Applications,
+downloads the speech model for dictation, installs Claude Code if it's missing, and opens scope.
+Run it again any time to update. Or:
 
 - **Homebrew**: `brew install --cask guintherkovalski/scope/scope`
 - **By hand**: download `scope-<version>.dmg` from the [latest release](https://github.com/GuintherKovalski/sessman/releases/latest),
@@ -20,8 +21,8 @@ opens it. Run it again any time to update. Or:
 
 That's all: nothing to compile, no Rust or cmake. scope updates itself: when a new version is
 out, the top bar says so, and **Settings → About** installs it and restarts (your sessions keep
-running). Dictation (🎤) downloads its speech model (about 150 MB) the first time you use it,
-after asking; the first recording asks for microphone access.
+running). Installed another way, dictation (🎤) offers to download its speech model (about
+150 MB) the first time you use it; the first recording asks for microphone access.
 
 ## Features
 

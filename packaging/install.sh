@@ -9,6 +9,8 @@
 #   SCOPE_DIR=/path         where to put scope.app
 #   SCOPE_FROM=URL          folder holding scope-macos.zip and SHA256SUMS (default: latest release)
 #   SCOPE_NO_OPEN=1         don't open it afterwards
+#   SCOPE_NO_MODEL=1        don't download the speech model for dictation (about 150 MB)
+#   SCOPE_NO_CLAUDE=1       don't install Claude Code when it is missing
 set -eu
 
 repo="${SCOPE_REPO:-GuintherKovalski/sessman}"
@@ -60,10 +62,36 @@ fi
 rm -rf "$dest/.scope-old"
 say "Installed scope ${version:+$version }in $app"
 
-if ! command -v claude >/dev/null 2>&1 && [ ! -x "$HOME/.local/bin/claude" ] && [ ! -x "$HOME/.claude/local/claude" ]; then
-    say ""
-    say "scope runs Claude Code sessions, so it needs Claude Code itself. Install it with:"
-    say "  curl -fsSL https://claude.ai/install.sh | bash"
+# Dictation's speech model, so the mic works at once (scope would otherwise ask the first time).
+model_dir="${SCOPE_CONFIG:-$HOME/.config/scope}/models"
+model="$model_dir/ggml-base.bin"
+model_bytes=147951465
+if [ -z "${SCOPE_NO_MODEL:-}" ] && [ "$(stat -f %z "$model" 2>/dev/null || echo 0)" != "$model_bytes" ]; then
+    say "Downloading the speech model for dictation (about 150 MB)…"
+    mkdir -p "$model_dir"
+    if curl -fL --progress-bar -o "$model.part" "${SCOPE_MODEL_URL:-https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-base.bin}" \
+        && [ "$(stat -f %z "$model.part")" = "$model_bytes" ]; then
+        mv "$model.part" "$model"
+    else
+        rm -f "$model.part"
+        say "Couldn't download the speech model; scope offers it again the first time you dictate."
+    fi
+fi
+
+# Claude Code, which scope runs the sessions with.
+has_claude() { command -v claude >/dev/null 2>&1 || [ -x "$HOME/.local/bin/claude" ] || [ -x "$HOME/.claude/local/claude" ]; }
+if ! has_claude; then
+    if [ -z "${SCOPE_NO_CLAUDE:-}" ]; then
+        say "Installing Claude Code (scope runs your sessions with it)…"
+        curl -fsSL https://claude.ai/install.sh | bash || true
+    fi
+    if ! has_claude; then
+        say ""
+        say "scope needs Claude Code. Install it with:  curl -fsSL https://claude.ai/install.sh | bash"
+    fi
+fi
+if has_claude; then
+    say "Claude Code is ready. If you haven't yet, sign in once by running: claude"
 fi
 
 if [ "$running" = yes ]; then
