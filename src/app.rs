@@ -271,6 +271,19 @@ const MIC_METER_WIDTH: f32 = 120.0;
 
 /// What shows while recording: a pulsing red dot, the time so far, and a level meter that
 /// scrolls right to left, so it is clear the microphone is on and hearing something.
+/// A button's tooltip: what it does, then its shortcut, shown whether or not it is enabled
+/// (a disabled one adds why, so the shortcut is still there to learn).
+fn tip(resp: egui::Response, what: &str, why_not: Option<&str>, keys: &str) -> egui::Response {
+    let body = |ui: &mut egui::Ui, extra: Option<&str>| {
+        ui.label(what);
+        if let Some(e) = extra {
+            ui.label(RichText::new(e).italics());
+        }
+        ui.label(RichText::new(keys).monospace().weak());
+    };
+    resp.on_hover_ui(|ui| body(ui, None)).on_disabled_hover_ui(|ui| body(ui, why_not))
+}
+
 fn recording_meter(ui: &mut egui::Ui, recorder: &dictation::Recorder, levels: &mut std::collections::VecDeque<f32>, red: Color32) {
     // A new bar every 60 ms, holding the loudest sample since the last one.
     let now = ui.input(|i| i.time);
@@ -2492,7 +2505,7 @@ impl App {
                 let mut undo = false;
                 ui.horizontal(|ui| {
                     ui.label(RichText::new("✨ Refined").color(pal.note));
-                    undo = ui.link("Undo refine").on_hover_text(format!("{cmd}+Z")).clicked();
+                    undo = tip(ui.link("Undo refine"), "Bring back the text you had before refining", None, &format!("{cmd}+Z")).clicked();
                 });
                 if undo {
                     self.input = original.clone();
@@ -2773,26 +2786,29 @@ impl App {
                         let cmd = if cfg!(target_os = "macos") { "Cmd" } else { "Ctrl" };
                         let keys = if self.settings.send_with_modifier { format!("{cmd}+Shift+Enter") } else { format!("{cmd}+Enter") };
                         let refine = egui::Button::new("✨").frame(false);
-                        refine_click = ui
-                            .add_enabled(enabled && !waiting && !self.input.trim().is_empty(), refine)
-                            .on_hover_text(format!("Refine the prompt ({keys} or {cmd}+R)"))
-                            .on_disabled_hover_text("Type a prompt to refine it")
-                            .clicked();
+                        let resp = ui.add_enabled(enabled && !waiting && !self.input.trim().is_empty(), refine);
+                        let why = if waiting { "Refining…" } else if enabled { "Type a prompt first" } else { "Select a session first" };
+                        refine_click = tip(
+                            resp,
+                            "Refine: a helper model rewrites the prompt clearly, asking questions if it is ambiguous",
+                            Some(why),
+                            &format!("{cmd}+R, or {keys} in the input"),
+                        )
+                        .clicked();
                         // Added after refine, so it sits to the left of it.
                         if dictation::AVAILABLE {
                             let transcribing = matches!(self.dictation, Dictation::Transcribing(_));
                             let (icon, color) = if recording { ("⏹", pal.error) } else { ("🎤", ui.visuals().text_color()) };
                             let mic = egui::Button::new(RichText::new(icon).color(color)).frame(false);
-                            let hover = if recording {
-                                format!("Stop dictation ({cmd}+D)")
+                            let what = if recording {
+                                "Stop dictating: what you said is transcribed into the prompt"
                             } else {
-                                format!("Dictate ({cmd}+D): click to start, click again to stop")
+                                "Dictate: speak, and the words go into the prompt at the cursor (transcribed on this Mac)"
                             };
-                            dictate_click = ui
-                                .add_enabled(recording || (enabled && !transcribing), mic)
-                                .on_hover_text(hover)
-                                .on_disabled_hover_text(if transcribing { "Transcribing…" } else { "Select a session first" })
-                                .clicked();
+                            let resp = ui.add_enabled(recording || (enabled && !transcribing), mic);
+                            let why = if transcribing { "Transcribing…" } else { "Select a session first" };
+                            let keys = if recording { format!("{cmd}+D") } else { format!("{cmd}+D to start, again to stop") };
+                            dictate_click = tip(resp, what, Some(why), &keys).clicked();
                             if transcribing {
                                 ui.spinner();
                                 ui.label(RichText::new("transcribing…").small().weak());
@@ -2802,7 +2818,7 @@ impl App {
                             }
                         }
                         if running {
-                            stop = ui.button("⏹").on_hover_text("Stop Claude (Ctrl+C)").clicked();
+                            stop = tip(ui.button("⏹"), "Stop Claude: its run ends now, and your prompt comes back into the input", None, "Ctrl+C").clicked();
                             ui.spinner();
                         }
                     });

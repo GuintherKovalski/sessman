@@ -116,3 +116,12 @@ fn cmd_r_with_an_empty_input_does_nothing() {
     s.frames(5);
     assert!(s.env.calls().iter().all(|c| !c["args"].as_array().unwrap().iter().any(|a| a.as_str().unwrap().contains("You refine prompts"))));
 }
+
+#[test]
+fn hovering_the_refine_button_explains_it_and_shows_its_shortcut() {
+    let mut s = typed("");
+    s.hover("✨");
+    assert!(s.sees("Refine: a helper model rewrites the prompt clearly, asking questions if it is ambiguous"));
+    assert!(s.sees("Type a prompt first"), "disabled, it says why");
+    assert!(s.sees("Cmd+R, or Cmd+Enter in the input"));
+}
