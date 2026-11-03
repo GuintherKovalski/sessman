@@ -209,7 +209,7 @@ pub fn start(ctx: egui::Context, sources: Vec<Source>, previous: Option<Summary>
 /// those numbered in `read` with their conversation, the others with what was said of them.
 pub fn request(sessions: &str, scope: Option<&str>, branch: Option<&str>, keys: &[String], read: &[usize]) -> String {
     let mut p = String::from(
-        "You write the overview card of a WORKSPACE: a group of related Claude Code sessions \
+        "You write the overview card of a SCOPE: a group of related Claude Code sessions \
          (a developer working with an AI coding agent). From the sessions below, reply with JSON \
          only, in this shape:\n\
          {\"scope\": \"the scope of work of the whole workspace, in one short sentence (at most 15 words)\",\n \
@@ -437,17 +437,17 @@ pub fn ui(ui: &mut egui::Ui, cards: &[Card], opts: &Options) -> Option<Event> {
     let now = secs(SystemTime::now());
     if cards.is_empty() {
         ui.centered_and_justified(|ui| {
-            ui.label(RichText::new("No workspaces yet.\n\nCreate one with + at the top left, then drag sessions onto it.\nEach one gets a card here with what it is about.").weak());
+            ui.label(RichText::new("No scopes yet.\n\nCreate one with + at the top left, then drag sessions onto it.\nEach one gets a card here with what it is about.").weak());
         });
         return None;
     }
     ui.add_space(6.0);
     ui.horizontal(|ui| {
-        ui.heading("Workspaces");
+        ui.heading("Scopes");
         let sessions: usize = cards.iter().map(|c| c.rows.len()).sum();
         let running: usize = cards.iter().map(|c| c.running).sum();
         let finished: usize = cards.iter().map(|c| c.rows.iter().filter(|r| r.finished).count()).sum();
-        let mut totals = format!("{} · {}", plural(cards.len(), "workspace"), plural(sessions, "session"));
+        let mut totals = format!("{} · {}", plural(cards.len(), "scope"), plural(sessions, "session"));
         if running > 0 {
             totals.push_str(&format!(" · {running} working"));
         }
@@ -457,7 +457,7 @@ pub fn ui(ui: &mut egui::Ui, cards: &[Card], opts: &Options) -> Option<Event> {
         ui.label(RichText::new(totals).weak());
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
             let busy = cards.iter().any(|c| c.busy);
-            if ui.add_enabled(!busy, egui::Button::new("↻ Refresh all").small()).on_hover_text("Summarize every workspace again with the helper model").clicked() {
+            if ui.add_enabled(!busy, egui::Button::new("↻ Refresh all").small()).on_hover_text("Summarize every scope again with the helper model").clicked() {
                 event = Some(Event::RefreshAll);
             }
         });
@@ -474,7 +474,7 @@ pub fn ui(ui: &mut egui::Ui, cards: &[Card], opts: &Options) -> Option<Event> {
         });
         if opts.loose > 0 {
             ui.add_space(6.0);
-            ui.label(RichText::new(format!("{} not in a workspace.", plural(opts.loose, "session"))).weak().small());
+            ui.label(RichText::new(format!("{} not in a scope.", plural(opts.loose, "session"))).weak().small());
         }
     });
     event
@@ -508,7 +508,7 @@ fn card_ui(ui: &mut egui::Ui, w: usize, card: &Card, now: u64, opts: &Options) -
             let name = ui
                 .add(egui::Label::new(RichText::new(card.name).strong().size(16.0)).sense(Sense::click()))
                 .on_hover_cursor(egui::CursorIcon::PointingHand)
-                .on_hover_text("Open this workspace");
+                .on_hover_text("Open this scope");
             if name.clicked() {
                 event = Some(Event::Open(w));
             }
@@ -631,7 +631,7 @@ fn row_ui(ui: &mut egui::Ui, w: usize, row: &Row, note: Option<&Note>, now: u64,
                 } else {
                     let when = RichText::new(last_interaction(row.modified, now)).small();
                     ui.label(if stale { when.color(pal.error) } else { when.weak() });
-                    if stale && ui.small_button("Finish session").on_hover_text("Take it out of this workspace (the session itself is kept)").clicked() {
+                    if stale && ui.small_button("Finish session").on_hover_text("Take it out of this scope (the session itself is kept)").clicked() {
                         event = Some(Event::Finish(row.id.to_owned()));
                     }
                 }

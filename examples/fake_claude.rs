@@ -179,7 +179,7 @@ fn helper(fake: &Path, args: &[String], prompt: &str) -> i32 {
         "refine"
     } else if prompt.contains("Looking for:") {
         "search"
-    } else if prompt.contains("overview card of a WORKSPACE") {
+    } else if prompt.contains("overview card of a SCOPE") {
         "overview"
     } else if prompt.contains("Answer the developer's QUESTION") {
         "ask"

@@ -117,15 +117,15 @@ impl From<Result<String, String>> for Reply {
 }
 
 pub const USAGE: &str = "usage:
-  scope list [--workspace W]             workspaces and their sessions, in the bar's order
+  scope list [--scope S]                 scopes and their sessions, newest first as the bar lists them
   scope rename <session> <name>          an empty name gives back its own title
   scope move <session> <top|bottom|up|down|N>
-                                         its place in its workspace's bar (N from 1)
-  scope new [--workspace W] [--folder DIR] [--name NAME] <prompt>
+                                         its card's place on its scope's orchestration page (N from 1)
+  scope new [--scope S] [--folder DIR] [--name NAME] <prompt>
                                          starts a session with that first prompt
-  scope ask [--workspace W] <question>   asks the workspace's orchestrator (it may act)
+  scope ask [--scope S] <question>       asks the scope's orchestrator (it may act)
 <session> is an id, an id prefix, the session's name, or . for the session running this.
-The workspace defaults to the calling session's.";
+The scope defaults to the calling session's (--workspace/-w still work for --scope/-s).";
 
 /// Whether `arg` is one of the commands, run from the command line.
 pub fn is_command(arg: &str) -> bool {
@@ -143,7 +143,7 @@ pub fn parse_args(args: &[String]) -> Result<Command, String> {
     while let Some(a) = it.next() {
         let mut value = |flag: &str| it.next().cloned().ok_or_else(|| format!("{flag} needs a value"));
         match a.as_str() {
-            "--workspace" | "-w" => workspace = Some(value(a)?),
+            "--scope" | "-s" | "--workspace" | "-w" => workspace = Some(value(a)?),
             "--folder" | "-f" if verb == "new" => folder = Some(PathBuf::from(value(a)?)),
             "--name" | "-n" if verb == "new" => name = Some(value(a)?),
             "--" => words.extend(it.by_ref().cloned()),
@@ -228,15 +228,15 @@ fn send(dir: &Path, request: &Request, wait: Duration) -> Result<String, String>
 /// to run scope.
 pub fn system_prompt(exe: &str) -> String {
     format!(
-        "You are running inside scope, the developer's IDE for Claude Code sessions, grouped in workspaces. \
-         When the developer asks you to start, rename or reorder sessions, or to ask the workspace's orchestrator, \
+        "You are running inside scope, the developer's IDE for Claude Code sessions, grouped in scopes. \
+         When the developer asks you to start, rename or reorder sessions, or to ask the scope's orchestrator, \
          use its command (run it with Bash; it prints what it did):\n\
-         \"{exe}\" list [--workspace W]\n\
+         \"{exe}\" list [--scope S]\n\
          \"{exe}\" rename <session> <name>\n\
          \"{exe}\" move <session> <top|bottom|up|down|N>\n\
-         \"{exe}\" new [--workspace W] [--folder DIR] [--name NAME] <first prompt>\n\
-         \"{exe}\" ask [--workspace W] <question>\n\
-         <session> is an id, an id prefix, a session's name, or . for this session. The workspace defaults to this session's."
+         \"{exe}\" new [--scope S] [--folder DIR] [--name NAME] <first prompt>\n\
+         \"{exe}\" ask [--scope S] <question>\n\
+         <session> is an id, an id prefix, a session's name, or . for this session. The scope defaults to this session's."
     )
 }
 

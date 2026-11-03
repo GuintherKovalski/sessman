@@ -19,13 +19,13 @@ fn summarized(s: &Scope, names: &[&str]) -> bool {
 #[test]
 fn each_workspace_shows_its_scope_and_what_each_session_does_and_needs() {
     let mut s = two_workspaces();
-    assert!(s.sees("3 workspaces · 2 sessions"));
+    assert!(s.sees("3 scopes · 2 sessions"));
     s.wait_to_see("Fake scope");
     s.wait_to_see("Fake doing");
     assert!(s.sees("⚠ Fake decision"), "what it needs from the developer");
     assert!(s.sees("last interaction 5 min ago"));
     assert!(s.sees("No sessions yet. Drag some onto its tab."), "an empty workspace's card");
-    assert!(s.sees("1 session not in a workspace."));
+    assert!(s.sees("1 session not in a scope."));
     assert!(!s.sees("Finish session"), "nothing is old enough");
     s.wait_until("both are summarized", |s| summarized(s, &["Work", "Play"]));
     let o = s.env.config_json("overview.json");
@@ -134,7 +134,7 @@ fn a_session_idle_too_long_is_red_and_can_be_finished() {
     assert!(s.sees("last interaction 1 d ago"));
     s.click("Finish session");
     s.wait_until("it left the workspace", |s| s.env.config_json("workspaces.json").to_string().contains("s-new") && !s.env.config_json("workspaces.json").to_string().contains("s-old"));
-    assert!(s.sees("1 session not in a workspace."), "the session itself is kept");
+    assert!(s.sees("1 session not in a scope."), "the session itself is kept");
     assert!(!s.sees("Finish session"));
     assert!(!s.is_selected("Work"), "finishing doesn't open anything");
 }
@@ -172,7 +172,7 @@ fn a_session_whose_run_finished_unseen_is_highlighted_until_opened() {
     assert!(s.shows_before("long task", "alpha prompt"), "it moved up as the newest, nothing else");
     s.click("long task");
     s.wait_to_see("Echo: HOLD keep going");
-    s.click("All sessions");
+    s.click("Scopes");
     s.frames(10);
     assert!(!s.sees("✓ Finished"), "seen now");
     let mut s = s.restart();

@@ -33,7 +33,7 @@ use std::time::SystemTime;
 
 /// What the orchestrator is told to be, editable in Settings → Harness. The reply format and
 /// the sessions themselves are added after it.
-pub const DEFAULT_HARNESS: &str = "You are the orchestrator of a WORKSPACE: a group of related Claude Code \
+pub const DEFAULT_HARNESS: &str = "You are the orchestrator of a SCOPE: a group of related Claude Code \
 sessions in which a developer works with AI coding agents in parallel. Give the developer a clear sense of \
 progress and of what is happening across all of them: what each session is doing, which ones are blocked or \
 waiting for the developer, what is done, and what should happen next. Be concrete and brief, each sentence \
@@ -318,12 +318,12 @@ pub fn request(harness: &str, members: &[Member], digests: &[Option<String>], pr
     let mut p = format!("{}\n\n", harness.trim());
     p.push_str(
         "Reply with JSON only, in this shape:\n\
-         {\"progress\": <0 to 100: how far the workspace as a whole is towards its goals>,\n \
+         {\"progress\": <0 to 100: how far the scope as a whole is towards its goals>,\n \
          \"summary\": \"2 to 4 sentences on the overall state\",\n \
          \"sessions\": [{\"n\": <session number>, \"state\": \"working|waiting|blocked|done|idle\", \
          \"now\": \"what it is doing, or last did\", \"next\": \"its next step, or empty\"}],\n \
          \"attention\": [\"what needs the developer now; [] if nothing\"],\n \
-         \"next\": [\"up to 4 next steps for the workspace as a whole\"]}\n\
+         \"next\": [\"up to 4 next steps for the scope as a whole\"]}\n\
          List every session below by its number. \"waiting\" means it needs the developer's input or \
          review; \"blocked\" means it hit a problem it could not solve; \"done\" means its goal is met.\n",
     );
@@ -420,14 +420,14 @@ pub struct Answer {
     pub actions: Vec<Command>,
 }
 
-const ACTIONS: &str = "You can also act on the workspace, but only when the developer asks you to: rename \
-sessions, move them in the bar, or start new sessions. To act, end your reply with a block like this:\n\
+const ACTIONS: &str = "You can also act on the scope, but only when the developer asks you to: rename \
+sessions, move their cards on the orchestration page, or start new sessions. To act, end your reply with a block like this:\n\
 ```actions\n\
 [{\"do\": \"rename\", \"session\": 2, \"name\": \"Auth fixes\"},\n \
 {\"do\": \"move\", \"session\": 2, \"to\": \"top\"},\n \
 {\"do\": \"new\", \"prompt\": \"the new session's first prompt, complete and self-contained\", \"name\": \"short name\"}]\n\
 ```\n\
-\"to\" is \"top\", \"bottom\", \"up\", \"down\" or a position in the bar from 1. They are done in order, \
+\"to\" is \"top\", \"bottom\", \"up\", \"down\" or a position among the cards from 1. They are done in order, \
 right after your reply; above the block, say briefly what you are doing. Without a request to act, add no block.";
 
 /// Answers a question about the workspace on a thread, from the report, recent questions and a
@@ -438,7 +438,7 @@ pub fn ask(ctx: egui::Context, harness: String, model: String, members: Vec<Memb
         let members: Vec<Member> = members.into_iter().take(MAX_SESSIONS).collect();
         let ids: Vec<String> = members.iter().map(|m| m.id.clone()).collect();
         let mut p = format!(
-            "{}\n\nAnswer the developer's QUESTION about this workspace, briefly, in Markdown. Use the \
+            "{}\n\nAnswer the developer's QUESTION about this scope, briefly, in Markdown. Use the \
              report and the sessions below; say so when they don't tell. {REFS}\n\n{ACTIONS}\n",
             harness.trim()
         );
@@ -454,7 +454,7 @@ pub fn ask(ctx: egui::Context, harness: String, model: String, members: Vec<Memb
             }
         }
         let order: Vec<String> = bar.iter().filter_map(|id| ids.iter().position(|x| x == id)).map(|n| format!("[[{}]]", n + 1)).collect();
-        p.push_str(&format!("\nTHE BAR lists the sessions in this order, top first: {}\n", order.join(", ")));
+        p.push_str(&format!("\nTHE CARDS on the orchestration page are in this order, top first: {}\n", order.join(", ")));
         p.push_str("\nSESSIONS, newest first:\n");
         for (n, m) in members.iter().enumerate() {
             p.push_str(&format!("\n## Session {}: {}\n", n + 1, m.title));
@@ -558,7 +558,7 @@ pub fn bubble(ui: &mut egui::Ui, selected: bool, line: &str, busy: bool) -> egui
         }
     }
     ui.add_space(4.0);
-    resp.on_hover_text("Workspace orchestration: progress and what is happening in all its sessions")
+    resp.on_hover_text("Scope orchestration: progress and what is happening in all its sessions")
 }
 
 /// One session as the page shows it: live facts from the app.
@@ -659,7 +659,7 @@ pub fn ui(ui: &mut egui::Ui, page: &Page, question: &mut String, renaming: &mut 
 
     if page.sessions.is_empty() {
         ui.centered_and_justified(|ui| {
-            ui.label(RichText::new("No sessions in this workspace yet.\n\nStart one with + New session, or drag sessions onto its tab.\nThis page then shows how they are all doing.").weak());
+            ui.label(RichText::new("No sessions in this scope yet.\n\nStart one with + New session, or drag sessions onto its tab.\nThis page then shows how they are all doing.").weak());
         });
         return None;
     }
@@ -691,7 +691,7 @@ pub fn ui(ui: &mut egui::Ui, page: &Page, question: &mut String, renaming: &mut 
                 .show(ui, |ui| {
                     ui.horizontal(|ui| {
                         ui.label(RichText::new("?").monospace().strong().color(accent));
-                        let hint = "Ask the orchestrator about this workspace · Enter to send (Shift+Enter: new line)";
+                        let hint = "Ask the orchestrator about this scope · Enter to send (Shift+Enter: new line)";
                         let edit = egui::TextEdit::multiline(question)
                             .id(field_id)
                             .frame(egui::Frame::NONE)

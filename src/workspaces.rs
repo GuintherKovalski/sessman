@@ -206,12 +206,12 @@ impl Workspaces {
     pub fn rename(&mut self, ws: usize, name: &str) -> Result<(), String> {
         let name = name.trim();
         if name.is_empty() {
-            return Err("a workspace needs a name".into());
+            return Err("a scope needs a name".into());
         }
         if self.list.iter().enumerate().any(|(i, w)| i != ws && w.name.eq_ignore_ascii_case(name)) {
-            return Err(format!("there is already a workspace called \"{name}\""));
+            return Err(format!("there is already a scope called \"{name}\""));
         }
-        let w = self.list.get_mut(ws).ok_or("no such workspace")?;
+        let w = self.list.get_mut(ws).ok_or("no such scope")?;
         w.name = name.to_owned();
         Ok(())
     }

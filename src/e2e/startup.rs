@@ -22,7 +22,7 @@ fn lists_every_session_newest_first_by_ai_title_or_first_prompt() {
 fn an_empty_home_says_there_are_no_sessions_or_workspaces() {
     let s = setup().launch();
     assert!(s.sees("No sessions found in ~/.claude/projects"));
-    assert!(s.sees("No workspaces yet."));
+    assert!(s.sees("No scopes yet."));
 }
 
 #[test]
@@ -87,7 +87,7 @@ fn a_broken_state_file_is_moved_aside_and_the_app_starts_fresh() {
     let s = s.restart_without_saving();
     assert!(s.env.config.join("state.json.bad").exists());
     assert!(s.sees("alpha prompt"));
-    assert!(s.sees("Workspaces") || s.sees("No workspaces yet."), "it opens on the overview");
+    assert!(s.sees("Scopes") || s.sees("No scopes yet."), "it opens on the overview");
 }
 
 #[test]
@@ -110,8 +110,8 @@ fn with_restore_off_the_app_starts_on_the_overview() {
     s.click_first("Work");
     s.click("alpha prompt");
     let s = s.restart();
-    assert!(s.is_selected("All sessions"));
-    assert!(s.sees("Workspaces"));
+    assert!(s.is_selected("Scopes"));
+    assert!(s.sees("Scopes"));
 }
 
 #[test]

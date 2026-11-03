@@ -523,7 +523,7 @@ impl App {
 
     fn save_workspaces(&mut self) {
         if let Err(e) = self.workspaces.save(&Workspaces::path()) {
-            self.error = Some(format!("could not save workspaces: {e}"));
+            self.error = Some(format!("could not save scopes: {e}"));
         }
     }
 
@@ -587,7 +587,7 @@ impl App {
         let Some(w) = self.sync_workspaces(Some(w)) else { return };
         let old = self.workspaces.list[w].name.clone();
         if let Err(e) = self.workspaces.rename(w, name) {
-            self.error = Some(format!("could not rename workspace: {e}"));
+            self.error = Some(format!("could not rename scope: {e}"));
             return;
         }
         self.save_workspaces();
@@ -1019,7 +1019,7 @@ impl App {
             return Err(format!("the {name} orchestrator is still answering a question"));
         }
         let members = self.orchestration_members(w);
-        let bar = self.bar_ids(w);
+        let bar = self.card_ids(w);
         let harness = Settings::harness(&self.settings.orchestration_harness, orchestration::DEFAULT_HARNESS).to_owned();
         let orch = self.orchestrations.get(&name).cloned();
         let rx = orchestration::ask(self.ctx.clone(), harness, self.settings.orchestration_model.clone(), members, bar, orch, question.clone());
@@ -1087,7 +1087,7 @@ impl App {
                 .iter()
                 .position(|w| w.name.eq_ignore_ascii_case(n))
                 .map(Some)
-                .ok_or_else(|| format!("no workspace is called \"{n}\"; there are: {}", list.iter().map(|w| w.name.as_str()).collect::<Vec<_>>().join(", ")));
+                .ok_or_else(|| format!("no scope is called \"{n}\"; there are: {}", list.iter().map(|w| w.name.as_str()).collect::<Vec<_>>().join(", ")));
         }
         let of_caller = caller.and_then(|c| list.iter().position(|w| w.sessions.iter().any(|s| s == c)));
         Ok(of_caller.or(self.tab.filter(|&t| t < list.len())))
@@ -1119,20 +1119,23 @@ impl App {
         self.items_in(arranged, rows, pending)
     }
 
-    /// Starting sessions above the listed ones, unless workspace `w` is arranged by hand:
-    /// then each goes where it was put.
-    fn items_in(&self, w: Option<usize>, rows: Vec<(usize, Option<String>)>, pending: Vec<(String, String, String)>) -> Vec<BarItem> {
+    /// Starting sessions (the newest) above the listed ones.
+    fn items_in(&self, _w: Option<usize>, rows: Vec<(usize, Option<String>)>, pending: Vec<(String, String, String)>) -> Vec<BarItem> {
         let mut items: Vec<BarItem> = pending.into_iter().map(|(id, title, _)| BarItem::Starting(id, title)).collect();
         items.extend(rows.into_iter().map(|(i, note)| BarItem::Listed(i, note)));
-        if let Some(ws) = w.and_then(|w| self.workspaces.list.get(w)).filter(|ws| ws.ordered) {
-            let id = |item: &BarItem| match item {
-                BarItem::Listed(i, _) => self.sessions[*i].id.clone(),
-                BarItem::Starting(id, _) => id.clone(),
-            };
-            // Stable: anything not placed keeps its default place after the placed ones.
-            items.sort_by_key(|item| ws.sessions.iter().position(|s| *s == id(item)).unwrap_or(usize::MAX));
-        }
         items
+    }
+
+    /// Ids of workspace `w`'s orchestration cards, top first: as arranged by hand, else
+    /// in the bar's order.
+    fn card_ids(&self, w: usize) -> Vec<String> {
+        let mut ids = self.bar_ids(w);
+        let ws = &self.workspaces.list[w];
+        if ws.ordered {
+            // Stable: anything not placed keeps its place after the placed ones.
+            ids.sort_by_key(|id| ws.sessions.iter().position(|s| s == id).unwrap_or(usize::MAX));
+        }
+        ids
     }
 
     /// A session's name as the bar shows it, for listed and still-starting sessions alike.
@@ -1162,15 +1165,15 @@ impl App {
                 format!("Renamed \"{before}\" to \"{}\"", self.name_of(&id))
             }),
             Command::Move { session, to } => self.find_session(&session).and_then(|id| {
-                let w = self.workspaces.list.iter().position(|w| w.sessions.contains(&id)).ok_or("that session is in no workspace, so it has no place in a bar to move to")?;
-                let mut order = self.bar_ids(w);
-                let from = order.iter().position(|x| *x == id).ok_or("that session isn't in its workspace's bar")?;
+                let w = self.workspaces.list.iter().position(|w| w.sessions.contains(&id)).ok_or("that session is in no scope, so it has no card to move")?;
+                let mut order = self.card_ids(w);
+                let from = order.iter().position(|x| *x == id).ok_or("that session has no card in its scope")?;
                 let at = control::place(&to, from, order.len())?;
                 order.remove(from);
                 order.insert(at, id.clone());
                 self.workspaces.arrange(w, &order);
                 self.save_workspaces();
-                Ok(format!("Moved \"{}\" to place {} of {} in the {} bar", self.name_of(&id), at + 1, order.len(), self.workspaces.list[w].name))
+                Ok(format!("Moved \"{}\" to place {} of {} on the {} orchestration page", self.name_of(&id), at + 1, order.len(), self.workspaces.list[w].name))
             }),
             Command::New { prompt, workspace, folder, name } => self.find_workspace(workspace.as_deref(), caller).and_then(|w| {
                 let dir = self.new_session_folder(w, folder, cwd)?;
@@ -1189,7 +1192,7 @@ impl App {
             }),
             Command::Ask { question, workspace } => {
                 let asked = self.find_workspace(workspace.as_deref(), caller).and_then(|w| {
-                    let w = w.ok_or("which workspace? none is open; use --workspace")?;
+                    let w = w.ok_or("which scope? none is open; use --scope")?;
                     self.ask_orchestrator(w, question)?;
                     Ok(self.workspaces.list[w].name.clone())
                 });
@@ -1216,7 +1219,7 @@ impl App {
             let picked = self.workspaces.list[w].folder.clone().filter(|d| d.is_dir());
             picked.or_else(|| self.workspace_sessions(w).into_iter().find_map(|i| session::load(&self.sessions[i].path).ok()?.cwd.filter(|d| d.is_dir())))
         });
-        of_workspace.or(cwd.filter(|d| d.is_dir())).ok_or_else(|| "which folder? the workspace has none yet; use --folder".to_owned())
+        of_workspace.or(cwd.filter(|d| d.is_dir())).ok_or_else(|| "which folder? the scope has none yet; use --folder".to_owned())
     }
 
     /// `scope list`: each workspace (or the one asked for) with its sessions in bar order.
@@ -1227,8 +1230,7 @@ impl App {
         };
         let mut out = String::new();
         for (w, ws) in self.workspaces.list.iter().enumerate().filter(|(w, _)| only.is_none_or(|o| o == *w)) {
-            let order = if ws.ordered { "arranged by hand" } else { "newest first" };
-            out.push_str(&format!("{} ({order})\n", ws.name));
+            out.push_str(&format!("{} (newest first)\n", ws.name));
             for (k, id) in self.bar_ids(w).into_iter().enumerate() {
                 let state = match (self.runs.contains_key(&id), self.sessions.iter().any(|s| s.id == id)) {
                     (_, false) => "  [starting]",
@@ -1239,7 +1241,7 @@ impl App {
             }
         }
         if out.is_empty() {
-            out.push_str("No workspaces yet.\n");
+            out.push_str("No scopes yet.\n");
         }
         Ok(out.trim_end().to_owned())
     }
@@ -1872,12 +1874,10 @@ impl App {
     }
 
     /// Workspace `w`'s sessions (indices into `sessions`) in the order its bar lists them:
-    /// as arranged on its orchestration page, else newest first.
-    fn bar_order(&self, w: usize, mut sessions: Vec<usize>) -> Vec<usize> {
-        let ws = &self.workspaces.list[w];
-        if ws.ordered {
-            sessions.sort_by_key(|&i| ws.sessions.iter().position(|id| *id == self.sessions[i].id));
-        }
+    /// always newest first, by the time each row shows (an arrangement made on the
+    /// orchestration page orders only its cards).
+    fn bar_order(&self, _w: usize, mut sessions: Vec<usize>) -> Vec<usize> {
+        sessions.sort_by_key(|&i| std::cmp::Reverse(self.sessions[i].modified));
         sessions
     }
 
@@ -2029,7 +2029,7 @@ impl App {
             ui.label(RichText::new("No matches. Press Enter to ask Haiku.").weak());
         } else if rows.is_empty() && pending.is_empty() {
             ui.label(if self.tab.is_some() {
-                "Empty workspace. Drag sessions onto its tab, or right-click a session and choose Move to."
+                "Empty scope. Drag sessions onto its tab, or right-click a session and choose Move to."
             } else {
                 "No sessions found in ~/.claude/projects"
             });
@@ -2072,7 +2072,7 @@ impl App {
                     BarItem::Starting(id, title) => {
                         let open = self.new_session.is_some() && self.new_id.as_ref() == Some(&id);
                         let title = self.names.get(&id).unwrap_or(&title);
-                        if session_bubble(ui, open, title, None, true, None).clicked() && !open {
+                        if session_bubble(ui, open, title, None, None, true, None).clicked() && !open {
                             actions.push(Action::OpenPending(id));
                         }
                         continue;
@@ -2092,7 +2092,8 @@ impl App {
                 let color = self.tab.is_none().then(|| self.workspaces.color_of(&s.id)).flatten();
                 let is_picked = self.picked.contains(&s.id);
                 let highlighted = is_picked || (self.picked.is_empty() && self.selected == Some(i));
-                let row = session_bubble(ui, highlighted, &label, note.as_deref(), self.runs.contains_key(&s.id), color);
+                let when = row_time(s.modified, SystemTime::now());
+                let row = session_bubble(ui, highlighted, &label, note.as_deref(), Some(&when), self.runs.contains_key(&s.id), color);
                 rects.push((s.id.clone(), row.rect));
                 // Dragging highlighted rows moves them; a drag from any other row draws a box.
                 let dragging = if is_picked { picked.clone() } else { vec![s.id.clone()] };
@@ -2143,7 +2144,7 @@ impl App {
                     }
                     ui.menu_button("Move to", |ui| {
                         if self.workspaces.list.is_empty() {
-                            ui.label("No workspaces yet. Create one with +");
+                            ui.label("No scopes yet. Create one with +");
                         }
                         for (w, ws) in self.workspaces.list.iter().enumerate() {
                             if ui.button(&ws.name).clicked() {
@@ -2151,7 +2152,7 @@ impl App {
                             }
                         }
                     });
-                    if self.tab.is_some() && ui.button("Remove from workspace").clicked() {
+                    if self.tab.is_some() && ui.button("Remove from scope").clicked() {
                         actions.push(Action::Remove(dragging.clone()));
                     }
                     ui.separator();
@@ -2209,7 +2210,7 @@ impl App {
 
     fn tabs(&mut self, ui: &mut egui::Ui, actions: &mut Vec<Action>) {
         ui.horizontal_wrapped(|ui| {
-            let all = ui.selectable_label(self.tab.is_none(), "All sessions").on_hover_text("Every session, and an overview of the workspaces");
+            let all = ui.selectable_label(self.tab.is_none(), "Scopes").on_hover_text("Every session, and an overview of the scopes");
             if all.clicked() {
                 actions.push(Action::Tab(None));
             }
@@ -2236,7 +2237,7 @@ impl App {
                     actions.push(Action::MoveTo((*ids).clone(), w));
                 }
                 tab.context_menu(|ui| {
-                    if ui.button("Rename workspace").clicked() {
+                    if ui.button("Rename scope").clicked() {
                         self.workspace_rename = Some((w, ws.name.clone(), true));
                     }
                     ui.menu_button("Color", |ui| {
@@ -2244,18 +2245,18 @@ impl App {
                             actions.push(Action::ColorWorkspace(w, c));
                         }
                     });
-                    if ui.button("Delete workspace").clicked() {
+                    if ui.button("Delete scope").clicked() {
                         actions.push(Action::DeleteWorkspace(w));
                     }
                 });
             }
-            if ui.button("+").on_hover_text("New workspace").clicked() {
+            if ui.button("+").on_hover_text("New scope").clicked() {
                 self.new_workspace = Some(String::new());
             }
         });
         let Some(name) = &mut self.new_workspace else { return };
         let id = Id::new("new-workspace");
-        let resp = ui.add(egui::TextEdit::singleline(name).id(id).hint_text("Workspace name, Enter to create"));
+        let resp = ui.add(egui::TextEdit::singleline(name).id(id).hint_text("Scope name, Enter to create"));
         if !resp.has_focus() && !resp.lost_focus() {
             resp.request_focus();
         }
@@ -2278,8 +2279,8 @@ impl App {
         let name = self.workspaces.list.get(w).map(|w| w.name.clone()).unwrap_or_default();
         let (mut delete, mut cancel) = (false, false);
         let modal = egui::Modal::new(Id::new("confirm-delete")).show(ctx, |ui| {
-            ui.label(RichText::new(format!("Delete workspace \"{name}\"?")).strong());
-            ui.label("Its sessions are not deleted; they stay in All sessions.");
+            ui.label(RichText::new(format!("Delete scope \"{name}\"?")).strong());
+            ui.label("Its sessions are not deleted; they stay in Scopes.");
             ui.add_space(8.0);
             ui.horizontal(|ui| {
                 delete = ui.button("Delete").clicked();
@@ -2805,7 +2806,7 @@ impl App {
     fn conversation(&mut self, ui: &mut egui::Ui) {
         let Some(s) = &self.open else {
             ui.centered_and_justified(|ui| ui.label(if self.tab.is_some() && self.visible().is_empty() {
-                "This workspace is empty"
+                "This scope is empty"
             } else {
                 "Select a session on the left"
             }));
@@ -3636,7 +3637,7 @@ fn pending_new(runs: &HashMap<String, Run>, ended: &[(String, String, Option<Pat
 /// A session in the list: its name in a rounded bubble, with a spinner on the right while
 /// Claude is working in it, and a search note under the name when there is one. Senses click
 /// and drag in one widget (a separate drag-source wrapper would swallow the click).
-fn session_bubble(ui: &mut egui::Ui, selected: bool, title: &str, note: Option<&str>, running: bool, color: Option<[u8; 3]>) -> egui::Response {
+fn session_bubble(ui: &mut egui::Ui, selected: bool, title: &str, note: Option<&str>, when: Option<&str>, running: bool, color: Option<[u8; 3]>) -> egui::Response {
     const PAD: egui::Vec2 = egui::vec2(10.0, 6.0);
     const SPIN: f32 = 12.0;
     let width = ui.available_width();
@@ -3645,7 +3646,11 @@ fn session_bubble(ui: &mut egui::Ui, selected: bool, title: &str, note: Option<&
     job.wrap.max_rows = 2;
     let galley = ui.painter().layout_job(job);
     let note = note.map(|n| ui.painter().layout(n.to_owned(), egui::TextStyle::Small.resolve(ui.style()), ui.visuals().weak_text_color(), text_width));
-    let height = galley.size().y + note.as_ref().map_or(0.0, |n| n.size().y + 2.0) + 2.0 * PAD.y;
+    // The time, small at the bottom right: beside the last line when it fits, else below it.
+    let when = when.map(|w| ui.painter().layout_no_wrap(w.to_owned(), egui::FontId::proportional(10.0), ui.visuals().weak_text_color()));
+    let last_line = note.as_ref().unwrap_or(&galley).rows.last().map_or(0.0, |r| r.rect().width());
+    let below = when.as_ref().filter(|w| last_line + 8.0 + w.size().x > text_width).map_or(0.0, |w| w.size().y);
+    let height = galley.size().y + note.as_ref().map_or(0.0, |n| n.size().y + 2.0) + below + 2.0 * PAD.y;
     let (rect, row) = ui.allocate_exact_size(egui::vec2(width, height), Sense::click_and_drag());
     let label = match &note {
         Some(n) => format!("{title}\n{}", n.text()),
@@ -3676,6 +3681,10 @@ fn session_bubble(ui: &mut egui::Ui, selected: bool, title: &str, note: Option<&
         if let Some(n) = note {
             pos.y += galley_height + 2.0;
             ui.painter().galley(pos, n, v.weak_text_color());
+        }
+        if let Some(w) = when {
+            let at = egui::pos2(rect.min.x + PAD.x + text_width, rect.max.y - PAD.y);
+            ui.painter().galley(at - w.size(), w, v.weak_text_color());
         }
         if running {
             let spin = egui::Rect::from_center_size(egui::pos2(rect.max.x - PAD.x - SPIN / 2.0, rect.center().y), egui::vec2(SPIN, SPIN));
@@ -3989,6 +3998,32 @@ fn file_size(bytes: u64) -> String {
     }
 }
 
+/// When a session row was last active, in local time: "14:32" today, "Nov 2 14:32" this
+/// year, "Nov 2 2025" before.
+fn row_time(t: SystemTime, now: SystemTime) -> String {
+    fn local(t: SystemTime) -> (i32, u32, u32, u32, u32) {
+        let secs = t.duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs()) as libc::time_t;
+        // SAFETY: localtime_r only writes the tm it is given.
+        let mut tm: libc::tm = unsafe { std::mem::zeroed() };
+        unsafe { libc::localtime_r(&secs, &mut tm) };
+        (tm.tm_year + 1900, tm.tm_mon as u32, tm.tm_mday as u32, tm.tm_hour as u32, tm.tm_min as u32)
+    }
+    format_row_time(local(t), local(now))
+}
+
+/// `row_time` from local (year, month 0-11, day, hour, minute) of the time and of now.
+fn format_row_time((y, mo, d, h, mi): (i32, u32, u32, u32, u32), (ny, nmo, nd, ..): (i32, u32, u32, u32, u32)) -> String {
+    const MONTHS: [&str; 12] = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+    let month = MONTHS[mo.min(11) as usize];
+    if (y, mo, d) == (ny, nmo, nd) {
+        format!("{h:02}:{mi:02}")
+    } else if y == ny {
+        format!("{month} {d} {h:02}:{mi:02}")
+    } else {
+        format!("{month} {d} {y}")
+    }
+}
+
 /// 8000s → "2h 13m"
 fn short_duration(d: std::time::Duration) -> String {
     let m = d.as_secs() / 60;
@@ -4149,6 +4184,15 @@ impl eframe::App for App {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn row_time_shows_the_time_today_and_the_date_before() {
+        let now = (2026, 10, 3, 9, 0);
+        assert_eq!(format_row_time((2026, 10, 3, 8, 5), now), "08:05");
+        assert_eq!(format_row_time((2026, 10, 2, 23, 59), now), "Nov 2 23:59");
+        assert_eq!(format_row_time((2025, 0, 15, 12, 0), now), "Jan 15 2025");
+        assert!(!row_time(SystemTime::now(), SystemTime::now()).contains(' '), "now is today");
+    }
 
     #[test]
     fn limit_text_shows_used_and_left() {

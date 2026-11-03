@@ -22,8 +22,8 @@ fn plus_creates_a_workspace_and_opens_it_empty() {
     s.press(Key::Enter);
     assert_eq!(names(&s), vec!["Mine"]);
     assert!(s.is_selected("Mine"));
-    assert!(s.sees("Empty workspace. Drag sessions onto its tab, or right-click a session and choose Move to."));
-    assert!(s.sees("No sessions in this workspace yet."), "an empty workspace opens on its orchestration page");
+    assert!(s.sees("Empty scope. Drag sessions onto its tab, or right-click a session and choose Move to."));
+    assert!(s.sees("No sessions in this scope yet."), "an empty workspace opens on its orchestration page");
     assert!(!s.sees("alpha prompt"));
 }
 
@@ -95,9 +95,9 @@ fn remove_from_workspace_takes_it_out_of_the_tab_only() {
         .launch();
     s.click_first("Work");
     s.right_click("alpha prompt");
-    s.click("Remove from workspace");
+    s.click("Remove from scope");
     assert!(members(&s, "Work").is_empty());
-    s.click("All sessions");
+    s.click("Scopes");
     assert!(s.sees("alpha prompt"), "the session itself stays");
 }
 
@@ -108,12 +108,12 @@ fn deleting_a_workspace_asks_first_and_keeps_its_sessions() {
         .workspaces(&[("Work", &["s-a"]), ("Other", &[])])
         .launch();
     s.right_click_first("Work");
-    s.click("Delete workspace");
-    assert!(s.sees("Delete workspace \"Work\"?"));
+    s.click("Delete scope");
+    assert!(s.sees("Delete scope \"Work\"?"));
     s.click("Cancel");
     assert_eq!(names(&s), vec!["Work", "Other"]);
     s.right_click_first("Work");
-    s.click("Delete workspace");
+    s.click("Delete scope");
     s.click("Delete");
     assert_eq!(names(&s), vec!["Other"]);
     assert!(s.sees("alpha prompt"));
@@ -129,9 +129,9 @@ fn deleting_the_open_workspace_goes_back_to_all_sessions() {
         .launch();
     s.click_first("Work");
     s.right_click_first("Work");
-    s.click("Delete workspace");
+    s.click("Delete scope");
     assert!(names(&s).is_empty(), "no question asked with the setting off");
-    assert!(s.is_selected("All sessions"));
+    assert!(s.is_selected("Scopes"));
 }
 
 #[test]
@@ -145,7 +145,7 @@ fn a_workspace_tab_reopens_the_session_last_open_in_it() {
     s.click_first("Work");
     assert!(s.is_selected("beta prompt"), "the first time, its newest session");
     s.click("alpha prompt");
-    s.click("All sessions");
+    s.click("Scopes");
     s.click("gamma prompt");
     s.click_first("Work");
     assert!(s.is_selected("alpha prompt"));
@@ -158,12 +158,12 @@ fn all_sessions_clicked_again_goes_back_to_the_overview() {
         .session(session("s-a", "alpha prompt", 100).reply("alpha reply"))
         .workspaces(&[("Work", &["s-a"])])
         .launch();
-    assert!(s.sees("Workspaces"), "All sessions opens on the overview");
+    assert!(s.sees("Scopes"), "All sessions opens on the overview");
     s.click("alpha prompt");
     assert!(s.sees("alpha reply"));
-    s.click("All sessions");
+    s.click("Scopes");
     assert!(!s.sees("alpha reply"));
-    assert!(s.sees("1 workspace · 1 session"));
+    assert!(s.sees("1 scope · 1 session"));
 }
 
 #[test]
@@ -193,7 +193,7 @@ fn in_all_sessions_the_sessions_of_a_workspace_are_marked_by_its_color() {
         .workspaces(&[("Work", &["s-a"])])
         .launch();
     assert!(s.sees("alpha prompt") && s.sees("beta prompt"));
-    assert!(s.sees("1 session not in a workspace."));
+    assert!(s.sees("1 session not in a scope."));
 }
 
 #[test]
@@ -206,7 +206,7 @@ fn deleting_a_workspace_left_of_the_open_one_keeps_that_one_open() {
         .launch();
     s.click_first("Second");
     s.right_click_first("First");
-    s.click("Delete workspace");
+    s.click("Delete scope");
     assert_eq!(names(&s), vec!["Second"]);
     assert!(s.is_selected("Second"), "the open tab stays on its workspace");
     assert!(s.sees("beta prompt"));
@@ -221,12 +221,12 @@ fn a_workspace_is_renamed_from_its_tab_and_keeps_its_overview() {
         .config("overview.json", json!({"Work": {"scope": "s", "sessions": {}, "tickets": [], "made": 1, "newest": 1}}))
         .launch();
     s.right_click_first("Work");
-    s.click("Rename workspace");
+    s.click("Rename scope");
     s.type_in("workspace-rename", "Job");
     s.press(Key::Escape);
     assert_eq!(names(&s), vec!["Work", "Other"], "Escape cancels");
     s.right_click_first("Work");
-    s.click("Rename workspace");
+    s.click("Rename scope");
     s.type_in("workspace-rename", "Job");
     s.press(Key::Enter);
     assert_eq!(names(&s), vec!["Job", "Other"]);
@@ -234,7 +234,7 @@ fn a_workspace_is_renamed_from_its_tab_and_keeps_its_overview() {
     let overviews = s.env.config_json("overview.json");
     assert!(overviews.get("Job").is_some() && overviews.get("Work").is_none(), "the summary follows: {overviews}");
     s.right_click_first("Job");
-    s.click("Rename workspace");
+    s.click("Rename scope");
     s.type_in("workspace-rename", "other");
     s.press(Key::Enter);
     assert_eq!(names(&s), vec!["Job", "Other"], "a name already taken is refused");
