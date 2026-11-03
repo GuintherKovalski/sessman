@@ -12,11 +12,12 @@ there. Each change is specified first with Spec Kit (see [How the project is bui
 A thin bar runs along the top of the window, above everything else. The macOS close /
 minimize / zoom buttons sit in it (the content runs under a transparent title bar), so they
 never cover the panels, also in full screen. Drag the bar to move the window; double-click
-it to zoom.
+it to zoom. At its right end, a dimmed **⚙** opens Settings.
 
 ```
+ ● ● ●                                                                         ⚙
 ┌──────────────────┬──────────────────────────────────────┬─────────────────────┐
-│ All │ A │ B │ +  │ ┌──────────────────────────────────┐ │ Changes │ Info  ☾☀▣ │
+│ All │ A │ B │ +  │ ┌──────────────────────────────────┐ │ Changes │ Info      │
 │                  │ │ You  (pinned prompt)             │ │ src/app.rs          │
 │ [+ New session ] │ └──────────────────────────────────┘ │ - old line          │
 │▌Session title    │ You                                  │ + new line          │
@@ -40,7 +41,7 @@ it to zoom.
   generated title, or your first prompt) and its project folder. The list refreshes on its
   own (every 10 s and after each reply), so sessions started elsewhere show up by themselves.
   A session that is working shows ⏳, and `+N queued` when prompts are waiting for it.
-- **⚙** (next to the search, or **Cmd+,**) opens the Settings page in the main area.
+- **⚙** (right end of the top bar, or **Cmd+,**) opens the Settings page in the main area.
 - **Search** (bottom of the panel): typing filters the list (within the open tab). Name
   matches come first, then goal summaries, then the conversations' own text (with a snippet
   under the name). Close spellings still match names and goals. **Enter** asks Claude Haiku
