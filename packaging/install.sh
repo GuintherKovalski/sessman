@@ -1,36 +1,73 @@
 #!/bin/sh
-# Installs (or updates) scope from its latest release:
-#   curl -fsSL https://github.com/REPO/releases/latest/download/install.sh | sh
+# Installs or updates scope, the IDE for Claude Code sessions, from its latest release:
+#
+#   curl -fsSL https://github.com/GuintherKovalski/sessman/releases/latest/download/install.sh | sh
+#
 # Puts scope.app in /Applications (or ~/Applications when that isn't writable) and opens it.
+# Environment, all optional:
+#   SCOPE_REPO=owner/name   repository to install from
+#   SCOPE_DIR=/path         where to put scope.app
+#   SCOPE_FROM=URL          folder holding scope-macos.zip and SHA256SUMS (default: latest release)
+#   SCOPE_NO_OPEN=1         don't open it afterwards
 set -eu
 
-repo="${SCOPE_REPO:-REPO}"
-[ "$(uname -s)" = Darwin ] || { echo "scope runs on macOS only for now." >&2; exit 1; }
+repo="${SCOPE_REPO:-GuintherKovalski/sessman}"
+from="${SCOPE_FROM:-https://github.com/$repo/releases/latest/download}"
 
-dest=/Applications
-[ -w "$dest" ] || { dest="$HOME/Applications"; mkdir -p "$dest"; }
+say() { printf '%s\n' "$*"; }
+fail() { printf 'scope: %s\n' "$*" >&2; exit 1; }
 
-tag=$(curl -fsSL "https://api.github.com/repos/$repo/releases/latest" | sed -n 's/.*"tag_name": *"v\{0,1\}\([^"]*\)".*/\1/p' | head -n 1)
-[ -n "$tag" ] || { echo "Couldn't find a release of $repo." >&2; exit 1; }
+[ "$(uname -s)" = Darwin ] || fail "scope runs on macOS only for now."
+major=$(sw_vers -productVersion | cut -d. -f1)
+[ "$major" -ge 11 ] || fail "scope needs macOS 11 or later (this is $(sw_vers -productVersion))."
+
+if [ -n "${SCOPE_DIR:-}" ]; then
+    dest="$SCOPE_DIR"
+elif [ -w /Applications ]; then
+    dest=/Applications
+else
+    dest="$HOME/Applications"
+fi
+mkdir -p "$dest"
 
 tmp=$(mktemp -d)
-trap 'rm -rf "$tmp"' EXIT
-echo "Downloading scope $tag…"
-curl -fL --progress-bar -o "$tmp/scope.zip" "https://github.com/$repo/releases/download/v$tag/scope-$tag-macos.zip"
-curl -fsSL -o "$tmp/SHA256SUMS" "https://github.com/$repo/releases/download/v$tag/SHA256SUMS"
-want=$(grep "scope-$tag-macos.zip" "$tmp/SHA256SUMS" | cut -d' ' -f1)
-have=$(shasum -a 256 "$tmp/scope.zip" | cut -d' ' -f1)
-[ "$want" = "$have" ] || { echo "Checksum mismatch; not installing." >&2; exit 1; }
+trap 'rm -rf "$tmp"' EXIT INT TERM
 
-ditto -x -k "$tmp/scope.zip" "$tmp"
-codesign --verify --deep --strict "$tmp/scope.app"
-rm -rf "$dest/scope.app"
-ditto "$tmp/scope.app" "$dest/scope.app"
-echo "Installed scope $tag in $dest/scope.app"
+say "Downloading scope…"
+curl -fL --progress-bar -o "$tmp/scope-macos.zip" "$from/scope-macos.zip" \
+    || fail "couldn't download $from/scope-macos.zip"
+curl -fsSL -o "$tmp/SHA256SUMS" "$from/SHA256SUMS" || fail "couldn't download the checksums"
+want=$(awk '$2 == "scope-macos.zip" { print $1 }' "$tmp/SHA256SUMS")
+have=$(shasum -a 256 "$tmp/scope-macos.zip" | cut -d' ' -f1)
+[ -n "$want" ] && [ "$want" = "$have" ] || fail "the download doesn't match its checksum; nothing was installed."
+
+ditto -x -k "$tmp/scope-macos.zip" "$tmp/unpacked"
+new="$tmp/unpacked/scope.app"
+[ -x "$new/Contents/MacOS/scope" ] || fail "the download has no scope.app in it."
+codesign --verify --deep --strict "$new" 2>/dev/null || fail "the app's signature doesn't check out; nothing was installed."
+version=$(defaults read "$new/Contents/Info.plist" CFBundleShortVersionString 2>/dev/null || echo "")
+
+app="$dest/scope.app"
+running=no
+pgrep -qf "$app/Contents/MacOS/scope" && running=yes
+# Swapped in one move, so a failure never leaves half an app.
+rm -rf "$dest/.scope-old"
+[ -e "$app" ] && mv "$app" "$dest/.scope-old"
+if ! ditto "$new" "$app"; then
+    [ -e "$dest/.scope-old" ] && mv "$dest/.scope-old" "$app"
+    fail "couldn't write $app"
+fi
+rm -rf "$dest/.scope-old"
+say "Installed scope ${version:+$version }in $app"
 
 if ! command -v claude >/dev/null 2>&1 && [ ! -x "$HOME/.local/bin/claude" ] && [ ! -x "$HOME/.claude/local/claude" ]; then
-    echo
-    echo "scope runs Claude Code sessions, so it needs Claude Code itself:"
-    echo "  curl -fsSL https://claude.ai/install.sh | bash"
+    say ""
+    say "scope runs Claude Code sessions, so it needs Claude Code itself. Install it with:"
+    say "  curl -fsSL https://claude.ai/install.sh | bash"
 fi
-open "$dest/scope.app"
+
+if [ "$running" = yes ]; then
+    say "scope is open: quit it (Cmd+Q) and open it again to use the new version. Your sessions keep running."
+elif [ -z "${SCOPE_NO_OPEN:-}" ]; then
+    open "$app"
+fi

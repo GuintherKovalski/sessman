@@ -2,7 +2,7 @@
 //! it runs as an installed scope.app, replaces itself with it and restarts on one click.
 //!
 //! Releases are made by `.github/workflows/release.yml` from a `v*` tag. Each has
-//! `scope-<version>-macos.zip` (the signed, notarized app, which this downloads) and
+//! `scope-macos.zip` (the signed, notarized app, which this downloads) and
 //! `scope-<version>.dmg` (for people installing by hand).
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{Receiver, channel};

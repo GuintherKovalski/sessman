@@ -5,10 +5,16 @@ A small desktop app for browsing and continuing Claude Code sessions.
 ## Install
 
 Needs macOS 11 or later (Apple Silicon or Intel) and [Claude Code](https://docs.claude.com/en/docs/claude-code).
-Pick one:
+In a terminal:
+
+```sh
+curl -fsSL https://github.com/GuintherKovalski/sessman/releases/latest/download/install.sh | sh
+```
+
+It downloads the latest scope, checks its checksum and signature, puts it in /Applications and
+opens it. Run it again any time to update. Or:
 
 - **Homebrew**: `brew install --cask guintherkovalski/scope/scope`
-- **One line**: `curl -fsSL https://github.com/GuintherKovalski/sessman/releases/latest/download/install.sh | sh`
 - **By hand**: download `scope-<version>.dmg` from the [latest release](https://github.com/GuintherKovalski/sessman/releases/latest),
   open it and drag scope to Applications.
 

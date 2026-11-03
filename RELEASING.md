@@ -6,7 +6,7 @@ notarized by Apple, published on GitHub as:
 | File | For |
 |---|---|
 | `scope-<version>.dmg` | people installing by hand (drag to Applications) |
-| `scope-<version>-macos.zip` | the in-app updater and `install.sh` |
+| `scope-macos.zip` | the in-app updater and `install.sh` (a fixed name, so `releases/latest/download/scope-macos.zip` is always the newest) |
 | `SHA256SUMS` | checksums of both |
 | `install.sh` | `curl -fsSL …/releases/latest/download/install.sh \| sh` |
 
@@ -32,7 +32,8 @@ version than theirs; drafts and pre-releases are never offered.
 
 Until this is done, releases still build, but they are only ad-hoc signed: macOS refuses to
 open them without a trip to System Settings → Privacy & Security → Open Anyway, and Homebrew
-installs hit the same wall. That's not something to hand to other people.
+installs hit the same wall. That's not something to hand to other people. (The one-line `install.sh` is the exception:
+curl doesn't mark what it downloads as quarantined, so Gatekeeper doesn't stop it even then.)
 
 ### 1. Make the downloads public
 

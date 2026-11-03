@@ -2,7 +2,8 @@
 # Builds the files a release publishes, into dist/:
 #
 #   scope-<version>.dmg          drag-to-Applications disk image, for people installing by hand
-#   scope-<version>-macos.zip    the same app zipped, which the in-app updater and Homebrew use
+#   scope-macos.zip              the same app zipped (a fixed name, so the latest is always at
+#                                releases/latest/download/scope-macos.zip): updater and install.sh
 #   SHA256SUMS                   checksums of both
 #
 # Universal (Apple Silicon + Intel). Needs: rustup target add aarch64-apple-darwin x86_64-apple-darwin,
@@ -46,7 +47,7 @@ if [ -n "${SCOPE_SIGN_IDENTITY:-}" ]; then
     fi
 fi
 
-zip="$dist/scope-$version-macos.zip"
+zip="$dist/scope-macos.zip"
 if [ $can_notarize = yes ]; then
     # Notarize the app, then staple the ticket to it, so it opens offline too.
     ditto -c -k --keepParent "$app" "$dist/notarize.zip"
@@ -75,6 +76,6 @@ if [ $can_notarize = yes ]; then
     spctl --assess --type open --context context:primary-signature -v "$dmg"
 fi
 
-(cd "$dist" && shasum -a 256 "scope-$version.dmg" "scope-$version-macos.zip" > SHA256SUMS)
+(cd "$dist" && shasum -a 256 "scope-$version.dmg" scope-macos.zip > SHA256SUMS)
 echo "Release files for $version in $dist/:"
 ls -lh "$dist"

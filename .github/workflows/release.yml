@@ -112,7 +112,7 @@ jobs:
           scripts/release.sh
 
       - name: Add the installer script
-        run: sed "s#REPO#$RELEASE_REPO#g" packaging/install.sh > dist/install.sh
+        run: sed "s#GuintherKovalski/sessman#$RELEASE_REPO#g" packaging/install.sh > dist/install.sh
 
       - name: Publish the GitHub release
         env:
@@ -142,7 +142,7 @@ jobs:
           if [ "$RELEASE_REPO" = "$GITHUB_REPOSITORY" ]; then target=(--verify-tag); else target=(); fi
           gh release create "$tag" --repo "$RELEASE_REPO" "${target[@]}" \
             --title "scope $VERSION" --notes-file "$RUNNER_TEMP/notes.md" \
-            dist/scope-$VERSION.dmg dist/scope-$VERSION-macos.zip dist/SHA256SUMS dist/install.sh
+            dist/scope-$VERSION.dmg dist/scope-macos.zip dist/SHA256SUMS dist/install.sh
         shell: bash
 
       - name: Update the Homebrew cask
