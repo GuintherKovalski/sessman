@@ -3762,12 +3762,12 @@ fn copy_button(ui: &mut egui::Ui, m: &session::Message, fill: Color32) {
         p.add(egui::Shape::line(pts, stroke));
         ui.ctx().request_repaint_after(std::time::Duration::from_millis(300));
     } else {
-        let (side, shift) = (8.5, 3.5);
+        let (side, shift) = (9.0, 3.5);
         let back = egui::Rect::from_min_size(c + egui::vec2(-side / 2.0 - shift / 2.0 + shift, -side / 2.0 - shift / 2.0), egui::vec2(side, side));
         let front = back.translate(egui::vec2(-shift, shift));
-        p.rect_stroke(back, 2.5, stroke, egui::StrokeKind::Middle);
-        p.rect_filled(front, 2.5, bg);
-        p.rect_stroke(front, 2.5, stroke, egui::StrokeKind::Middle);
+        p.rect_stroke(back, 1.5, stroke, egui::StrokeKind::Middle);
+        p.rect_filled(front, 1.5, bg);
+        p.rect_stroke(front, 1.5, stroke, egui::StrokeKind::Middle);
     }
 }
 
