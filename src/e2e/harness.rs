@@ -636,6 +636,12 @@ impl Scope {
         self.frames(4);
     }
 
+    /// Where the top of the widget labelled `label` is, from the window's top.
+    #[track_caller]
+    pub fn top_of(&self, label: &str) -> f32 {
+        self.node(label).rect().top()
+    }
+
     /// Whether the widget labelled `label` shows as selected (a session's bubble, a tab).
     #[track_caller]
     pub fn is_selected(&self, label: &str) -> bool {
@@ -729,6 +735,12 @@ impl Scope {
     /// Types into the prompt input.
     pub fn type_prompt(&mut self, text: &str) {
         self.type_in("prompt-input", text);
+    }
+
+    /// Types `text` wherever the keyboard is, without clicking a field first.
+    pub fn type_here(&mut self, text: &str) {
+        self.h.event(egui::Event::Text(text.to_owned()));
+        self.frames(3);
     }
 
     /// Drops a file on the window, as from Finder.

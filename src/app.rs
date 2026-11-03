@@ -108,6 +108,18 @@ pub struct App {
     pinned: Option<usize>,
     /// Whether a "You" prompt was on screen in the conversation last frame; the pinned one hides then.
     inline_you: bool,
+    /// Index into the open session's messages of the one picked in the conversation (a click
+    /// on it, or the arrows).
+    picked_message: Option<usize>,
+    /// Whether the conversation has the keyboard (it was clicked last): Up/Down then move the
+    /// pick a message at a time, bringing its start to the top.
+    conversation_keys: bool,
+    /// Set when the arrows moved the pick: the conversation scrolls to it on the next frame.
+    scroll_to_pick: bool,
+    /// The message at the top of the conversation last frame, where the arrows start without a pick.
+    top_message: Option<usize>,
+    /// Where the conversation showed this frame (screen), if it did; clicks there go to it.
+    conversation_rect: Option<egui::Rect>,
     names: Names,
     renaming: Option<Renaming>,
     /// New sessions whose first run ended before the indexer listed them: (id, first prompt,
@@ -352,6 +364,11 @@ impl App {
             lasso: None,
             confirm_trash: Vec::new(),
             pinned: None,
+            picked_message: None,
+            conversation_keys: false,
+            scroll_to_pick: false,
+            top_message: None,
+            conversation_rect: None,
             inline_you: false,
             names: Names::load(&Names::path()),
             renaming: None,
@@ -758,6 +775,8 @@ impl App {
         self.new_session = None;
         self.history = History::default();
         self.pinned = None;
+        self.picked_message = None;
+        self.top_message = None;
         self.inline_you = false;
     }
 
@@ -1429,6 +1448,8 @@ impl App {
         self.new_session = Some(dir);
         self.history = History::default();
         self.pinned = None;
+        self.picked_message = None;
+        self.top_message = None;
         self.inline_you = false;
         self.error = None;
         self.focus_prompt = true;
@@ -1446,6 +1467,8 @@ impl App {
         self.open = Some(s);
         self.new_session = cwd.or_else(|| Some(PathBuf::from(".")));
         self.pinned = None;
+        self.picked_message = None;
+        self.top_message = None;
         self.inline_you = false;
         self.heights.clear();
     }
@@ -1508,6 +1531,8 @@ impl App {
                 self.history = History::new(s.prompts.clone());
                 self.open = Some(s);
                 self.pinned = None;
+                self.picked_message = None;
+                self.top_message = None;
                 self.inline_you = false;
                 self.heights.clear();
                 self.error = None;
@@ -2850,7 +2875,35 @@ impl App {
         let open_id = self.open_id();
         let key = self.view_key();
         let mut find = self.find.open.then_some(&mut self.find);
-        egui::ScrollArea::vertical().id_salt(("conversation", &key)).auto_shrink(false).stick_to_bottom(true).show_viewport(ui, |ui, viewport| {
+        // With the keyboard (and no field focused), Up/Down move the pick a message at a time
+        // and bring its start to the top; Esc or typing goes back to the input.
+        if self.conversation_keys && ui.memory(|m| m.focused().is_none()) {
+            let (up, down, esc, typed) = ui.input_mut(|i| {
+                let typed: String = i.events.iter().filter_map(|e| if let egui::Event::Text(t) = e { Some(t.as_str()) } else { None }).collect();
+                (i.consume_key(Modifiers::NONE, Key::ArrowUp), i.consume_key(Modifiers::NONE, Key::ArrowDown), i.key_pressed(Key::Escape), typed)
+            });
+            if (up || down)
+                && let Some(next) = next_pick(&s.messages, self.picked_message, self.top_message, up)
+            {
+                self.picked_message = Some(next);
+                self.scroll_to_pick = true;
+            }
+            if esc || !typed.is_empty() {
+                self.conversation_keys = false;
+                self.focus_prompt = true;
+                if !typed.is_empty() {
+                    self.input.push_str(&typed);
+                    let id = Id::new("prompt-input");
+                    let mut state = egui::TextEdit::load_state(ui.ctx(), id).unwrap_or_default();
+                    state.cursor.set_char_range(Some(CCursorRange::one(CCursor::new(self.input.chars().count()))));
+                    state.store(ui.ctx(), id);
+                }
+            }
+        }
+        let click = ui.input(|i| i.pointer.primary_clicked().then_some(i.pointer.interact_pos()).flatten());
+        let pick_stroke = Stroke::new(1.5, ui.visuals().selection.bg_fill);
+        let mut top_message = None;
+        let out = egui::ScrollArea::vertical().id_salt(("conversation", &key)).auto_shrink(false).stick_to_bottom(true).show_viewport(ui, |ui, viewport| {
             let origin = ui.cursor().top();
             // Render only messages near the viewport; the rest just take their remembered height.
             let near = viewport.expand2(egui::vec2(0.0, 400.0));
@@ -2859,16 +2912,33 @@ impl App {
                 if pinned_text(m).is_some() && y <= viewport.min.y + 1.0 {
                     top_prompt = Some(i);
                 }
+                if pickable(m) && y <= viewport.min.y + 1.0 {
+                    top_message = Some(i);
+                }
                 let h = self.heights[i];
                 let skip = h > 0.0 && (y + h < near.min.y || y > near.max.y);
                 let from = find::next_shape(ui);
                 let rect = if skip {
                     ui.allocate_space(egui::vec2(ui.available_width(), h)).1
                 } else {
-                    let rect = ui.push_id(i, |ui| message(ui, &mut self.md_cache, m, &pal)).response.rect;
+                    let shown = ui.push_id(i, |ui| message(ui, &mut self.md_cache, m, &pal));
+                    let rect = shown.response.rect;
                     self.heights[i] = rect.height().max(1.0);
+                    // A click on a card picks it (a drag still selects text in it).
+                    if let Some(card) = shown.inner {
+                        if click.is_some_and(|p| card.contains(p) && ui.clip_rect().contains(p)) {
+                            self.picked_message = Some(i);
+                        }
+                        if self.conversation_keys && self.picked_message == Some(i) {
+                            ui.painter().rect_stroke(card, 6.0, pick_stroke, StrokeKind::Outside);
+                        }
+                    }
                     rect
                 };
+                if self.scroll_to_pick && self.picked_message == Some(i) {
+                    ui.scroll_to_rect(rect, Some(egui::Align::TOP));
+                    self.scroll_to_pick = false;
+                }
                 if let Some(f) = find.as_deref_mut().filter(|f| f.matches.iter().any(|m| m.item == i)) {
                     let (_, current) = f.in_item(i);
                     let exact = if skip { None } else { find::highlight_painted(ui, from, &f.query, current, pal.find) };
@@ -2906,6 +2976,8 @@ impl App {
                 ui.label(RichText::new("⏹ Interrupted").color(pal.note).monospace());
             }
         });
+        self.conversation_rect = Some(out.inner_rect);
+        self.top_message = top_message;
         if top_prompt != self.pinned || inline_you != self.inline_you {
             self.pinned = top_prompt;
             self.inline_you = inline_you;
@@ -3710,27 +3782,33 @@ fn session_bubble(ui: &mut egui::Ui, selected: bool, title: &str, note: Option<&
 }
 
 /// One message as a card: role label and accent stripe, then its rendered Markdown.
-/// Messages that are only tool calls show as a single dimmed line.
-fn message(ui: &mut egui::Ui, cache: &mut CommonMarkCache, m: &session::Message, pal: &theme::Palette) {
+/// Messages that are only tool calls show as a single dimmed line. Returns where the card
+/// shows (what a click picks), None for what shows no card (a lone stop, tool lines).
+fn message(ui: &mut egui::Ui, cache: &mut CommonMarkCache, m: &session::Message, pal: &theme::Palette) -> Option<egui::Rect> {
     if m.role == Role::User && is_interrupt_marker(&m.text) {
         // Claude's record of a stop: alone, after the prompt it stopped, or (merged by the
         // parser) before the next prompt. Each part shows in its place.
         let (before, after) = split_interrupt_marker(&m.text);
+        let mut card = None;
         if !before.is_empty() {
-            ui.push_id("before", |ui| message(ui, cache, &session::Message { role: Role::User, text: before }, pal));
+            card = ui.push_id("before", |ui| message(ui, cache, &session::Message { role: Role::User, text: before }, pal)).inner;
         }
         ui.label(RichText::new("⏹ Interrupted").color(pal.note).monospace());
         ui.add_space(6.0);
         if !after.is_empty() {
-            ui.push_id("after", |ui| message(ui, cache, &session::Message { role: Role::User, text: after }, pal));
+            let r = ui.push_id("after", |ui| message(ui, cache, &session::Message { role: Role::User, text: after }, pal)).inner;
+            card = match (card, r) {
+                (Some(a), Some(b)) => Some(a.union(b)),
+                (a, b) => a.or(b),
+            };
         }
-        return;
+        return card;
     }
-    if m.role == Role::Assistant && m.text.lines().all(|l| l.starts_with("[tool:")) {
+    if is_tool_lines(m) {
         if markdown::SHOW_TOOLS.load(std::sync::atomic::Ordering::Relaxed) {
             egui::Frame::new().inner_margin(egui::Margin { left: 14, right: 0, top: 0, bottom: 6 }).show(ui, |ui| markdown::show(ui, cache, &m.text));
         }
-        return;
+        return None;
     }
     let (who, accent) = match m.role {
         Role::User => ("You", pal.user),
@@ -3760,6 +3838,36 @@ fn message(ui: &mut egui::Ui, cache: &mut CommonMarkCache, m: &session::Message,
     let stripe = egui::Rect::from_min_max(r.min, egui::pos2(r.left() + 3.0, r.bottom()));
     ui.painter().rect_filled(stripe, egui::CornerRadius { nw: 6, sw: 6, ne: 0, se: 0 }, accent);
     ui.add_space(6.0);
+    Some(r)
+}
+
+/// A Claude message that is only tool calls (shown as dimmed lines, if at all).
+fn is_tool_lines(m: &session::Message) -> bool {
+    m.role == Role::Assistant && m.text.lines().all(|l| l.starts_with("[tool:"))
+}
+
+/// Whether the arrows stop at a message: it shows as a card (see [`message`]); tool lines and
+/// a lone stop don't.
+fn pickable(m: &session::Message) -> bool {
+    if is_tool_lines(m) {
+        return false;
+    }
+    let (before, after) = split_interrupt_marker(&m.text);
+    m.role == Role::Assistant || !before.is_empty() || !after.is_empty()
+}
+
+/// The pickable message an arrow moves to from `picked` (or, without a pick, from the one at
+/// the top): the one before it (`up`) or after it. None at either end.
+fn next_pick(messages: &[session::Message], picked: Option<usize>, top: Option<usize>, up: bool) -> Option<usize> {
+    let ok = |&i: &usize| messages.get(i).is_some_and(pickable);
+    match (picked, top) {
+        (Some(p), _) if up => (0..p.min(messages.len())).rev().find(ok),
+        (Some(p), _) => (p + 1..messages.len()).find(ok),
+        // Without a pick, Up brings the start of the message at the top into view first.
+        (None, Some(t)) if up => (0..=t.min(messages.len().saturating_sub(1))).rev().find(ok),
+        (None, Some(t)) => (t + 1..messages.len()).find(ok),
+        (None, None) => (0..messages.len()).rev().find(ok),
+    }
 }
 
 /// Copy at the right end of a message's label row: two overlapping rounded squares, drawn
@@ -4156,14 +4264,29 @@ impl eframe::App for App {
                 .show_separator_line(false)
                 .resizable(false)
                 .show(ui, |ui| self.prompt_bar(ui, area_height));
+            self.conversation_rect = None;
             match self.main_tab.filter(|&i| i < self.file_tabs.len()) {
                 Some(i) => self.file_tab(ui, i),
                 None => self.conversation(ui),
             }
-            // A plain click anywhere in the main area goes to the input, like a terminal;
+            // A press in the conversation gives it the keyboard (for the arrows); one anywhere
+            // else takes it away.
+            let press = ui.input(|i| i.pointer.any_pressed().then_some(i.pointer.interact_pos()).flatten());
+            let in_conversation = |p| self.conversation_rect.is_some_and(|r: egui::Rect| r.contains(p));
+            if let Some(p) = press {
+                let had = self.conversation_keys;
+                self.conversation_keys = in_conversation(p) && !find_bar.is_some_and(|r: egui::Rect| r.contains(p));
+                if self.conversation_keys {
+                    ui.memory_mut(|m| m.stop_text_input());
+                }
+                if had != self.conversation_keys {
+                    ui.ctx().request_repaint();
+                }
+            }
+            // A plain click anywhere else in the main area goes to the input, like a terminal;
             // unless it went to another text field (refine's "Other…"), which keeps the focus.
             let area = ui.max_rect();
-            let click = ui.input(|i| i.pointer.primary_clicked().then_some(i.pointer.interact_pos()).flatten());
+            let click = ui.input(|i| i.pointer.primary_clicked().then_some(i.pointer.interact_pos()).flatten()).filter(|&p| !in_conversation(p));
             let on_other_field = |p| {
                 let focused = ui.memory(|m| m.focused()).filter(|&f| f != Id::new("prompt-input"));
                 focused.and_then(|f| ui.ctx().read_response(f)).is_some_and(|r| r.rect.contains(p))
@@ -4259,6 +4382,26 @@ mod tests {
         assert_eq!(pinned_text(&m(Role::User, "[Request interrupted by user]\nReply five")).as_deref(), Some("Reply five"));
         assert_eq!(pinned_text(&m(Role::User, "write it")).as_deref(), Some("write it"));
         assert_eq!(pinned_text(&m(Role::Assistant, "hi")), None);
+    }
+
+    #[test]
+    fn arrows_step_over_what_shows_no_card() {
+        let m = |role, text: &str| session::Message { role, text: text.to_owned() };
+        let ms = [
+            m(Role::User, "one"),
+            m(Role::Assistant, "[tool: Bash]"),
+            m(Role::Assistant, "reply"),
+            m(Role::User, "[Request interrupted by user]"),
+            m(Role::User, "two"),
+        ];
+        assert_eq!(next_pick(&ms, Some(4), None, true), Some(2), "past a lone stop");
+        assert_eq!(next_pick(&ms, Some(2), None, true), Some(0), "past tool lines");
+        assert_eq!(next_pick(&ms, Some(0), None, true), None, "nothing above the first");
+        assert_eq!(next_pick(&ms, Some(2), None, false), Some(4));
+        assert_eq!(next_pick(&ms, Some(4), None, false), None);
+        assert_eq!(next_pick(&ms, None, Some(2), true), Some(2), "Up first brings the top one's start in");
+        assert_eq!(next_pick(&ms, None, Some(2), false), Some(4));
+        assert_eq!(next_pick(&ms, None, None, true), Some(4));
     }
 
     #[test]

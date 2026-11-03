@@ -126,8 +126,12 @@ opened; clicking "All sessions" again comes back to it.
 - **File tabs belong to their session.** Opening another session shows only its own tabs;
   coming back brings yours back as they were (active tab, scroll position, Rendered / Source,
   the Changes filter, and what you were typing).
-- **Click anywhere** in the main area to put the cursor in the prompt input, like a terminal.
-  Opening a session also focuses it.
+- **Click anywhere** else in the main area to put the cursor in the prompt input, like a
+  terminal. Opening a session also focuses it.
+- **Click a message** in the conversation to pick it (outlined): the conversation then has the
+  keyboard, and **Up / Down** move to the previous / next message, scrolling its start to the
+  top, to read back through a long session one message at a time. Dragging still selects text.
+  **Esc**, typing, or a click elsewhere hands the keyboard back to the input (typing goes in).
 - **Prompt input** at the bottom, styled like a terminal line (`>` prompt, monospace). With it
   focused:
   - It grows **upwards** as you type, up to 10 lines (a setting), then scrolls; the
