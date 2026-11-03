@@ -421,13 +421,13 @@ pub struct Answer {
 }
 
 const ACTIONS: &str = "You can also act on the scope, but only when the developer asks you to: rename \
-sessions, move them in the bar, or start new sessions. To act, end your reply with a block like this:\n\
+sessions, move their cards on the orchestration page, or start new sessions. To act, end your reply with a block like this:\n\
 ```actions\n\
 [{\"do\": \"rename\", \"session\": 2, \"name\": \"Auth fixes\"},\n \
 {\"do\": \"move\", \"session\": 2, \"to\": \"top\"},\n \
 {\"do\": \"new\", \"prompt\": \"the new session's first prompt, complete and self-contained\", \"name\": \"short name\"}]\n\
 ```\n\
-\"to\" is \"top\", \"bottom\", \"up\", \"down\" or a position in the bar from 1. They are done in order, \
+\"to\" is \"top\", \"bottom\", \"up\", \"down\" or a position among the cards from 1. They are done in order, \
 right after your reply; above the block, say briefly what you are doing. Without a request to act, add no block.";
 
 /// Answers a question about the workspace on a thread, from the report, recent questions and a
@@ -454,7 +454,7 @@ pub fn ask(ctx: egui::Context, harness: String, model: String, members: Vec<Memb
             }
         }
         let order: Vec<String> = bar.iter().filter_map(|id| ids.iter().position(|x| x == id)).map(|n| format!("[[{}]]", n + 1)).collect();
-        p.push_str(&format!("\nTHE BAR lists the sessions in this order, top first: {}\n", order.join(", ")));
+        p.push_str(&format!("\nTHE CARDS on the orchestration page are in this order, top first: {}\n", order.join(", ")));
         p.push_str("\nSESSIONS, newest first:\n");
         for (n, m) in members.iter().enumerate() {
             p.push_str(&format!("\n## Session {}: {}\n", n + 1, m.title));

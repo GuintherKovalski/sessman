@@ -117,10 +117,10 @@ impl From<Result<String, String>> for Reply {
 }
 
 pub const USAGE: &str = "usage:
-  scope list [--scope S]                 scopes and their sessions, in the bar's order
+  scope list [--scope S]                 scopes and their sessions, newest first as the bar lists them
   scope rename <session> <name>          an empty name gives back its own title
   scope move <session> <top|bottom|up|down|N>
-                                         its place in its scope's bar (N from 1)
+                                         its card's place on its scope's orchestration page (N from 1)
   scope new [--scope S] [--folder DIR] [--name NAME] <prompt>
                                          starts a session with that first prompt
   scope ask [--scope S] <question>       asks the scope's orchestrator (it may act)
