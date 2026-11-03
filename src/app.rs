@@ -2400,7 +2400,7 @@ impl App {
                 }
                 ModelPrompt::Done => {
                     ui.label(RichText::new("Speech model installed").strong());
-                    ui.label("Dictation is ready: click the mic to start, click again to stop.");
+                    ui.label("Dictation is ready: click the mic (or Cmd+D) to start, click again or press Enter to stop.");
                     ui.add_space(8.0);
                     ui.horizontal(|ui| {
                         dictate = ui.button("Start dictating").clicked();
@@ -2610,6 +2610,16 @@ impl App {
         let running = self.open_running();
         let enabled = self.open.is_some();
         let focused = ui.memory(|m| m.has_focus(id));
+        // While recording, Enter stops it like Cmd+D (it doesn't send), from the input or with
+        // nothing focused (clicking the mic takes focus away). Then the prompt has focus again.
+        let nothing_focused = ui.memory(|m| m.focused().is_none());
+        if matches!(self.dictation, Dictation::Recording(_))
+            && (focused || nothing_focused)
+            && ui.input_mut(|i| i.consume_key(Modifiers::NONE, Key::Enter))
+        {
+            self.toggle_dictation();
+            self.focus_prompt = true;
+        }
         // Send and refine keys are taken before the TextEdit sees them (it would add a line).
         let (send, refine_key) = if focused {
             let with_mod = self.settings.send_with_modifier;
@@ -2723,7 +2733,7 @@ impl App {
                     ui.label(RichText::new(">").monospace().strong().color(pal.prompt_sign));
                     let send_key = if self.settings.send_with_modifier { "cmd+enter" } else { "enter" };
                     let hint = match (&self.open, running) {
-                        _ if recording => "listening… click ⏹ to stop and transcribe".to_owned(),
+                        _ if recording => "listening… enter, cmd+d or ⏹ stops and transcribes".to_owned(),
                         (None, _) => "select a session".to_owned(),
                         (_, true) => format!("claude is working… {send_key} queues a prompt · ctrl+c stops"),
                         _ => format!("type a prompt · {send_key} to send · cmd+enter refines · up/down for history"),
@@ -2807,7 +2817,7 @@ impl App {
                             };
                             let resp = ui.add_enabled(recording || (enabled && !transcribing), mic);
                             let why = if transcribing { "Transcribing…" } else { "Select a session first" };
-                            let keys = if recording { format!("{cmd}+D") } else { format!("{cmd}+D to start, again to stop") };
+                            let keys = if recording { format!("Enter or {cmd}+D") } else { format!("{cmd}+D to start, again (or Enter) to stop") };
                             dictate_click = tip(resp, what, Some(why), &keys).clicked();
                             if transcribing {
                                 ui.spinner();

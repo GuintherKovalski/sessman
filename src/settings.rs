@@ -157,7 +157,7 @@ pub fn shortcuts(s: &Settings) -> Vec<(&'static str, String)> {
         ("New line in the prompt", newline),
         ("Refine the prompt", refine),
         ("Refine the prompt, wherever the focus is", format!("{cmd}+R")),
-        ("Dictate: start, or stop and transcribe", format!("{cmd}+D")),
+        ("Dictate: start, or stop and transcribe (Enter stops too)", format!("{cmd}+D")),
         ("Stop Claude", "Ctrl+C".to_owned()),
         ("Previous / next prompt (or pull back a queued one)", "Up / Down".to_owned()),
         ("Open settings", format!("{cmd}+,")),
