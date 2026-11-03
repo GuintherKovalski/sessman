@@ -260,6 +260,8 @@ pub fn setup() -> Setup {
     let mut settings = serde_json::Map::new();
     settings.insert("claude_path".into(), json!(fake_claude().display().to_string()));
     settings.insert("notify_when_done".into(), json!(false));
+    // Off, so the helper calls tests count stay theirs; verdicts.rs's tests turn it on.
+    settings.insert("tag_finished".into(), json!(false));
     settings.insert("theme".into(), json!("dark"));
     Setup { env, lock, settings }
 }

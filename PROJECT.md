@@ -41,6 +41,13 @@ it to zoom. At its right end, a dimmed **⚙** opens Settings.
   generated title, or your first prompt) and its project folder. The list refreshes on its
   own (every 10 s and after each reply), so sessions started elsewhere show up by themselves.
   A session that is working shows ⏳, and `+N queued` when prompts are waiting for it.
+  One that has stopped shows how its work ended, beside its time: **✓ done**, **● needs you**
+  or **! blocked** (the reason on hover; `scope list` adds `[done]`, `[needs you]`,
+  `[blocked]`). After each run ends, the helper model reads the end of the conversation and
+  decides; scope also checks, a couple at a time, the workspace sessions changed in the last 3
+  days that no verdict has read (runs that ended while it was closed, or in a terminal). Any
+  newer activity drops the tag until it is checked again. Settings → Tag finished sessions
+  turns it off.
 - **⚙** (right end of the top bar, or **Cmd+,**) opens the Settings page in the main area.
 - **Search** (bottom of the panel): typing filters the list (within the open tab). Name
   matches come first, then goal summaries, then the conversations' own text (with a snippet
@@ -103,7 +110,9 @@ opened; clicking "All sessions" again comes back to it.
   workspace opens on it too): overall **progress**, a summary, **Needs you**, **Next**, then a
   card per session with its live state (working spinner and tool, queued prompts, last activity,
   goal checklist) and what the report says (working / waiting / blocked / done / idle, what it is
-  doing, its next step). Click a card to open the session.
+  doing, its next step). Click a card to open the session. Working is a live fact: a stopped
+  session's card takes its state from its tag (and the tag's reason when the report hasn't read
+  its last activity yet), never from a report written while it was still running.
 - The report is written by the orchestration model (the helper model unless set) from the
   orchestration harness in Settings. Updates are incremental: the previous report plus only the
   sessions with new activity. It updates on its own when missing, or every N minutes (Settings)
@@ -273,6 +282,7 @@ What each window shows (its open tab and session, panels, drafts) stays its own.
 | Model, context tokens | The latest reply's `model` and `usage` in the session file. |
 | Context size, usage limits | Claude Code's status-line data, saved by `scope statusline` to `~/.config/scope/status/`. Without it, the size is inferred from the model. |
 | Search | An in-memory index (names, goals, conversation text) rebuilt in the background for changed files every 10 s. Enter-search: `claude -p --model haiku --no-session-persistence` with a numbered list of recent sessions (name, goal, first prompts). |
+| Session tags | `claude -p --model haiku --no-session-persistence` with the end of the conversation (about 4000 characters) after each run, and in a sweep every 10 s (two at a time) for workspace sessions with unjudged activity from the last 3 days that have been quiet for a minute. Saved by session id, with the change it read, to `~/.config/scope/verdicts.json`; a failed check isn't retried until the session changes again. |
 | Goal and checklist | `claude -p --model haiku --no-session-persistence` with a digest of the conversation, on request; saved (with your ticks) to `~/.config/scope/goals.json`. |
 | Goal questions | `claude -p --resume <id> --fork-session --no-session-persistence "<question>"`: full context, original session untouched, nothing saved. |
 | Settings (theme included) | scope's own file: `~/.config/scope/settings.json`. |
@@ -316,6 +326,7 @@ src/
 ├── runner.rs      runs `claude -p` (streaming send, stop, helper questions), folder picker, notifications
 ├── search.rs      session search: background index, matching and ranking, Haiku search format
 ├── status.rs      `scope statusline`: saves Claude Code's status data; usage limits
+├── verdict.rs     session tags: done / needs you / blocked, judged by the helper model
 ├── update.rs      finds newer releases on GitHub, installs one in place of scope.app
 └── workspaces.rs  workspaces: create, move, remove, delete, load/save
 ```

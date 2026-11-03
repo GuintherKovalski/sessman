@@ -19,6 +19,7 @@ use crate::shared::{self, Shared};
 use crate::state::{self, OpenFile, State, View, Views};
 use crate::status;
 use crate::theme;
+use crate::verdict::{self, Verdict, Verdicts};
 use crate::workspaces::{self, Workspaces};
 use eframe::egui::text::{CCursor, CCursorRange};
 use eframe::egui::{self, Align2, Color32, Id, Key, LayerId, Modifiers, Order, RichText, Sense, Stroke, StrokeKind};
@@ -213,6 +214,13 @@ pub struct App {
     /// changed since is marked finished in the overview.
     seen: HashMap<String, u64>,
     seen_from: u64,
+    /// Whether each session's work looks finished (verdict.rs), the checks under way, the
+    /// checks that failed (id → the change they read; not retried until there is a newer one),
+    /// and when workspace sessions were last looked over for checks to start.
+    verdicts: Verdicts,
+    judging: Vec<(String, Receiver<Result<Verdict, String>>)>,
+    judge_failed: HashMap<String, u64>,
+    last_sweep: Option<std::time::Instant>,
     /// The main area shows the open workspace's orchestration page (with no session open).
     orchestrating: bool,
     /// Each workspace's orchestration report and questions (by name), and those in flight.
@@ -435,6 +443,10 @@ impl App {
             overview_errors: HashMap::new(),
             seen: HashMap::new(),
             seen_from: 0,
+            verdicts: Verdicts::load(&Verdicts::path()),
+            judging: Vec::new(),
+            judge_failed: HashMap::new(),
+            last_sweep: None,
             orchestrating: false,
             orchestrations: Shared::load(orchestration::Store::path()),
             orch: orchestration::Jobs::default(),
@@ -1008,6 +1020,7 @@ impl App {
                     queued: m.queued,
                     modified: m.modified,
                     checklist,
+                    verdict: (!m.running).then(|| self.verdicts.current(&m.id, m.modified)).flatten(),
                 }
             })
             .collect();
@@ -1294,10 +1307,11 @@ impl App {
         for (w, ws) in self.workspaces.list.iter().enumerate().filter(|(w, _)| only.is_none_or(|o| o == *w)) {
             out.push_str(&format!("{} (newest first)\n", ws.name));
             for (k, id) in self.bar_ids(w).into_iter().enumerate() {
-                let state = match (self.runs.contains_key(&id), self.sessions.iter().any(|s| s.id == id)) {
-                    (_, false) => "  [starting]",
-                    (true, true) => "  [working]",
-                    _ => "",
+                let listed = self.sessions.iter().position(|s| s.id == id);
+                let state = match (self.runs.contains_key(&id), listed) {
+                    (_, None) => "  [starting]".to_owned(),
+                    (true, Some(_)) => "  [working]".to_owned(),
+                    (false, Some(i)) => self.verdict_of(i).map_or(String::new(), |v| format!("  [{}]", v.label().trim_start_matches(['✓', '!', '●', ' ']))),
                 };
                 out.push_str(&format!("  {}. {}  {id}{state}\n", k + 1, self.name_of(&id)));
             }
@@ -1535,6 +1549,79 @@ impl App {
                 Err(e) => self.error = Some(format!("could not summarize: {e}")),
             }
         }
+    }
+
+    /// Starts judging whether session `id`'s work looks finished, unless it already is being
+    /// judged (or isn't listed yet: the sweep gets to it then).
+    fn judge(&mut self, id: &str) {
+        if !self.settings.tag_finished || self.judging.iter().any(|(j, _)| j == id) {
+            return;
+        }
+        let Some(i) = self.sessions.iter().position(|s| s.id == id) else { return };
+        let rx = verdict::check(self.ctx.clone(), self.title(i).to_owned(), self.sessions[i].path.clone());
+        self.judging.push((id.to_owned(), rx));
+    }
+
+    /// Takes finished verdicts. Every few seconds, starts checks (a couple at a time) for
+    /// workspace sessions with recent activity no verdict has read, such as runs that ended
+    /// while scope was closed or ran in a terminal.
+    fn poll_verdicts(&mut self) {
+        const QUIET: u64 = 60;
+        const EVERY: u64 = 10;
+        const WINDOW: u64 = 3 * 24 * 3600;
+        const AT_ONCE: usize = 2;
+        let mut changed = false;
+        let mut done = Vec::new();
+        self.judging.retain(|(id, rx)| match rx.try_recv() {
+            Ok(r) => {
+                done.push((id.clone(), r));
+                false
+            }
+            Err(TryRecvError::Empty) => true,
+            Err(TryRecvError::Disconnected) => false,
+        });
+        for (id, result) in done {
+            match result {
+                Ok(v) => {
+                    self.judge_failed.remove(&id);
+                    self.verdicts.set(&id, v);
+                    changed = true;
+                }
+                Err(_) => {
+                    let modified = self.sessions.iter().find(|s| s.id == id).map_or(0, |s| overview::secs(s.modified));
+                    self.judge_failed.insert(id, modified);
+                }
+            }
+        }
+        if changed && let Err(e) = self.verdicts.save(&Verdicts::path()) {
+            self.error = Some(format!("could not save the session tags: {e}"));
+        }
+        if !self.settings.tag_finished || self.judging.len() >= AT_ONCE || self.last_sweep.is_some_and(|t| t.elapsed().as_secs() < EVERY) {
+            return;
+        }
+        self.last_sweep = Some(std::time::Instant::now());
+        self.ctx.request_repaint_after(std::time::Duration::from_secs(EVERY));
+        let in_workspace: HashSet<&str> = self.workspaces.list.iter().flat_map(|w| w.sessions.iter().map(String::as_str)).collect();
+        let sessions: Vec<(String, u64, bool)> = self
+            .sessions
+            .iter()
+            .filter(|s| in_workspace.contains(s.id.as_str()))
+            .map(|s| (s.id.clone(), overview::secs(s.modified), self.runs.contains_key(&s.id) || self.judging.iter().any(|(j, _)| *j == s.id)))
+            .collect();
+        let now = overview::secs(SystemTime::now());
+        let free = AT_ONCE.saturating_sub(self.judging.len());
+        for (id, _) in verdict::candidates(&sessions, &self.verdicts, &self.judge_failed, now, QUIET, WINDOW).into_iter().take(free) {
+            self.judge(&id);
+        }
+    }
+
+    /// The tag a session shows for how its work ended, if a verdict has read its newest change.
+    fn verdict_of(&self, i: usize) -> Option<&Verdict> {
+        let s = &self.sessions[i];
+        if self.runs.contains_key(&s.id) {
+            return None;
+        }
+        self.verdicts.current(&s.id, overview::secs(s.modified))
     }
 
     /// Names written for new sessions. One renamed meanwhile keeps its name; a failure only
@@ -1784,6 +1871,10 @@ impl App {
                 Err(e) => format!("{name}: {e}"),
             };
             runner::notify("scope", &body);
+        }
+        // Done, or waiting for the developer? The helper model reads how it ended.
+        if !stopped && result.is_ok() && !self.runs.contains_key(id) {
+            self.judge(id);
         }
         // The file now holds what was streamed; reloading makes it canonical. A new session is
         // selected when the indexer lists it.
@@ -2148,7 +2239,7 @@ impl App {
                     BarItem::Starting(id, title) => {
                         let open = self.new_session.is_some() && self.new_id.as_ref() == Some(&id);
                         let title = self.names.get(&id).unwrap_or(&title);
-                        if session_bubble(ui, open, title, None, None, true, None).clicked() && !open {
+                        if session_bubble(ui, open, title, None, None, true, None, None).clicked() && !open {
                             actions.push(Action::OpenPending(id));
                         }
                         continue;
@@ -2169,7 +2260,8 @@ impl App {
                 let is_picked = self.picked.contains(&s.id);
                 let highlighted = is_picked || (self.picked.is_empty() && self.selected == Some(i));
                 let when = row_time(s.modified, SystemTime::now());
-                let row = session_bubble(ui, highlighted, &label, note.as_deref(), Some(&when), self.runs.contains_key(&s.id), color);
+                let tag = self.verdict_of(i);
+                let row = session_bubble(ui, highlighted, &label, note.as_deref(), Some(&when), self.runs.contains_key(&s.id), color, tag);
                 rects.push((s.id.clone(), row.rect));
                 // Dragging highlighted rows moves them; a drag from any other row draws a box.
                 let dragging = if is_picked { picked.clone() } else { vec![s.id.clone()] };
@@ -3774,7 +3866,9 @@ fn pending_new(runs: &HashMap<String, Run>, ended: &[(String, String, Option<Pat
 /// A session in the list: its name in a rounded bubble, with a spinner on the right while
 /// Claude is working in it, and a search note under the name when there is one. Senses click
 /// and drag in one widget (a separate drag-source wrapper would swallow the click).
-fn session_bubble(ui: &mut egui::Ui, selected: bool, title: &str, note: Option<&str>, when: Option<&str>, running: bool, color: Option<[u8; 3]>) -> egui::Response {
+/// `tag`: how its last run ended, shown before the time (its reason on hover).
+#[allow(clippy::too_many_arguments)]
+fn session_bubble(ui: &mut egui::Ui, selected: bool, title: &str, note: Option<&str>, when: Option<&str>, running: bool, color: Option<[u8; 3]>, tag: Option<&Verdict>) -> egui::Response {
     const PAD: egui::Vec2 = egui::vec2(10.0, 6.0);
     const SPIN: f32 = 12.0;
     let width = ui.available_width();
@@ -3784,15 +3878,37 @@ fn session_bubble(ui: &mut egui::Ui, selected: bool, title: &str, note: Option<&
     let galley = ui.painter().layout_job(job);
     let note = note.map(|n| ui.painter().layout(n.to_owned(), egui::TextStyle::Small.resolve(ui.style()), ui.visuals().weak_text_color(), text_width));
     // The time, small at the bottom right: beside the last line when it fits, else below it.
-    let when = when.map(|w| ui.painter().layout_no_wrap(w.to_owned(), egui::FontId::proportional(10.0), ui.visuals().weak_text_color()));
+    let pal = theme::palette(ui.visuals());
+    let small = egui::FontId::proportional(10.0);
+    let tag_color = |v: &Verdict| match v.state.as_str() {
+        "done" => pal.add_fg,
+        "blocked" => pal.error,
+        _ => pal.note,
+    };
+    let when = match (when, tag) {
+        (None, None) => None,
+        (w, t) => {
+            let mut job = egui::text::LayoutJob::default();
+            if let Some(v) = t {
+                job.append(v.label(), 0.0, egui::TextFormat::simple(small.clone(), tag_color(v)));
+            }
+            if let Some(w) = w {
+                job.append(w, if t.is_some() { 6.0 } else { 0.0 }, egui::TextFormat::simple(small.clone(), ui.visuals().weak_text_color()));
+            }
+            Some(ui.painter().layout_job(job))
+        }
+    };
     let last_line = note.as_ref().unwrap_or(&galley).rows.last().map_or(0.0, |r| r.rect().width());
     let below = when.as_ref().filter(|w| last_line + 8.0 + w.size().x > text_width).map_or(0.0, |w| w.size().y);
     let height = galley.size().y + note.as_ref().map_or(0.0, |n| n.size().y + 2.0) + below + 2.0 * PAD.y;
     let (rect, row) = ui.allocate_exact_size(egui::vec2(width, height), Sense::click_and_drag());
-    let label = match &note {
+    let mut label = match &note {
         Some(n) => format!("{title}\n{}", n.text()),
         None => title.to_owned(),
     };
+    if let Some(v) = tag {
+        label.push_str(&format!("\n{}", v.label()));
+    }
     row.widget_info(|| egui::WidgetInfo::selected(egui::WidgetType::Button, true, selected, &label));
     if ui.is_rect_visible(rect) {
         let v = ui.visuals();
@@ -3829,7 +3945,11 @@ fn session_bubble(ui: &mut egui::Ui, selected: bool, title: &str, note: Option<&
         }
     }
     ui.add_space(2.0);
-    if running { row.on_hover_text_at_pointer("Claude is working in this session") } else { row }
+    match tag {
+        _ if running => row.on_hover_text_at_pointer("Claude is working in this session"),
+        Some(v) if !v.why.is_empty() => row.on_hover_text_at_pointer(&v.why),
+        _ => row,
+    }
 }
 
 /// One message as a card: role label and accent stripe, then its rendered Markdown.
@@ -4258,6 +4378,7 @@ impl eframe::App for App {
         self.poll_runner();
         self.poll_summary();
         self.poll_naming();
+        self.poll_verdicts();
         self.updater.poll(&self.ctx);
         if std::mem::take(&mut self.updater.restart) {
             // Quits like Cmd+Q; the sessions it runs go on and the new scope picks them up.

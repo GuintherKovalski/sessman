@@ -23,6 +23,7 @@ mod state;
 mod status;
 mod theme;
 mod update;
+mod verdict;
 mod workspaces;
 
 fn main() -> eframe::Result {

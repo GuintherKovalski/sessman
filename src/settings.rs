@@ -58,6 +58,9 @@ pub struct Settings {
     pub confirm_delete_workspace: bool,
     pub restore_state: bool,
     pub notify_when_done: bool,
+    /// After a run ends, the helper model reads the session's last messages and tags it done,
+    /// waiting for you or blocked (verdict.rs).
+    pub tag_finished: bool,
     /// Jira site the overview's ticket keys link to, e.g. https://acme.atlassian.net.
     pub jira_url: String,
     /// Harness: the instructions each helper starts from (Settings → Harness). Empty = default.
@@ -98,6 +101,7 @@ impl Default for Settings {
             confirm_delete_workspace: true,
             restore_state: true,
             notify_when_done: false,
+            tag_finished: true,
             jira_url: String::new(),
             orchestration_harness: crate::orchestration::DEFAULT_HARNESS.into(),
             question_harness: crate::goal::QUESTION_HARNESS.into(),
@@ -306,6 +310,12 @@ pub fn ui(ui: &mut egui::Ui, s: &mut Settings, filter: &mut String, about: &mut 
                 s.notify_when_done = defaults.notify_when_done;
             }
             ui.checkbox(&mut s.notify_when_done, "");
+        });
+        page.row("Tag finished sessions", "After a run ends, the helper model reads the last messages and tags the session done, needs you or blocked", s.tag_finished != defaults.tag_finished, |ui, reset| {
+            if reset {
+                s.tag_finished = defaults.tag_finished;
+            }
+            ui.checkbox(&mut s.tag_finished, "");
         });
 
         page.section("Overview");
