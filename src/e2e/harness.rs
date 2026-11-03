@@ -327,6 +327,8 @@ pub struct Scope {
     // Dropped first: the app (and the threads it started) before the folders go.
     h: Harness<'static, App>,
     pub env: Env,
+    /// The last text the app put on the clipboard.
+    pub copied: Option<String>,
     _lock: MutexGuard<'static, ()>,
 }
 
@@ -374,7 +376,7 @@ impl Scope {
             .with_step_dt(1.0 / 60.0)
             .with_max_steps(20)
             .build_eframe(|cc| App::new(&cc.egui_ctx));
-        let mut s = Scope { h, env, _lock: lock };
+        let mut s = Scope { h, env, copied: None, _lock: lock };
         s.frames(3);
         s
     }
@@ -412,6 +414,11 @@ impl Scope {
     pub fn frames(&mut self, n: usize) {
         for _ in 0..n {
             self.h.step();
+            for c in &self.h.output().platform_output.commands {
+                if let egui::OutputCommand::CopyText(t) = c {
+                    self.copied = Some(t.clone());
+                }
+            }
         }
     }
 

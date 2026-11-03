@@ -16,6 +16,7 @@ mod harness;
 mod changes;
 mod commands;
 mod conversation;
+mod copy;
 mod find;
 mod images;
 mod foreign_runs;
