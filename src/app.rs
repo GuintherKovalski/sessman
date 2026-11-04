@@ -71,6 +71,15 @@ enum Action {
 /// What a dragged workspace tab carries: its index.
 struct TabDrag(usize);
 
+/// Sessions one action took out of workspaces, and the session open before it.
+struct Removal {
+    taken: Vec<workspaces::Taken>,
+    open: Option<String>,
+}
+
+/// How many removals Cmd+Z can go back through.
+const UNDO_LIMIT: usize = 50;
+
 #[derive(PartialEq)]
 enum RightTab {
     Changes,
@@ -130,6 +139,8 @@ pub struct App {
     /// then open the session above or below, Delete/Backspace take the highlighted ones out of
     /// the open workspace.
     bar_keys: bool,
+    /// Sessions taken out of workspaces, latest last, for Cmd+Z to put back.
+    removed: Vec<Removal>,
     /// Set when the arrows moved the pick: the conversation scrolls to it on the next frame.
     scroll_to_pick: bool,
     /// The message at the top of the conversation last frame, where the arrows start without a pick.
@@ -400,6 +411,7 @@ impl App {
             picked_message: None,
             conversation_keys: false,
             bar_keys: false,
+            removed: Vec::new(),
             scroll_to_pick: false,
             top_message: None,
             conversation_rect: None,
@@ -659,10 +671,14 @@ impl App {
             }
             Action::Remove(ids, then) => {
                 self.sync_workspaces(None);
-                for id in &ids {
-                    self.workspaces.remove(id);
-                }
+                let taken: Vec<workspaces::Taken> = ids.iter().filter_map(|id| self.workspaces.take(id)).collect();
                 self.save_workspaces();
+                if !taken.is_empty() {
+                    let open = self.selected.map(|i| self.sessions[i].id.clone());
+                    self.removed.push(Removal { taken, open });
+                    let extra = self.removed.len().saturating_sub(UNDO_LIMIT);
+                    self.removed.drain(..extra);
+                }
                 self.picked.retain(|id| !ids.contains(id));
                 let open_removed = self.selected.is_some_and(|i| ids.contains(&self.sessions[i].id));
                 match then.and_then(|id| self.sessions.iter().position(|s| s.id == id)) {
@@ -698,6 +714,27 @@ impl App {
             }
             Action::OpenPending(id) => self.open_pending(&id),
             Action::Orchestrate => self.show_orchestration(),
+        }
+    }
+
+    /// Cmd+Z: puts the sessions taken out last back in their workspace, and opens again the
+    /// session that was open then (when this tab lists it), the bar keeping the keyboard.
+    fn undo_remove(&mut self) {
+        let Some(r) = self.removed.pop() else { return };
+        self.sync_workspaces(None);
+        let back: Vec<String> = r.taken.iter().rev().filter(|t| self.workspaces.put_back(t)).map(|t| t.session.clone()).collect();
+        if back.is_empty() {
+            return;
+        }
+        self.save_workspaces();
+        let visible = self.visible();
+        let Some(i) = r.open.and_then(|id| visible.into_iter().find(|&i| self.sessions[i].id == id)) else { return };
+        let keys = self.bar_keys;
+        self.select(i);
+        self.pick_anchor = Some(self.sessions[i].id.clone());
+        self.picked = if back.len() > 1 { back.into_iter().collect() } else { HashSet::new() };
+        if keys {
+            self.focus_prompt = false;
         }
     }
 
@@ -3930,6 +3967,16 @@ impl App {
         }
         if ctx.input_mut(|i| i.consume_key(Modifiers::CTRL, Key::F) || i.consume_key(Modifiers::COMMAND, Key::F)) {
             self.find.show();
+        }
+        // Cmd+Z with no field focused (a focused one undoes its own typing) brings back the
+        // sessions taken out of a workspace last.
+        let modal = !self.confirm_trash.is_empty() || self.confirm_delete.is_some();
+        if !self.removed.is_empty()
+            && !modal
+            && ctx.memory(|m| m.focused().is_none())
+            && ctx.input_mut(|i| i.consume_key(Modifiers::COMMAND, Key::Z))
+        {
+            self.undo_remove();
         }
         if !self.picked.is_empty() && self.confirm_trash.is_empty() && ctx.input(|i| i.key_pressed(Key::Escape)) {
             self.picked.clear();
