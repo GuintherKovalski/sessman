@@ -86,8 +86,9 @@ opens a scope window on an **E2E** workspace whose new sessions start in
 `/tmp/scope-test-<name>/proj`. What you do in that window (renames, moves, settings, new
 sessions) stays in its copy.
 
-- The windows all look like scope. Tell them apart by the order you opened them, or close
-  the ones you're not testing.
+- Hover a window's Dock icon to see which it is: `scope: <branch>` (without `feature/`),
+  plus the instance name when it isn't the branch's. `start <name> <label>` names it
+  yourself.
 - Every instance shows all your sessions as working (it finds them by their processes). Only
   use the E2E workspace there; don't stop or prompt your real sessions from a test window.
 - Drive an instance from the terminal too:
