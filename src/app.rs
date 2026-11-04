@@ -1436,6 +1436,16 @@ impl App {
                 let called = name.map_or(String::new(), |n| format!(" \"{}\"", n.trim()));
                 Ok(format!("Started session{called}{place} in {} (id {id})", dir.display()))
             }),
+            Command::Style { args } => {
+                let changed = self.settings.change(|s| crate::style::command(s, &args));
+                match changed {
+                    Ok(r) => {
+                        self.apply_settings();
+                        r
+                    }
+                    Err(e) => Err(format!("could not save settings: {e}")),
+                }
+            }
             Command::Ask { question, workspace } => {
                 let asked = self.find_workspace(workspace.as_deref(), caller).and_then(|w| {
                     let w = w.ok_or("which scope? none is open; use --scope")?;

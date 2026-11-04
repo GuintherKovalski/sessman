@@ -32,6 +32,7 @@ mod search;
 mod sessions;
 mod settings_page;
 mod startup;
+mod style;
 mod sync;
 mod verdicts;
 mod workspaces;
