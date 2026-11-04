@@ -731,7 +731,7 @@ pub fn ui(ui: &mut egui::Ui, page: &Page, question: &mut String, renaming: &mut 
             }
             ui.add_space(8.0);
             ui.horizontal(|ui| {
-                ui.label(RichText::new("In the bar's order · drag a tile onto another to reorder · right-click for more").weak().small());
+                ui.label(RichText::new("In the bar's order · drag a tile before or after another to reorder · right-click for more").weak().small());
                 if page.arranged {
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         if ui.small_button("Newest first").on_hover_text("List the sessions in the bar newest first again").clicked() {
@@ -745,7 +745,7 @@ pub fn ui(ui: &mut egui::Ui, page: &Page, question: &mut String, renaming: &mut 
             overview::tile_grid(ui, ("orchestration-grid", page.name), page.sessions, columns, |ui, k, s, height| {
                 let status = report.and_then(|r| r.sessions.iter().find(|x| x.id == s.id));
                 let covered = page.orch.and_then(|o| o.covered.get(s.id)).copied().unwrap_or(0);
-                let card = Card { s, k, count: page.sessions.len(), sessions: page.sessions, status, covered, now, accent };
+                let card = Card { s, k, count: page.sessions.len(), columns, sessions: page.sessions, status, covered, now, accent };
                 let (e, natural) = session_tile(ui, &card, renaming, height);
                 if let Some(e) = e {
                     event = Some(e);
@@ -873,6 +873,8 @@ struct Card<'a> {
     s: &'a Live<'a>,
     k: usize,
     count: usize,
+    /// Columns the cards are laid out in, row by row.
+    columns: usize,
     sessions: &'a [Live<'a>],
     status: Option<&'a Status>,
     /// The session's newest change the report has read.
@@ -884,11 +886,11 @@ struct Card<'a> {
 /// A session's tile, drawn like its tile on the Scopes overview: its name, then in small
 /// print what it is doing and what comes next, and at the bottom how it stands (✔ done,
 /// ✋ waiting, ⚠ blocked) on the left and when it was last touched, or a spinner while it
-/// works, on the right. Clicking opens the session, dragging it onto another tile moves it
-/// there in the bar, the pencil renames it, and right-click has all of these. At least
+/// works, on the right. Clicking opens the session, dragging it onto another tile puts it
+/// before or after that one, the pencil renames it, and right-click has all of these. At least
 /// `height` tall; also returns how tall it would be on its own.
 fn session_tile(ui: &mut egui::Ui, card: &Card, renaming: &mut Option<Rename>, height: f32) -> (Option<Event>, f32) {
-    let Card { s, k, count, sessions, status, covered, now, accent } = *card;
+    let Card { s, k, count, columns, sessions, status, covered, now, accent } = *card;
     let mut event = None;
     let mut natural = 0.0;
     let v = ui.visuals().clone();
@@ -1020,7 +1022,8 @@ fn session_tile(ui: &mut egui::Ui, card: &Card, renaming: &mut Option<Rename>, h
         ui.ctx().request_repaint();
     }
 
-    // Dragged onto another tile: it takes that one's place.
+    // Dragged onto another tile: a line shows which side of it the tile goes (left or right
+    // when the tiles run in rows, above or below in one column), letting go puts it there.
     if tile.drag_started() && !editing {
         tile.dnd_set_drag_payload(s.id.to_owned());
     }
@@ -1030,14 +1033,24 @@ fn session_tile(ui: &mut egui::Ui, card: &Card, renaming: &mut Option<Rename>, h
         let painter = ui.ctx().layer_painter(egui::LayerId::new(egui::Order::Tooltip, Id::new("orchestration-drag")));
         painter.text(pos + egui::vec2(14.0, 0.0), egui::Align2::LEFT_CENTER, s.title, egui::FontId::proportional(14.0), pal.user);
     }
-    if tile.dnd_hover_payload::<String>().is_some_and(|from| *from != s.id) {
-        ui.painter().rect_stroke(rect, 10.0, Stroke::new(2.0, accent), StrokeKind::Outside);
-    }
-    if let Some(from) = tile.dnd_release_payload::<String>().filter(|from| **from != s.id) {
-        event = Some(Event::Move((*from).clone(), k));
+    if let Some(from) = tile.dnd_hover_payload::<String>().filter(|from| **from != s.id) {
+        let pos = ui.ctx().pointer_interact_pos().unwrap_or(rect.center());
+        let after = if columns > 1 { pos.x > rect.center().x } else { pos.y > rect.center().y };
+        let line = Stroke::new(2.0, accent);
+        let gap = overview::GAP / 2.0;
+        match (columns > 1, after) {
+            (true, false) => ui.painter().vline(rect.left() - gap, rect.y_range(), line),
+            (true, true) => ui.painter().vline(rect.right() + gap, rect.y_range(), line),
+            (false, false) => ui.painter().hline(rect.x_range(), rect.top() - gap, line),
+            (false, true) => ui.painter().hline(rect.x_range(), rect.bottom() + gap, line),
+        };
+        if tile.dnd_release_payload::<String>().is_some() {
+            let from_k = sessions.iter().position(|x| x.id == from.as_str()).unwrap_or(k);
+            event = Some(Event::Move((*from).clone(), drop_place(from_k, k, after)));
+        }
     }
 
-    let tile = tile.on_hover_cursor(egui::CursorIcon::PointingHand).on_hover_text("Open this session · drag onto another to reorder");
+    let tile = tile.on_hover_cursor(egui::CursorIcon::PointingHand).on_hover_text("Open this session · drag it before or after another to reorder");
     if tile.clicked() && !editing && event.is_none() {
         event = Some(Event::Open(s.id.to_owned()));
     }
@@ -1065,12 +1078,28 @@ fn session_tile(ui: &mut egui::Ui, card: &Card, renaming: &mut Option<Rename>, h
     (event, natural)
 }
 
+/// Where a card at `from` lands, counted once it is taken out, when dropped before (or
+/// `after`) the card at `onto`.
+fn drop_place(from: usize, onto: usize, after: bool) -> usize {
+    let slot = onto + usize::from(after);
+    if from < slot { slot - 1 } else { slot }
+}
+
 fn plural(n: usize, word: &str) -> String {
     if n == 1 { format!("1 {word}") } else { format!("{n} {word}s") }
 }
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_dropped_card_goes_before_or_after_the_one_it_is_dropped_on() {
+        // Cards a b c d; the index is where it goes once taken out.
+        assert_eq!(drop_place(0, 2, false), 1, "a before c: b a c d");
+        assert_eq!(drop_place(0, 3, true), 3, "a after d: b c d a");
+        assert_eq!(drop_place(3, 0, false), 0, "d before a: d a b c");
+        assert_eq!(drop_place(3, 1, true), 2, "d after b: a b d c");
+    }
+
     use super::*;
     use crate::shared::Shared;
 

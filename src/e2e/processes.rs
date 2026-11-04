@@ -2,7 +2,7 @@
 use super::harness::*;
 
 /// Sessions are found in `ps` by their `--resume <id>`.
-const ID: &str = "5d0c3a3e-8a43-4f7e-9a59-0d2b8c1f7a10";
+const ID: &str = "9e1f6b2a-3c4d-4e5f-8a9b-0c1d2e3f4a5b";
 
 fn work() -> Scope {
     let mut s = setup()
