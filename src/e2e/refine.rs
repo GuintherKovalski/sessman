@@ -100,3 +100,28 @@ fn a_reply_it_cannot_read_shows_an_error() {
     assert_eq!(s.prompt(), "whatever");
 }
 
+
+#[test]
+fn cmd_r_refines_even_with_the_input_unfocused() {
+    let mut s = typed("tidy this");
+    s.press(Key::Escape);
+    s.press_with(Modifiers::COMMAND, Key::R);
+    s.wait_until("refined", |s| s.prompt() == "Refined: tidy this");
+}
+
+#[test]
+fn cmd_r_with_an_empty_input_does_nothing() {
+    let mut s = typed("");
+    s.press_with(Modifiers::COMMAND, Key::R);
+    s.frames(5);
+    assert!(s.env.calls().iter().all(|c| !c["args"].as_array().unwrap().iter().any(|a| a.as_str().unwrap().contains("You refine prompts"))));
+}
+
+#[test]
+fn hovering_the_refine_button_explains_it_and_shows_its_shortcut() {
+    let mut s = typed("");
+    s.hover("✨");
+    assert!(s.sees("Refine: a helper model rewrites the prompt clearly, asking questions if it is ambiguous"));
+    assert!(s.sees("Type a prompt first"), "disabled, it says why");
+    assert!(s.sees("Cmd+R, or Cmd+Enter in the input"));
+}
