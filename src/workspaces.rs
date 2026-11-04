@@ -19,6 +19,11 @@ pub struct Workspace {
     /// first.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub ordered: bool,
+    /// The bar's order, arranged by dragging its rows: those placed, top first. Sessions not
+    /// in it (new ones) go above them, newest first. Empty: the bar is newest first. Apart
+    /// from `ordered`, which orders the orchestration page's cards.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub bar: Vec<String>,
 }
 
 pub const PALETTE: [[u8; 3]; 10] = [
@@ -33,6 +38,15 @@ pub const PALETTE: [[u8; 3]; 10] = [
     [160, 190, 90],
     [200, 150, 110],
 ];
+
+/// Where a session taken out of a workspace was, to put it back.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Taken {
+    pub session: String,
+    pub workspace: String,
+    at: usize,
+    bar_at: Option<usize>,
+}
 
 /// User-defined groups of sessions. A session lives in at most one workspace.
 #[derive(Serialize, Deserialize, Default, Debug)]
@@ -128,7 +142,7 @@ impl Workspaces {
             return None;
         }
         let color = Some(self.free_color());
-        self.list.push(Workspace { name: name.to_owned(), sessions: Vec::new(), color, last: None, folder: None, ordered: false });
+        self.list.push(Workspace { name: name.to_owned(), sessions: Vec::new(), color, last: None, folder: None, ordered: false, bar: Vec::new() });
         Some(self.list.len() - 1)
     }
 
@@ -164,10 +178,62 @@ impl Workspaces {
         }
     }
 
+    /// Lists workspace `ws`'s bar in `order` (ids not in it are ignored) from now on.
+    pub fn arrange_bar(&mut self, ws: usize, order: &[String]) {
+        let Some(w) = self.list.get_mut(ws) else { return };
+        w.bar = order.iter().filter(|id| w.sessions.contains(id)).cloned().collect();
+    }
+
+    /// Back to listing workspace `ws`'s bar newest first.
+    pub fn unarrange_bar(&mut self, ws: usize) {
+        if let Some(w) = self.list.get_mut(ws) {
+            w.bar.clear();
+        }
+    }
+
+    /// Moves the tab of workspace `from` to place `to` (counted before it is taken out).
+    pub fn reorder(&mut self, from: usize, to: usize) {
+        if from >= self.list.len() {
+            return;
+        }
+        let w = self.list.remove(from);
+        let to = if to > from { to - 1 } else { to };
+        self.list.insert(to.min(self.list.len()), w);
+    }
+
     pub fn remove(&mut self, session: &str) {
         for w in &mut self.list {
             w.sessions.retain(|s| s != session);
+            w.bar.retain(|s| s != session);
         }
+    }
+
+    /// Takes a session out of its workspace, saying where it was, for `put_back` to undo.
+    pub fn take(&mut self, session: &str) -> Option<Taken> {
+        let w = self.list.iter().position(|w| w.sessions.iter().any(|s| s == session))?;
+        let ws = &self.list[w];
+        let taken = Taken {
+            session: session.to_owned(),
+            workspace: ws.name.clone(),
+            at: ws.sessions.iter().position(|s| s == session).unwrap_or(0),
+            bar_at: ws.bar.iter().position(|s| s == session),
+        };
+        self.remove(session);
+        Some(taken)
+    }
+
+    /// Puts a session taken out back where it was, unless its workspace is gone or it is in
+    /// a workspace again. Whether it went back.
+    pub fn put_back(&mut self, t: &Taken) -> bool {
+        if self.list.iter().any(|w| w.sessions.contains(&t.session)) {
+            return false;
+        }
+        let Some(w) = self.list.iter_mut().find(|w| w.name == t.workspace) else { return false };
+        w.sessions.insert(t.at.min(w.sessions.len()), t.session.clone());
+        if let Some(b) = t.bar_at {
+            w.bar.insert(b.min(w.bar.len()), t.session.clone());
+        }
+        true
     }
 
     /// The session last open in a tab (None = All sessions).
@@ -277,6 +343,27 @@ mod tests {
     use super::*;
 
     #[test]
+    fn a_session_taken_out_goes_back_where_it_was() {
+        let mut w = Workspaces::default();
+        let a = w.add("a").unwrap();
+        for s in ["s1", "s2", "s3"] {
+            w.move_to(s, a);
+        }
+        w.arrange_bar(a, &["s3".to_owned(), "s2".to_owned(), "s1".to_owned()]);
+        let before = w.list[a].clone();
+        let t2 = w.take("s2").unwrap();
+        let t1 = w.take("s1").unwrap();
+        assert_eq!(w.list[a].sessions, vec!["s3"]);
+        assert!(w.take("nope").is_none());
+        // Undone last first, like Cmd+Z.
+        assert!(w.put_back(&t1) && w.put_back(&t2));
+        assert_eq!(w.list[a], before);
+        assert!(!w.put_back(&t2), "already back");
+        w.delete(a);
+        assert!(!w.put_back(&t1), "its workspace is gone");
+    }
+
+    #[test]
     fn each_tab_remembers_its_last_session() {
         let mut w = Workspaces::default();
         let a = w.add("a").unwrap();
@@ -345,6 +432,35 @@ mod tests {
         assert!(!w.list[a].ordered);
         let old: Workspaces = serde_json::from_str(r#"{"list":[{"name":"x","sessions":[]}]}"#).unwrap();
         assert!(!old.list[0].ordered);
+    }
+
+    #[test]
+    fn the_bar_has_its_own_order_and_tabs_move() {
+        let mut w = Workspaces::default();
+        let a = w.add("a").unwrap();
+        let b = w.add("b").unwrap();
+        w.add("c");
+        for s in ["s1", "s2", "s3"] {
+            w.move_to(s, a);
+        }
+        w.arrange_bar(a, &["s3".into(), "gone".into(), "s1".into()]);
+        assert_eq!(w.list[a].bar, vec!["s3", "s1"]);
+        assert_eq!(w.list[a].sessions, vec!["s1", "s2", "s3"], "the cards' order is apart");
+        assert!(!w.list[a].ordered);
+        w.move_to("s3", b);
+        assert_eq!(w.list[a].bar, vec!["s1"], "moved out: out of the bar too");
+        w.unarrange_bar(a);
+        assert!(w.list[a].bar.is_empty());
+        let names = |w: &Workspaces| w.list.iter().map(|w| w.name.clone()).collect::<Vec<_>>();
+        w.reorder(0, 3);
+        assert_eq!(names(&w), ["b", "c", "a"], "to the end");
+        w.reorder(2, 0);
+        assert_eq!(names(&w), ["a", "b", "c"], "to the front");
+        w.reorder(0, 2);
+        assert_eq!(names(&w), ["b", "a", "c"], "before the third");
+        w.reorder(1, 1);
+        w.reorder(9, 0);
+        assert_eq!(names(&w), ["b", "a", "c"], "in place, or no such tab");
     }
 
     #[test]

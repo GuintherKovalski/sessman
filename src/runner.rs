@@ -6,6 +6,21 @@ use std::process::{Command, Stdio};
 use std::sync::mpsc::{Receiver, channel};
 use std::sync::{Arc, Mutex, RwLock};
 
+/// Model and effort picked for one session when it was made; empty = what Settings and
+/// Claude Code's own settings give. Passed on every run of that session.
+#[derive(Clone, Debug, Default, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(default)]
+pub struct Choice {
+    pub model: String,
+    pub effort: String,
+}
+
+impl Choice {
+    pub fn is_empty(&self) -> bool {
+        self.model.is_empty() && self.effort.is_empty()
+    }
+}
+
 /// How to run Claude Code, from the Settings page.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Claude {
@@ -137,10 +152,14 @@ fn command(c: &Claude) -> Command {
 }
 
 /// The arguments of a prompt run, after `claude -p <extra>`.
-pub fn send_args(c: &Claude, id: &str, prompt: &str, new: bool) -> Vec<String> {
+pub fn send_args(c: &Claude, choice: &Choice, id: &str, prompt: &str, new: bool) -> Vec<String> {
     let mut args: Vec<String> = vec![if new { "--session-id" } else { "--resume" }.into(), id.into()];
-    if !c.model.is_empty() {
-        args.extend(["--model".into(), c.model.clone()]);
+    let model = if choice.model.is_empty() { &c.model } else { &choice.model };
+    if !model.is_empty() {
+        args.extend(["--model".into(), model.clone()]);
+    }
+    if !choice.effort.is_empty() {
+        args.extend(["--effort".into(), choice.effort.clone()]);
     }
     args.extend(["--output-format", "stream-json", "--verbose", "--include-partial-messages"].map(String::from));
     // A prompt with images goes in on stdin, as a message with image blocks.
@@ -198,7 +217,7 @@ pub enum RunEvent {
 
 /// Runs `claude -p` on a thread, streaming its progress: `--resume <id>` for an existing
 /// session, `--session-id <id>` to start a new one.
-pub fn send(ctx: eframe::egui::Context, id: String, cwd: Option<PathBuf>, prompt: String, new: bool) -> (Receiver<RunEvent>, Stop) {
+pub fn send(ctx: eframe::egui::Context, id: String, cwd: Option<PathBuf>, prompt: String, new: bool, choice: Choice) -> (Receiver<RunEvent>, Stop) {
     let c = claude();
     let mut cmd = command(&c);
     // Claude can manage scope's sessions through its command, and knows which one it is.
@@ -206,7 +225,7 @@ pub fn send(ctx: eframe::egui::Context, id: String, cwd: Option<PathBuf>, prompt
         cmd.args(["--append-system-prompt", &crate::control::system_prompt(&exe.to_string_lossy())]);
     }
     cmd.env(crate::control::SESSION_VAR, &id);
-    cmd.args(send_args(&c, &id, &prompt, new));
+    cmd.args(send_args(&c, &choice, &id, &prompt, new));
     if let Some(dir) = cwd {
         cmd.current_dir(dir);
     }
@@ -559,13 +578,18 @@ mod tests {
     #[test]
     fn send_args_follow_settings() {
         let mut c = Claude::default();
-        let args = send_args(&c, "id1", "hello", false);
+        let none = Choice::default();
+        let args = send_args(&c, &none, "id1", "hello", false);
         assert_eq!(args[..2], ["--resume", "id1"]);
         assert!(!args.contains(&"--model".to_owned()));
         assert_eq!(args.last().unwrap(), "hello");
         c.model = "opus".into();
-        let args = send_args(&c, "id2", "hi", true);
+        let args = send_args(&c, &none, "id2", "hi", true);
         assert_eq!(args[..4], ["--session-id", "id2", "--model", "opus"]);
+        // A session's own choice wins over Settings, and adds its effort.
+        let mine = Choice { model: "fable".into(), effort: "high".into() };
+        let args = send_args(&c, &mine, "id3", "hi", false);
+        assert_eq!(args[..6], ["--resume", "id3", "--model", "fable", "--effort", "high"]);
         let mut s = crate::settings::Settings::default();
         s.extra_args = " --permission-mode  acceptEdits ".into();
         s.claude_path = "".into();

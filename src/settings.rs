@@ -56,6 +56,7 @@ pub struct Settings {
     /// the last one chosen); empty = the open session's folder.
     pub default_folder: String,
     pub confirm_delete_workspace: bool,
+    pub confirm_delete_message: bool,
     pub restore_state: bool,
     pub notify_when_done: bool,
     /// After a run ends, the helper model reads the session's last messages and tags it done,
@@ -99,6 +100,7 @@ impl Default for Settings {
             extra_args: String::new(),
             default_folder: String::new(),
             confirm_delete_workspace: true,
+            confirm_delete_message: true,
             restore_state: true,
             notify_when_done: false,
             tag_finished: true,
@@ -152,6 +154,8 @@ pub fn shortcuts(s: &Settings) -> Vec<(&'static str, String)> {
         ("Send the prompt (queued while Claude works)", send),
         ("New line in the prompt", newline),
         ("Refine the prompt", refine),
+        ("Refine the prompt, wherever the focus is", format!("{cmd}+R")),
+        ("Dictate: start, or stop and transcribe (Enter stops too)", format!("{cmd}+D")),
         ("Stop Claude", "Ctrl+C".to_owned()),
         ("Previous / next prompt (or pull back a queued one)", "Up / Down".to_owned()),
         ("Open settings", format!("{cmd}+,")),
@@ -267,11 +271,13 @@ pub fn ui(ui: &mut egui::Ui, s: &mut Settings, filter: &mut String, about: &mut 
             }
             ui.add(egui::TextEdit::singleline(&mut s.claude_path).desired_width(260.0));
         });
-        page.row("Model for prompts", "e.g. opus, sonnet; empty = Claude Code's default", s.model != defaults.model, |ui, reset| {
+        page.row("Model for prompts", "Default = Claude Code's default", s.model != defaults.model, |ui, reset| {
             if reset {
                 s.model = defaults.model.clone();
             }
-            ui.add(egui::TextEdit::singleline(&mut s.model).hint_text("default").desired_width(260.0));
+            for (v, label) in [("", "Default"), ("opus", "Opus"), ("fable", "Fable")] {
+                ui.selectable_value(&mut s.model, v.to_owned(), label);
+            }
         });
         page.row("Helper model", "Search, goals and Refine", s.helper_model != defaults.helper_model, |ui, reset| {
             if reset {
@@ -298,6 +304,12 @@ pub fn ui(ui: &mut egui::Ui, s: &mut Settings, filter: &mut String, about: &mut 
                 s.confirm_delete_workspace = defaults.confirm_delete_workspace;
             }
             ui.checkbox(&mut s.confirm_delete_workspace, "");
+        });
+        page.row("Confirm before deleting a message", "From a session's context, with 🗑 on the message", s.confirm_delete_message != defaults.confirm_delete_message, |ui, reset| {
+            if reset {
+                s.confirm_delete_message = defaults.confirm_delete_message;
+            }
+            ui.checkbox(&mut s.confirm_delete_message, "");
         });
         page.row("Restore the previous state at start", "Open session, tabs, drafts and queues", s.restore_state != defaults.restore_state, |ui, reset| {
             if reset {
@@ -542,6 +554,7 @@ mod tests {
     fn shortcuts_follow_the_send_setting() {
         let mut s = Settings::default();
         assert!(shortcuts(&s).iter().any(|(_, k)| k == "Enter"));
+        assert!(shortcuts(&s).iter().any(|(w, k)| w.starts_with("Dictate") && k.ends_with("+D")));
         s.send_with_modifier = true;
         assert!(shortcuts(&s).iter().any(|(w, k)| w.starts_with("Refine") && k.ends_with("Shift+Enter")));
     }

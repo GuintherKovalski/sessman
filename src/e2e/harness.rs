@@ -208,8 +208,12 @@ impl SessionFile {
         let mut lines = Vec::new();
         let cwd_s = cwd.display().to_string();
         let last = self.turns.len() - 1;
+        // Each entry points at the one before it, as Claude Code chains them.
+        let mut parent = Value::Null;
         for (n, (prompt, reply)) in self.turns.iter().enumerate() {
-            lines.push(json!({"type": "user", "sessionId": self.id, "cwd": cwd_s, "message": {"role": "user", "content": prompt}}));
+            let (u, a) = (format!("{}-u{n}", self.id), format!("{}-a{n}", self.id));
+            lines.push(json!({"type": "user", "uuid": u, "parentUuid": parent, "sessionId": self.id, "cwd": cwd_s, "message": {"role": "user", "content": prompt}}));
+            parent = json!(a);
             let mut content = vec![json!({"type": "text", "text": reply})];
             if n == last {
                 for (file, old, new) in &self.edits {
@@ -217,7 +221,7 @@ impl SessionFile {
                 }
             }
             lines.push(json!({
-                "type": "assistant", "sessionId": self.id, "cwd": cwd_s,
+                "type": "assistant", "uuid": a, "parentUuid": u, "sessionId": self.id, "cwd": cwd_s,
                 "message": {"role": "assistant", "model": self.model, "usage": {"input_tokens": self.tokens}, "content": content},
             }));
         }
@@ -473,6 +477,14 @@ impl Scope {
         out.join("\n")
     }
 
+    /// Whether every widget labelled exactly `label` (at least one) can be used.
+    #[track_caller]
+    pub fn all_enabled(&self, label: &str) -> bool {
+        let nodes: Vec<_> = self.h.query_all_by_label(label).collect();
+        assert!(!nodes.is_empty(), "nothing labelled \"{label}\" on screen:\n{}", self.screen());
+        nodes.iter().all(|n| !n.accesskit_node().is_disabled())
+    }
+
     /// The window's zoom factor.
     pub fn zoom(&self) -> f32 {
         self.h.ctx.zoom_factor()
@@ -626,11 +638,34 @@ impl Scope {
         self.frames(4);
     }
 
+    /// Rests the pointer on the widget labelled `label`, long enough for its tooltip.
+    #[track_caller]
+    pub fn hover(&mut self, label: &str) {
+        self.steady();
+        let at = self.node(label).rect().center();
+        self.h.hover_at(at);
+        self.frames(60);
+    }
+
     /// Drags the widget labelled `from` onto the one labelled `to`.
     #[track_caller]
     pub fn drag(&mut self, from: &str, to: &str) {
         self.steady();
         let (a, b) = (self.node(from).rect().center(), self.node(to).rect().center());
+        self.drag_between(a, b);
+    }
+
+    /// Of several widgets labelled exactly `from` and `to`, drags the last of the first onto
+    /// the last of the second: an orchestration card's, below the sidebar's.
+    #[track_caller]
+    pub fn drag_last(&mut self, from: &str, to: &str) {
+        self.steady();
+        let last = |l: &str| self.h.query_all_by_label(l).last().unwrap_or_else(|| panic!("nothing labelled \"{l}\" on screen:\n{}", self.screen())).rect().center();
+        let (a, b) = (last(from), last(to));
+        self.drag_between(a, b);
+    }
+
+    fn drag_between(&mut self, a: egui::Pos2, b: egui::Pos2) {
         self.h.hover_at(a);
         self.frames(1);
         self.h.drag_at(a);

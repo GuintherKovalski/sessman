@@ -69,6 +69,66 @@ fn dragging_a_session_onto_a_tab_moves_it_there() {
     assert_eq!(members(&s, "Work"), vec!["s-a"]);
 }
 
+fn work_open() -> Scope {
+    let mut s = setup()
+        .session(session("s-a", "alpha prompt", 300))
+        .session(session("s-b", "beta prompt", 200))
+        .session(session("s-c", "gamma prompt", 100))
+        .workspaces(&[("Work", &["s-a", "s-b", "s-c"])])
+        .launch();
+    s.click_first("WORK");
+    s
+}
+
+fn bar(s: &Scope) -> Value {
+    s.env.config_json("workspaces.json")["list"][0]["bar"].clone()
+}
+
+#[test]
+fn dragging_a_row_up_or_down_reorders_the_bar() {
+    let mut s = work_open();
+    assert!(s.shows_before("gamma prompt", "beta prompt"), "newest first until dragged");
+    s.click("gamma prompt");
+    // Dropped on a row's upper half: it goes above that row.
+    s.drag("gamma prompt", "alpha prompt");
+    assert_eq!(bar(&s), json!(["s-b", "s-c", "s-a"]));
+    assert!(s.shows_before("beta prompt", "gamma prompt"));
+    assert!(s.shows_before("gamma prompt", "alpha prompt"));
+    assert!(s.list().starts_with("Work (arranged by hand)\n  1. beta prompt  s-b\n  2. gamma prompt  s-c\n  3. alpha prompt"), "{}", s.list());
+    assert_eq!(members(&s, "Work"), vec!["s-a", "s-b", "s-c"], "the cards' order is apart");
+    // The order survives a restart, and Sort newest first undoes it.
+    let mut s = s.restart();
+    s.click_first("WORK");
+    assert!(s.shows_before("beta prompt", "gamma prompt"));
+    s.right_click_first("alpha prompt");
+    s.click("Sort newest first");
+    assert_eq!(bar(&s), Value::Null);
+    assert!(s.shows_before("gamma prompt", "beta prompt"));
+}
+
+#[test]
+fn search_results_do_not_reorder() {
+    let mut s = work_open();
+    s.click("gamma prompt");
+    s.type_in("search", "prompt");
+    s.drag("gamma prompt", "alpha prompt");
+    assert_eq!(bar(&s), Value::Null, "search results have no order of their own to change");
+}
+
+#[test]
+fn dragging_a_tab_moves_it_among_the_tabs() {
+    let mut s = setup()
+        .session(session("s-a", "alpha prompt", 100))
+        .workspaces(&[("One", &[]), ("Two", &["s-a"]), ("Three", &[])])
+        .launch();
+    s.click_first("TWO");
+    s.drag("THREE", "ONE");
+    assert_eq!(names(&s), ["Three", "One", "Two"]);
+    assert!(s.is_selected("TWO"), "the open tab stays open");
+    assert!(s.shows_before("THREE", "ONE"));
+    assert_eq!(members(&s, "Two"), vec!["s-a"]);
+}
+
 #[test]
 fn picked_sessions_move_together() {
     let mut s = setup()
@@ -248,7 +308,7 @@ fn three_in_work() -> Scope {
         .session(session("s-c", "gamma prompt", 100))
         .workspaces(&[("Work", &["s-a", "s-b", "s-c"])])
         .launch();
-    s.click_first("Work");
+    s.click_first("WORK");
     s
 }
 
@@ -305,9 +365,49 @@ fn typing_after_clicking_a_session_goes_to_the_input_and_delete_stays_there() {
 #[test]
 fn delete_does_nothing_in_all_sessions() {
     let mut s = three_in_work();
-    s.click("Scopes");
+    s.click("SCOPES");
     s.click("beta prompt");
     s.press(Key::Delete);
     assert_eq!(members(&s, "Work").len(), 3);
     assert!(s.sees("beta prompt"));
+}
+
+#[test]
+fn cmd_z_puts_removed_sessions_back_one_removal_at_a_time() {
+    let mut s = three_in_work();
+    s.click("beta prompt");
+    s.press(Key::Delete);
+    s.press(Key::Delete);
+    assert_eq!(members(&s, "Work"), vec!["s-a"]);
+    s.press_with(Modifiers::COMMAND, Key::Z);
+    assert_eq!(members(&s, "Work"), vec!["s-a", "s-c"]);
+    assert!(s.is_selected("gamma prompt"), "the session open then opens again");
+    s.press_with(Modifiers::COMMAND, Key::Z);
+    assert_eq!(members(&s, "Work"), vec!["s-a", "s-b", "s-c"], "back in its place");
+    assert!(s.is_selected("beta prompt"));
+    // Nothing left to undo, and the bar still has the keyboard.
+    s.press_with(Modifiers::COMMAND, Key::Z);
+    s.press(Key::ArrowUp);
+    assert!(s.is_selected("gamma prompt"));
+}
+
+#[test]
+fn cmd_z_undoes_remove_from_scope_in_the_menu_too() {
+    let mut s = three_in_work();
+    s.click("beta prompt");
+    s.right_click("alpha prompt");
+    s.click("Remove from scope");
+    assert_eq!(members(&s, "Work"), vec!["s-b", "s-c"]);
+    s.press_with(Modifiers::COMMAND, Key::Z);
+    assert_eq!(members(&s, "Work"), vec!["s-a", "s-b", "s-c"]);
+}
+
+#[test]
+fn cmd_z_in_the_input_undoes_typing_not_a_removal() {
+    let mut s = three_in_work();
+    s.click("beta prompt");
+    s.press(Key::Delete);
+    s.type_prompt("hello");
+    s.press_with(Modifiers::COMMAND, Key::Z);
+    assert_eq!(members(&s, "Work"), vec!["s-a", "s-c"]);
 }

@@ -43,6 +43,12 @@ pub struct Session {
     /// Images in the prompts that aren't saved in the images folder yet: (name, base64 data),
     /// for `images::save_all` when the session is shown.
     pub images: Vec<(String, String)>,
+    /// Line of the session file where each message starts (see `delete_message`).
+    pub starts: Vec<usize>,
+    /// The file line being parsed.
+    pub line: usize,
+    /// Line of the reply's first entry, which may show nothing (thinking only), once one began.
+    pub reply_from: Option<usize>,
 }
 
 pub fn projects_dir() -> PathBuf {
@@ -110,7 +116,8 @@ pub fn load(path: &Path) -> std::io::Result<Session> {
 
 pub fn parse(lines: impl Iterator<Item = String>) -> Session {
     let mut s = Session::default();
-    for line in lines {
+    for (i, line) in lines.enumerate() {
+        s.line = i;
         if let Ok(v) = serde_json::from_str::<Value>(&line) {
             s.apply(&v);
         }
@@ -135,6 +142,9 @@ impl Session {
                 }
             }
             Some("assistant") => {
+                if self.messages.last().is_none_or(|m| m.role == Role::User) {
+                    self.reply_from.get_or_insert(self.line);
+                }
                 let msg = &v["message"];
                 if let Some(m) = msg["model"].as_str().filter(|m| !m.starts_with('<')) {
                     self.model = Some(m.to_owned());
@@ -150,10 +160,10 @@ impl Session {
                 let Some(blocks) = msg["content"].as_array() else { return };
                 for b in blocks {
                     match b["type"].as_str() {
-                        Some("text") => push(&mut self.messages, Role::Assistant, str_of(&b["text"])),
+                        Some("text") => self.push(Role::Assistant, str_of(&b["text"])),
                         Some("tool_use") => {
                             let name = str_of(&b["name"]);
-                            push(&mut self.messages, Role::Assistant, format!("[tool: {name}]"));
+                            self.push(Role::Assistant, format!("[tool: {name}]"));
                             collect_changes(&name, &b["input"], &mut self.changes);
                         }
                         _ => {}
@@ -167,8 +177,105 @@ impl Session {
     /// A prompt the user typed: added to the conversation and the prompt history.
     pub fn push_prompt(&mut self, p: String) {
         self.prompts.push(p.clone());
-        push(&mut self.messages, Role::User, p);
+        self.push(Role::User, p);
     }
+
+    /// Consecutive messages from the same role are merged into one bubble.
+    fn push(&mut self, role: Role, text: String) {
+        match self.messages.last_mut() {
+            Some(last) if last.role == role => {
+                last.text.push('\n');
+                last.text.push_str(&text);
+            }
+            _ => {
+                self.messages.push(Message { role, text });
+                let from = if role == Role::User { None } else { self.reply_from };
+                self.starts.push(from.unwrap_or(self.line));
+                self.reply_from = None;
+            }
+        }
+    }
+}
+
+/// Takes message `index` (as `load` numbers them, `text` being what it says) out of the session
+/// file, so the next `--resume` no longer sends it to Claude. Its span runs from its first line
+/// to the next message's: the user and assistant entries there go (the prompt, or the replies
+/// with their tool calls and results, which only make sense together); attachments and Claude
+/// Code's own records stay. Entries that pointed at a removed one point at what it pointed at.
+/// The file as it was is copied to `backup` first. Refused if the message isn't there anymore,
+/// or if a tool call would lose its result or a result its call (the API refuses those).
+pub fn delete_message(path: &Path, index: usize, text: &str, backup: &Path) -> Result<(), String> {
+    let content = std::fs::read_to_string(path).map_err(|e| e.to_string())?;
+    let lines: Vec<&str> = content.lines().collect();
+    let s = parse(lines.iter().map(|l| l.to_string()));
+    if s.messages.get(index).is_none_or(|m| m.text != text) {
+        return Err("the session changed since it was shown; try again".into());
+    }
+    let span = s.starts[index]..s.starts.get(index + 1).copied().unwrap_or(lines.len());
+    // Removed entry -> the entry it pointed at.
+    let mut parents = std::collections::HashMap::new();
+    let mut keep = vec![true; lines.len()];
+    for i in span {
+        let Ok(v) = serde_json::from_str::<Value>(lines[i]) else { continue };
+        if matches!(v["type"].as_str(), Some("user" | "assistant"))
+            && let Some(id) = v["uuid"].as_str()
+        {
+            parents.insert(id.to_owned(), v["parentUuid"].clone());
+            keep[i] = false;
+        }
+    }
+    if parents.is_empty() {
+        return Err("the message has no entries to remove".into());
+    }
+    // Tool calls and results by id: (removed, kept) for each side.
+    let mut tools: std::collections::HashMap<String, [[bool; 2]; 2]> = std::collections::HashMap::new();
+    for (line, kept) in lines.iter().zip(&keep) {
+        let Ok(v) = serde_json::from_str::<Value>(line) else { continue };
+        for b in v["message"]["content"].as_array().into_iter().flatten() {
+            let (side, id) = match b["type"].as_str() {
+                Some("tool_use") => (0, &b["id"]),
+                Some("tool_result") => (1, &b["tool_use_id"]),
+                _ => continue,
+            };
+            tools.entry(str_of(id)).or_default()[side][*kept as usize] = true;
+        }
+    }
+    let split = |[call, result]: &[[bool; 2]; 2]| (call[0] && result[1]) || (result[0] && call[1]);
+    if tools.values().any(split) {
+        return Err("a tool call of this message has its result in another one (an interrupted run); delete them together".into());
+    }
+    let mut out = String::with_capacity(content.len());
+    for (line, _) in lines.iter().zip(&keep).filter(|(_, k)| **k) {
+        out.push_str(&relink(line, &parents).unwrap_or_else(|| line.to_string()));
+        out.push('\n');
+    }
+    if let Some(dir) = backup.parent() {
+        std::fs::create_dir_all(dir).map_err(|e| e.to_string())?;
+    }
+    std::fs::copy(path, backup).map_err(|e| format!("could not back up the session: {e}"))?;
+    let tmp = path.with_extension("jsonl.tmp");
+    let perms = std::fs::metadata(path).map_err(|e| e.to_string())?.permissions();
+    std::fs::write(&tmp, out)
+        .and_then(|_| std::fs::set_permissions(&tmp, perms))
+        .and_then(|_| std::fs::rename(&tmp, path))
+        .map_err(|e| e.to_string())
+}
+
+/// The line with its links past removed entries, or None if it links to none.
+fn relink(line: &str, parents: &std::collections::HashMap<String, Value>) -> Option<String> {
+    let mut v: Value = serde_json::from_str(line).ok()?;
+    let mut changed = false;
+    for key in ["parentUuid", "logicalParentUuid", "leafUuid"] {
+        let mut to = v[key].clone();
+        while let Some(up) = to.as_str().and_then(|id| parents.get(id)) {
+            to = up.clone();
+        }
+        if to != v[key] {
+            v[key] = to;
+            changed = true;
+        }
+    }
+    changed.then(|| v.to_string())
 }
 
 /// The conversation as compact text for a summarizer: each message cut to `per_message` chars,
@@ -239,17 +346,6 @@ fn collect_changes(tool: &str, input: &Value, out: &mut Vec<Change>) {
         }
         "Write" => out.push(Change { file, old: String::new(), new: str_of(&input["content"]) }),
         _ => {}
-    }
-}
-
-/// Consecutive messages from the same role are merged into one bubble.
-fn push(messages: &mut Vec<Message>, role: Role, text: String) {
-    match messages.last_mut() {
-        Some(last) if last.role == role => {
-            last.text.push('\n');
-            last.text.push_str(&text);
-        }
-        _ => messages.push(Message { role, text }),
     }
 }
 
@@ -345,6 +441,86 @@ mod tests {
         assert_eq!(s.context_tokens, 221);
     }
 
+    /// A session file: a prompt with an attachment, a reply with a tool call in between, a
+    /// record that isn't conversation, then a second prompt and reply.
+    const TWO_TURNS: &[&str] = &[
+        r#"{"type":"user","uuid":"u1","parentUuid":null,"message":{"content":"first"}}"#,
+        r#"{"type":"attachment","uuid":"a1","parentUuid":"u1"}"#,
+        r#"{"type":"assistant","uuid":"c1","parentUuid":"a1","message":{"content":[{"type":"thinking","thinking":"hm"}]}}"#,
+        r#"{"type":"assistant","uuid":"c2","parentUuid":"c1","message":{"content":[{"type":"tool_use","id":"t1","name":"Bash","input":{}}]}}"#,
+        r#"{"type":"user","uuid":"r1","parentUuid":"c2","message":{"content":[{"type":"tool_result","tool_use_id":"t1","content":"ok"}]}}"#,
+        r#"{"type":"assistant","uuid":"c3","parentUuid":"r1","message":{"content":[{"type":"text","text":"one"}]}}"#,
+        r#"{"type":"last-prompt","lastPrompt":"first"}"#,
+        r#"{"type":"user","uuid":"u2","parentUuid":"c3","message":{"content":"second"}}"#,
+        r#"{"type":"assistant","uuid":"c4","parentUuid":"u2","message":{"content":[{"type":"text","text":"two"}]}}"#,
+    ];
+
+    /// Deletes message `index` from a copy of TWO_TURNS; the file's lines after, and the backup.
+    fn delete_from_two_turns(name: &str, index: usize, text: &str) -> (Result<(), String>, Vec<Value>, bool) {
+        let dir = std::env::temp_dir().join(format!("scope-delete-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let (path, backup) = (dir.join("s.jsonl"), dir.join("backups/s.jsonl"));
+        std::fs::write(&path, TWO_TURNS.join("\n") + "\n").unwrap();
+        let result = delete_message(&path, index, text, &backup);
+        let lines = std::fs::read_to_string(&path).unwrap().lines().map(|l| serde_json::from_str(l).unwrap()).collect();
+        let backed_up = std::fs::read_to_string(&backup).is_ok_and(|b| b == TWO_TURNS.join("\n") + "\n");
+        let _ = std::fs::remove_dir_all(&dir);
+        (result, lines, backed_up)
+    }
+
+    fn uuids(lines: &[Value]) -> Vec<String> {
+        lines.iter().map(|v| format!("{}<{}", v["uuid"].as_str().unwrap_or(v["type"].as_str().unwrap()), v["parentUuid"].as_str().unwrap_or("-"))).collect()
+    }
+
+    #[test]
+    fn deleting_a_reply_takes_its_tool_calls_and_relinks_the_next_prompt() {
+        let s = run(TWO_TURNS);
+        assert_eq!(s.messages.iter().map(|m| m.text.as_str()).collect::<Vec<_>>(), ["first", "[tool: Bash]\none", "second", "two"]);
+        assert_eq!(s.starts, [0, 2, 7, 8]);
+        let (result, lines, backed_up) = delete_from_two_turns("reply", 1, "[tool: Bash]\none");
+        assert_eq!(result, Ok(()));
+        assert!(backed_up);
+        assert_eq!(uuids(&lines), ["u1<-", "a1<u1", "last-prompt<-", "u2<a1", "c4<u2"]);
+    }
+
+    #[test]
+    fn deleting_a_prompt_keeps_its_attachments_and_the_last_reply_can_go() {
+        let (result, lines, _) = delete_from_two_turns("prompt", 0, "first");
+        assert_eq!(result, Ok(()));
+        assert_eq!(uuids(&lines)[..2], ["a1<-", "c1<a1"], "the reply's thinking is the reply's");
+        let (_, lines, _) = delete_from_two_turns("last", 3, "two");
+        assert_eq!(uuids(&lines).last().unwrap(), "u2<c3");
+        assert_eq!(lines.len(), TWO_TURNS.len() - 1);
+    }
+
+    #[test]
+    fn deleting_refuses_a_message_that_changed() {
+        let (result, lines, backed_up) = delete_from_two_turns("changed", 2, "something else");
+        assert!(result.is_err());
+        assert_eq!(lines.len(), TWO_TURNS.len());
+        assert!(!backed_up);
+    }
+
+    #[test]
+    fn deleting_refuses_to_split_a_tool_call_from_its_result() {
+        // An interrupted run: the next prompt was saved between a tool call and its result.
+        let lines = [
+            r#"{"type":"user","uuid":"u1","parentUuid":null,"message":{"content":"first"}}"#,
+            r#"{"type":"assistant","uuid":"c1","parentUuid":"u1","message":{"content":[{"type":"tool_use","id":"t1","name":"Bash","input":{}}]}}"#,
+            r#"{"type":"user","uuid":"u2","parentUuid":"c1","message":{"content":"second"}}"#,
+            r#"{"type":"user","uuid":"r1","parentUuid":"u2","message":{"content":[{"type":"tool_result","tool_use_id":"t1","content":"ok"}]}}"#,
+        ];
+        let dir = std::env::temp_dir().join(format!("scope-delete-split-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("s.jsonl");
+        std::fs::write(&path, lines.join("\n")).unwrap();
+        assert!(delete_message(&path, 1, "[tool: Bash]", &dir.join("b.jsonl")).unwrap_err().contains("tool call"));
+        assert!(delete_message(&path, 2, "second", &dir.join("b.jsonl")).unwrap_err().contains("tool call"));
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), lines.join("\n"), "untouched");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     #[test]
     fn multiedit_yields_one_change_per_edit() {
         let s = run(&[
@@ -354,3 +530,4 @@ mod tests {
         assert!(s.changes.iter().all(|c| c.file == "c.rs"));
     }
 }
+

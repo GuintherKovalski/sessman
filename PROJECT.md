@@ -67,6 +67,12 @@ it to zoom. At its right end, a dimmed **⚙** opens Settings.
   on the workspaces overview.
   - **+** asks for a name and creates a workspace tab.
   - Drag a session onto a workspace tab to put it there (the tab is outlined while you hover).
+  - Inside a workspace tab (with no search), drag highlighted sessions (the open one, or the
+    picked ones) up or down the list to reorder it: a line shows where they go. The order is
+    saved (`bar` in `workspaces.json`, `scope list` says "arranged by hand"); sessions not
+    placed yet, like new ones, go above the placed ones, newest first. Right-click a session →
+    **Sort newest first** goes back. A drag from a row that isn't highlighted still draws a box.
+  - Drag a workspace tab before or after another to reorder the tabs (a line shows where).
   - Or right-click a session → **Move to** → pick a workspace.
   - Inside a workspace tab, right-click a session → **Remove from workspace**.
   - Right-click a workspace tab → **Rename workspace**: the tab turns into a field with the
@@ -123,7 +129,9 @@ opened; clicking "All sessions" again comes back to it.
   workspace opens on it too): overall **progress**, a summary, **Needs you**, **Next**, then a
   card per session with its live state (working spinner and tool, queued prompts, last activity,
   goal checklist) and what the report says (working / waiting / blocked / done / idle, what it is
-  doing, its next step). Click a card to open the session. Working is a live fact: a stopped
+  doing, its next step). Click a card to open the session; drag it onto another to put it
+  before or after that one (a line shows which side). The cards' order is their own: the bar's
+  is arranged apart. Working is a live fact: a stopped
   session's card takes its state from its tag (and the tag's reason when the report hasn't read
   its last activity yet), never from a report written while it was still running.
 - The report is written by the orchestration model (the helper model unless set) from the
@@ -195,7 +203,7 @@ opened; clicking "All sessions" again comes back to it.
     What it had written stays, marked **⏹ Interrupted**; the stopped prompt comes back into
     the input to fix and resend; the queue **pauses** (with **Resume queue**) so nothing else
     is sent unasked. A failed run pauses the queue the same way.
-  - **✨ Refine** (the button at the input's right, or **Cmd+Enter**) asks the helper model
+  - **✨ Refine** (the button at the input's right, **Cmd+Enter** in the input, or **Cmd+R** wherever the focus is) asks the helper model
     (Haiku by default) to rewrite the prompt clearly, using the session's goal and recent
     prompts as context. If the prompt is ambiguous it first asks up to 3 questions above the
     input, each with suggested answers, an "Other…" field and **Skip**; **Skip all** refines
@@ -216,8 +224,14 @@ opened; clicking "All sessions" again comes back to it.
   aligned columns, scroll sideways when wide). Tool calls are a small dimmed line
   (`⚙ Read · Edit`). Only messages near the visible area are drawn, so long sessions scroll
   smoothly.
-- A **copy** button (two overlapping squares) at the top right of every You / Claude card copies the whole message as its
-  Markdown source (Claude's without its tool lines); it shows a check mark for a moment after.
+- At the top right of every You / Claude card, two small buttons:
+  - **Copy** (two overlapping squares) copies the whole message as its Markdown source
+    (Claude's without its tool lines); it shows a check mark for a moment after.
+  - **🗑** deletes the message **from the context**: Claude no longer sees it from the next
+    prompt on. A reply goes with all its tool calls and their results. Files it changed stay
+    as they are. It asks first (Settings → Behaviour can turn that off) and is disabled while
+    Claude works in the session. Two prompts left next to each other merge into one card, as
+    consecutive prompts always do.
 
 ### Right: Changes and Info tabs
 - **Changes**: one card per changed file, in order of its first change: file name, folder,
@@ -255,7 +269,7 @@ the settings; each changed setting has a ↺ to reset it. Changes apply and save
   Cmd+Shift+Enter), maximum height in lines, keep a draft per session.
 - **Conversation**: show or hide the `⚙ Read · Edit` tool lines.
 - **Files**: line numbers, wrap long lines, tab width, open Markdown rendered.
-- **Claude**: path to `claude`, model for prompts, helper model (search, goals, refine),
+- **Claude**: path to `claude`, model for prompts (default, Opus or Fable), helper model (search, goals, refine),
   extra arguments for every `claude -p` (e.g. `--permission-mode acceptEdits`), default
   folder for new sessions.
 - **Overview**: Jira URL the ticket keys link to (e.g. `https://acme.atlassian.net`).
@@ -292,7 +306,7 @@ What each window shows (its open tab and session, panels, drafts) stays its own.
 
 | What | Where it comes from |
 |------|---------------------|
-| Session list and conversations | `~/.claude/projects/<project>/<session-id>.jsonl`, written by Claude Code. Read-only. |
+| Session list and conversations | `~/.claude/projects/<project>/<session-id>.jsonl`, written by Claude Code. Read-only, but for Move to Trash and deleting a message. |
 | Session title | The `ai-title` entry in the session file, else the first prompt. |
 | Prompt history | The prompts you typed in that session (tool results and slash-command wrappers are skipped). |
 | Diffs | The `Edit` / `MultiEdit` / `Write` tool calls recorded in the session, diffed line by line. |
@@ -311,21 +325,22 @@ What each window shows (its open tab and session, panels, drafts) stays its own.
 | Session tags | `claude -p --model haiku --no-session-persistence` with the end of the conversation (about 4000 characters) after each run, and in a sweep every 10 s (two at a time) for workspace sessions with unjudged activity from the last 3 days that have been quiet for a minute. Saved by session id, with the change it read, to `~/.config/scope/verdicts.json` (shared with other scope windows, like names); a failed check isn't retried until the session changes again. |
 | Goal and checklist | `claude -p --model haiku --no-session-persistence` with a digest of the conversation, on request; saved (with your ticks) to `~/.config/scope/goals.json`. |
 | Goal questions | `claude -p --resume <id> --fork-session --no-session-persistence "<question>"`: full context, original session untouched, nothing saved. |
+| Deleting a message | Its span in the session file: from its first entry to the next message's. The `user` / `assistant` entries there are removed (attachments and Claude Code's own records stay), and entries that pointed at a removed one (`parentUuid`, `logicalParentUuid`, `leafUuid`) point at what it pointed at. Refused if the message changed since it was shown, or if it would split a tool call from its result (an interrupted run can leave the next prompt between them). The file as it was is copied to `~/.config/scope/backups/<id>-<ms>.jsonl` first. |
 | Settings (theme included) | scope's own file: `~/.config/scope/settings.json`. |
 | App state | `~/.config/scope/state.json` (sessions' tabs, drafts, queues, layout) and `window.ron` (window, panel sizes, scroll positions, saved by eframe). Saved every 2 s when changed and on quit. |
 | Bare URLs | Turned into Markdown autolinks before rendering (not inside code or existing links). |
 | Workspaces and their colors | scope's own file: `~/.config/scope/workspaces.json`. |
 | Custom session names | scope's own file: `~/.config/scope/names.json`. |
 
-scope never writes to Claude's session files. Everything it adds (workspaces, names, goals,
+scope writes to Claude's session files only when you ask it to, with **Move to Trash** and a
+message's **🗑**, which keeps a backup first. Everything it adds (workspaces, names, goals,
 settings, app state, status data) lives in its own config folder (`$SCOPE_CONFIG` overrides
-it, e.g. to run a test copy next to your own). The one exception is the opt-in **Enable** button,
-which sets `statusLine` in `~/.claude/settings.json` and nothing else.
+it, e.g. to run a test copy next to your own). Its only other write outside that folder is the
+opt-in **Enable** button, which sets `statusLine` in `~/.claude/settings.json` and nothing else.
 
 ### Current limitations
 - `claude -p` is non-interactive, so tools that need your approval are refused (Settings →
   Extra arguments can pass a permission mode).
-- You can't rename or reorder workspaces (sessions can be renamed).
 
 Known gaps in the newer features are listed in [README.md](README.md#gaps).
 Planned features for the next rounds are in [ROADMAP.md](ROADMAP.md).

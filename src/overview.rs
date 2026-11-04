@@ -479,11 +479,7 @@ fn card_ui(ui: &mut egui::Ui, w: usize, card: &Card, columns: usize, now: u64, o
     let [r, g, b] = card.color;
     let color = Color32::from_rgb(r, g, b);
     let v = ui.visuals().clone();
-    let frame = egui::Frame::new()
-        .stroke(v.widgets.noninteractive.bg_stroke)
-        .corner_radius(10.0)
-        .inner_margin(egui::Margin { left: 16, right: 12, top: 10, bottom: 10 });
-    let shown = frame.show(ui, |ui| {
+    let shown = card_frame(&v).show(ui, |ui| {
         ui.set_width(ui.available_width());
         // Name, drawn as its tab at the top left is; how big it is on the right.
         ui.horizontal(|ui| {
@@ -543,26 +539,63 @@ fn card_ui(ui: &mut egui::Ui, w: usize, card: &Card, columns: usize, now: u64, o
             }
         });
     });
-    // The workspace's color shows only as a stripe down the card's left edge.
-    let rect = shown.response.rect;
-    let stripe = egui::Rect::from_min_max(rect.min + egui::vec2(5.0, 10.0), egui::pos2(rect.min.x + 8.0, rect.max.y - 10.0));
-    ui.painter().rect_filled(stripe, 1.5, color);
+    stripe(ui, shown.response.rect, color);
     ui.add_space(10.0);
     event
 }
 
-/// Size of a session's name in its tile.
-const TITLE_SIZE: f32 = 16.0;
-const GAP: f32 = 8.0;
+/// A scope's card (here and on its orchestration page): no fill, the grey border, round.
+pub fn card_frame(v: &egui::Visuals) -> egui::Frame {
+    egui::Frame::new()
+        .stroke(v.widgets.noninteractive.bg_stroke)
+        .corner_radius(10.0)
+        .inner_margin(egui::Margin { left: 16, right: 12, top: 10, bottom: 10 })
+}
+
+/// The scope's color, shown only as a stripe down its card's left edge.
+pub fn stripe(ui: &egui::Ui, card: egui::Rect, color: Color32) {
+    let stripe = egui::Rect::from_min_max(card.min + egui::vec2(5.0, 10.0), egui::pos2(card.min.x + 8.0, card.max.y - 10.0));
+    ui.painter().rect_filled(stripe, 1.5, color);
+}
+
+/// A session's tile, drawn like the sessions in the list: their fill (lighter while
+/// hovered), grey border and roundness.
+pub fn tile_frame(v: &egui::Visuals, hovered: bool) -> egui::Frame {
+    let fill = if hovered { v.widgets.hovered.weak_bg_fill } else { v.faint_bg_color };
+    egui::Frame::new().fill(fill).stroke(v.widgets.noninteractive.bg_stroke).corner_radius(10.0).inner_margin(TILE_MARGIN)
+}
+
+const TILE_MARGIN: egui::Margin = egui::Margin { left: 10, right: 10, top: 7, bottom: 6 };
+
+/// In a tile whose contents started at `top`, pads so the bottom line that comes next sits
+/// at the bottom of a tile `height` tall; returns how tall the tile would be on its own.
+pub fn level_bottom(ui: &mut egui::Ui, top: f32, height: f32) -> f32 {
+    let line_h = ui.spacing().interact_size.y;
+    let edges = (TILE_MARGIN.top + TILE_MARGIN.bottom) as f32 + 2.0 * ui.visuals().widgets.noninteractive.bg_stroke.width;
+    let filled = ui.cursor().top() - top;
+    if height - edges - line_h > filled {
+        ui.add_space(height - edges - line_h - filled);
+    }
+    filled + line_h + edges
+}
+
+/// Size of a session's name in its tile, and of a scope's summary.
+pub const TITLE_SIZE: f32 = 16.0;
+pub const GAP: f32 = 8.0;
 
 /// How many columns of tiles every card has, the same for all: as many as fit when each is as
 /// wide as the longest short session name of any card, at least 3. Short names (the ones
 /// Haiku or the developer gave, at most 4 words) never wrap or get cut; longer ones, the
 /// first line of a prompt not renamed yet, don't count and are cut at the tile's edge.
 fn columns(ui: &egui::Ui, cards: &[Card], avail: f32) -> usize {
+    tile_columns(ui, cards.iter().flat_map(|c| c.rows.iter().map(|r| r.title)), avail)
+}
+
+/// [`columns`] for tiles of sessions named `titles`, in `avail` points.
+pub fn tile_columns<'t>(ui: &egui::Ui, titles: impl Iterator<Item = &'t str>, avail: f32) -> usize {
     let font = egui::FontId::proportional(TITLE_SIZE);
     let color = ui.visuals().text_color();
-    let longest = cards.iter().flat_map(|c| &c.rows).filter(|r| is_short_name(r.title)).map(|r| ui.painter().layout_no_wrap(r.title.to_owned(), font.clone(), color).size().x).fold(0.0, f32::max);
+    let longest = titles.filter(|t| is_short_name(t)).map(|t| ui.painter().layout_no_wrap(t.to_owned(), font.clone(), color).size().x).fold(0.0, f32::max);
     // The name, plus the tile's margins and border; a floor so the details have room.
     let tile = (longest + 28.0).max(MIN_TILE);
     (((avail + GAP) / (tile + GAP)) as usize).max(3)
@@ -580,24 +613,36 @@ const MIN_TILE: f32 = 190.0;
 /// of a row share the height of the tallest.
 fn rows_grid(ui: &mut egui::Ui, w: usize, card: &Card, columns: usize, now: u64, stale_after: u64) -> Option<Event> {
     let mut event = None;
+    tile_grid(ui, ("overview-grid", w), &card.rows, columns, |ui, _, row, height| {
+        let note = card.summary.and_then(|s| s.sessions.get(row.id));
+        let (clicked, natural) = row_ui(ui, w, row, note, now, stale_after, height);
+        if let Some(e) = clicked {
+            event = Some(e);
+        }
+        natural
+    });
+    event
+}
+
+/// `items` as a grid of `columns` equal tiles, row by row. `tile(ui, k, item, height)` draws
+/// item `k` at least `height` tall and returns how tall it would be on its own; the tiles of a
+/// row share the height of the tallest.
+pub fn tile_grid<T>(ui: &mut egui::Ui, salt: impl std::hash::Hash + std::fmt::Debug, items: &[T], columns: usize, mut tile: impl FnMut(&mut egui::Ui, usize, &T, f32) -> f32) {
+    let columns = columns.max(1);
+    let base = ui.id().with(salt);
     let width = ((ui.available_width() - GAP * (columns - 1) as f32) / columns as f32).max(1.0);
-    for (k, chunk) in card.rows.chunks(columns).enumerate() {
-        let id = ui.id().with(("overview-grid", w, k));
+    for (k, chunk) in items.chunks(columns).enumerate() {
+        let id = base.with(k);
         let height: f32 = ui.data(|d| d.get_temp(id)).unwrap_or(0.0);
         let mut tallest = 0.0f32;
         ui.horizontal_top(|ui| {
             ui.spacing_mut().item_spacing.x = GAP;
-            for row in chunk {
-                let note = card.summary.and_then(|s| s.sessions.get(row.id));
+            for (j, item) in chunk.iter().enumerate() {
                 let shown = ui.allocate_ui_with_layout(egui::vec2(width, 0.0), egui::Layout::top_down(egui::Align::Min), |ui| {
                     ui.set_width(width);
-                    row_ui(ui, w, row, note, now, stale_after, height)
+                    tile(ui, k * columns + j, item, height)
                 });
-                let (clicked, natural) = shown.inner;
-                tallest = tallest.max(natural);
-                if let Some(e) = clicked {
-                    event = Some(e);
-                }
+                tallest = tallest.max(shown.inner);
             }
         });
         // Measured this frame, used for the next: tiles of a row end level.
@@ -607,7 +652,6 @@ fn rows_grid(ui: &mut egui::Ui, w: usize, card: &Card, columns: usize, now: u64,
         }
         ui.add_space(GAP);
     }
-    event
 }
 
 /// A session's tile: its name, then in small print what it is doing and what it needs from
@@ -620,17 +664,13 @@ fn row_ui(ui: &mut egui::Ui, w: usize, row: &Row, note: Option<&Note>, now: u64,
     let mut natural = 0.0;
     let v = ui.visuals().clone();
     let stale = !row.running && stale_after > 0 && now.saturating_sub(row.modified) >= stale_after;
-    // Drawn like the sessions in the list: the same fill, grey border and roundness.
-    let stroke = v.widgets.noninteractive.bg_stroke;
     let pal = theme::palette(&v);
-    let margin = egui::Margin { left: 10, right: 10, top: 7, bottom: 6 };
     let id = ui.id().with(("overview-row", row.id));
     let hovered: bool = ui.data(|d| d.get_temp(id)).unwrap_or(false);
-    let fill = if hovered { v.widgets.hovered.weak_bg_fill } else { v.faint_bg_color };
     // Sensing before its contents, so the button on it still gets its clicks.
     let shown = ui.scope_builder(egui::UiBuilder::new().id_salt(("overview-row", row.id)).sense(Sense::click()), |ui| {
         ui.style_mut().interaction.selectable_labels = false;
-        egui::Frame::new().fill(fill).stroke(stroke).corner_radius(10.0).inner_margin(margin).show(ui, |ui| {
+        tile_frame(&v, hovered).show(ui, |ui| {
             ui.set_width(ui.available_width());
             let top = ui.min_rect().top();
             ui.add(egui::Label::new(RichText::new(row.title).size(TITLE_SIZE)).truncate());
@@ -650,14 +690,8 @@ fn row_ui(ui: &mut egui::Ui, w: usize, row: &Row, note: Option<&Note>, now: u64,
                 ui.add(egui::Label::new(RichText::new(format!("⚠ {needs}")).small().color(pal.note)).wrap());
             }
             // The bottom line sits at the bottom of the tile, level with its neighbours'.
-            let line_h = ui.spacing().interact_size.y;
-            let inner = height - (margin.top + margin.bottom) as f32 - 2.0 * stroke.width;
-            let filled = ui.cursor().top() - top;
-            natural = filled + line_h + (margin.top + margin.bottom) as f32 + 2.0 * stroke.width;
-            if inner - line_h > filled {
-                ui.add_space(inner - line_h - filled);
-            }
-            let line = egui::vec2(ui.available_width(), line_h);
+            natural = level_bottom(ui, top, height);
+            let line = egui::vec2(ui.available_width(), ui.spacing().interact_size.y);
             ui.allocate_ui_with_layout(line, egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 if row.running {
                     ui.label(RichText::new("working").weak().small());

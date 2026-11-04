@@ -568,49 +568,49 @@ pub fn ui(ui: &mut egui::Ui, groups: Option<&[Group]>, names: &HashMap<&str, &st
     ui.add_space(6.0);
     egui::ScrollArea::vertical().id_salt("processes").auto_shrink(false).show(ui, |ui| {
         for g in groups {
-            egui::Frame::new()
-                .stroke(Stroke::new(1.0, accent.gamma_multiply(0.6)))
-                .corner_radius(8.0)
-                .inner_margin(10.0)
-                .show(ui, |ui| {
-                    ui.set_width(ui.available_width());
-                    ui.horizontal(|ui| {
-                        let name = names.get(g.session.as_str()).copied().unwrap_or(g.session.as_str());
-                        let link = ui.add(egui::Label::new(RichText::new(name).strong().color(accent)).sense(egui::Sense::click()));
-                        if link.on_hover_cursor(egui::CursorIcon::PointingHand).on_hover_text("Open this session").clicked() {
-                            open = Some(Event::Open(g.session.clone()));
-                        }
-                        ui.label(RichText::new(format!("{} · {:.0}% CPU · {}", plural(g.rows.len(), "process"), g.cpu(), memory(g.rss_kb()))).weak());
-                    });
-                    ui.add_space(4.0);
-                    egui::Grid::new(("processes", &g.session)).striped(true).num_columns(6).spacing([14.0, 4.0]).show(ui, |ui| {
-                        for h in ["What", "CPU", "RAM", "Running for", "Progress", ""] {
-                            ui.label(RichText::new(h).small().weak());
-                        }
-                        ui.end_row();
-                        for (i, r) in g.rows.iter().enumerate() {
-                            process_row(ui, r, &pal);
-                            if stopping.contains(&r.pid) {
-                                ui.spinner().on_hover_text("Stopping…");
-                            } else {
-                                let hover = match r.kind {
-                                    Kind::Claude => "Stop Claude in this session, like Ctrl+C: it and everything it started end, the queue pauses",
-                                    Kind::Bash => "End this command and what it started; Claude sees it fail and carries on",
-                                    _ => "End this process and what it started (SIGTERM, SIGKILL 2 s later if still there)",
-                                };
-                                let button = egui::Button::new(RichText::new("⏹").color(pal.error));
-                                if ui.add(button).on_hover_text(hover).clicked() {
-                                    open = Some(match r.kind {
-                                        Kind::Claude => Event::StopClaude(g.session.clone(), r.pid),
-                                        _ => Event::Stop(subtree(&g.rows, i)),
-                                    });
-                                }
-                            }
-                            ui.end_row();
-                        }
+            // A card like a scope's on the overview, the scope's color only as its stripe.
+            let shown = crate::overview::card_frame(ui.visuals()).show(ui, |ui| {
+                ui.set_width(ui.available_width());
+                ui.horizontal(|ui| {
+                    let name = names.get(g.session.as_str()).copied().unwrap_or(g.session.as_str());
+                    let link = ui.add(egui::Label::new(RichText::new(name).size(crate::overview::TITLE_SIZE)).sense(egui::Sense::click()));
+                    if link.on_hover_cursor(egui::CursorIcon::PointingHand).on_hover_text("Open this session").clicked() {
+                        open = Some(Event::Open(g.session.clone()));
+                    }
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        ui.label(RichText::new(format!("{} · {:.0}% CPU · {}", plural(g.rows.len(), "process"), g.cpu(), memory(g.rss_kb()))).weak().small());
                     });
                 });
-            ui.add_space(8.0);
+                ui.add_space(4.0);
+                egui::Grid::new(("processes", &g.session)).striped(true).num_columns(6).spacing([14.0, 4.0]).show(ui, |ui| {
+                    for h in ["What", "CPU", "RAM", "Running for", "Progress", ""] {
+                        ui.label(RichText::new(h).small().weak());
+                    }
+                    ui.end_row();
+                    for (i, r) in g.rows.iter().enumerate() {
+                        process_row(ui, r, &pal);
+                        if stopping.contains(&r.pid) {
+                            ui.spinner().on_hover_text("Stopping…");
+                        } else {
+                            let hover = match r.kind {
+                                Kind::Claude => "Stop Claude in this session, like Ctrl+C: it and everything it started end, the queue pauses",
+                                Kind::Bash => "End this command and what it started; Claude sees it fail and carries on",
+                                _ => "End this process and what it started (SIGTERM, SIGKILL 2 s later if still there)",
+                            };
+                            let button = egui::Button::new(RichText::new("⏹").color(pal.error));
+                            if ui.add(button).on_hover_text(hover).clicked() {
+                                open = Some(match r.kind {
+                                    Kind::Claude => Event::StopClaude(g.session.clone(), r.pid),
+                                    _ => Event::Stop(subtree(&g.rows, i)),
+                                });
+                            }
+                        }
+                        ui.end_row();
+                    }
+                });
+            });
+            crate::overview::stripe(ui, shown.response.rect, accent);
+            ui.add_space(10.0);
         }
     });
     open

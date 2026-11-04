@@ -23,9 +23,9 @@ fn on_page() -> Scope {
 fn the_workspace_bubble_opens_the_page_which_writes_its_first_report() {
     let mut s = on_page();
     assert!(s.sees("42%"));
-    assert!(s.sees("NEEDS YOU"));
+    assert!(s.sees("⚠ Review "), "what needs the developer, in the overview's ⚠ style");
     assert!(s.sees("Fake next step"));
-    assert!(s.sees("waiting"), "the first session's state chip");
+    assert!(s.sees("✋ waiting"), "the first session's state, at the bottom of its tile");
     assert!(s.sees("fake doing"));
     assert!(s.sees("Next: fake step"));
     // [[1]] reads as the newest session's name.
@@ -104,4 +104,13 @@ fn an_empty_workspace_page_says_how_to_fill_it() {
     let mut s = setup().workspaces(&[("Empty", &[])]).launch();
     s.click_first("EMPTY");
     assert!(s.sees("No sessions in this scope yet."));
+}
+
+#[test]
+fn a_card_dragged_onto_another_goes_before_it() {
+    let mut s = on_page();
+    // Cards in the bar's order: beta, then alpha.
+    s.drag_last("alpha prompt", "beta prompt");
+    assert_eq!(s.env.config_json("workspaces.json")["list"][0]["sessions"], serde_json::json!(["s-a", "s-b"]));
+    assert!(s.env.config_json("workspaces.json")["list"][0]["bar"].is_null(), "the bar's order is apart");
 }

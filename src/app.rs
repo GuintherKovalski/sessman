@@ -60,7 +60,25 @@ enum Action {
     OpenPending(String),
     /// The open workspace's orchestration page.
     Orchestrate,
+    /// The open workspace's bar in this order, dragged into it.
+    ArrangeBar(Vec<String>),
+    /// The open workspace's bar newest first again.
+    BarNewestFirst,
+    /// A workspace tab dragged to another place among the tabs.
+    MoveTab(usize, usize),
 }
+
+/// What a dragged workspace tab carries: its index.
+struct TabDrag(usize);
+
+/// Sessions one action took out of workspaces, and the session open before it.
+struct Removal {
+    taken: Vec<workspaces::Taken>,
+    open: Option<String>,
+}
+
+/// How many removals Cmd+Z can go back through.
+const UNDO_LIMIT: usize = 50;
 
 #[derive(PartialEq)]
 enum RightTab {
@@ -107,6 +125,8 @@ pub struct App {
     lasso: Option<(egui::Vec2, HashSet<String>)>,
     /// Sessions waiting for "Move to Trash?" to be confirmed.
     confirm_trash: Vec<String>,
+    /// Message waiting for "Delete from the context?": session id, index, text (as in `session::delete_message`).
+    confirm_delete_message: Option<(String, usize, String)>,
     /// Index into the open session's messages of the "You" prompt pinned above the conversation.
     pinned: Option<usize>,
     /// Whether a "You" prompt was on screen in the conversation last frame; the pinned one hides then.
@@ -121,6 +141,8 @@ pub struct App {
     /// then open the session above or below, Delete/Backspace take the highlighted ones out of
     /// the open workspace.
     bar_keys: bool,
+    /// Sessions taken out of workspaces, latest last, for Cmd+Z to put back.
+    removed: Vec<Removal>,
     /// Set when the arrows moved the pick: the conversation scrolls to it on the next frame.
     scroll_to_pick: bool,
     /// The message at the top of the conversation last frame, where the arrows start without a pick.
@@ -220,6 +242,10 @@ pub struct App {
     /// started keeping this (sessions it has never had open count as seen then). A session
     /// changed since is marked finished in the overview.
     seen: HashMap<String, u64>,
+    /// Session id → the model and effort picked for it on the new session page.
+    choices: HashMap<String, runner::Choice>,
+    /// What the new session page has picked so far.
+    new_choice: runner::Choice,
     seen_from: u64,
     /// Whether each session's work looks finished (verdict.rs), the checks under way, the
     /// checks that failed (id → the change they read; not retried until there is a newer one),
@@ -304,6 +330,19 @@ const MIC_METER_WIDTH: f32 = 120.0;
 
 /// What shows while recording: a pulsing red dot, the time so far, and a level meter that
 /// scrolls right to left, so it is clear the microphone is on and hearing something.
+/// A button's tooltip: what it does, then its shortcut, shown whether or not it is enabled
+/// (a disabled one adds why, so the shortcut is still there to learn).
+fn tip(resp: egui::Response, what: &str, why_not: Option<&str>, keys: &str) -> egui::Response {
+    let body = |ui: &mut egui::Ui, extra: Option<&str>| {
+        ui.label(what);
+        if let Some(e) = extra {
+            ui.label(RichText::new(e).italics());
+        }
+        ui.label(RichText::new(keys).monospace().weak());
+    };
+    resp.on_hover_ui(|ui| body(ui, None)).on_disabled_hover_ui(|ui| body(ui, why_not))
+}
+
 fn recording_meter(ui: &mut egui::Ui, recorder: &dictation::Recorder, levels: &mut std::collections::VecDeque<f32>, red: Color32) {
     // A new bar every 60 ms, holding the loudest sample since the last one.
     let now = ui.input(|i| i.time);
@@ -387,10 +426,12 @@ impl App {
             pick_anchor: None,
             lasso: None,
             confirm_trash: Vec::new(),
+            confirm_delete_message: None,
             pinned: None,
             picked_message: None,
             conversation_keys: false,
             bar_keys: false,
+            removed: Vec::new(),
             scroll_to_pick: false,
             top_message: None,
             conversation_rect: None,
@@ -451,6 +492,8 @@ impl App {
             overview_jobs: HashMap::new(),
             overview_errors: HashMap::new(),
             seen: HashMap::new(),
+            choices: HashMap::new(),
+            new_choice: runner::Choice::default(),
             seen_from: 0,
             verdicts: Shared::load(Verdicts::path()),
             judging: Vec::new(),
@@ -468,6 +511,7 @@ impl App {
         }
         let mut st = State::load(&state::path());
         app.seen = std::mem::take(&mut st.seen);
+        app.choices = std::mem::take(&mut st.choices);
         app.seen_from = match st.seen_from {
             0 => overview::secs(SystemTime::now()),
             t => t,
@@ -517,6 +561,7 @@ impl App {
             prompt_collapsed: self.prompt_collapsed,
             seen: self.seen.iter().filter(|(id, _)| self.sessions.iter().any(|s| s.id == **id)).map(|(k, v)| (k.clone(), *v)).collect(),
             seen_from: self.seen_from,
+            choices: self.choices.clone(),
         }
     }
 
@@ -612,6 +657,34 @@ impl App {
                 self.select(i);
             }
             Action::Tab(t) => self.switch_tab(t),
+            Action::ArrangeBar(order) => {
+                if let Some(w) = self.sync_workspaces(self.tab) {
+                    self.workspaces.arrange_bar(w, &order);
+                    self.save_workspaces();
+                }
+            }
+            Action::BarNewestFirst => {
+                if let Some(w) = self.sync_workspaces(self.tab) {
+                    self.workspaces.unarrange_bar(w);
+                    self.save_workspaces();
+                }
+            }
+            Action::MoveTab(from, to) => {
+                let names: Vec<String> = self.workspaces.list.iter().map(|w| w.name.clone()).collect();
+                let Some(name) = names.get(from) else { return };
+                // Indices from before another scope's changes, found again by name.
+                let at = |n: Option<&String>, list: &[workspaces::Workspace]| n.and_then(|n| list.iter().position(|w| w.name == *n));
+                let (to_name, tab_name) = (names.get(to).cloned(), self.tab.and_then(|t| names.get(t)).cloned());
+                self.sync_workspaces(None);
+                let list = &self.workspaces.list;
+                let Some(from) = at(Some(name), list) else { return };
+                let to = at(to_name.as_ref(), list).unwrap_or(list.len());
+                self.workspaces.reorder(from, to);
+                self.tab = at(tab_name.as_ref(), &self.workspaces.list);
+                self.workspace_rename = None;
+                self.confirm_delete = None;
+                self.save_workspaces();
+            }
             Action::MoveTo(ids, w) => {
                 if let Some(w) = self.sync_workspaces(Some(w)) {
                     for id in &ids {
@@ -622,10 +695,14 @@ impl App {
             }
             Action::Remove(ids, then) => {
                 self.sync_workspaces(None);
-                for id in &ids {
-                    self.workspaces.remove(id);
-                }
+                let taken: Vec<workspaces::Taken> = ids.iter().filter_map(|id| self.workspaces.take(id)).collect();
                 self.save_workspaces();
+                if !taken.is_empty() {
+                    let open = self.selected.map(|i| self.sessions[i].id.clone());
+                    self.removed.push(Removal { taken, open });
+                    let extra = self.removed.len().saturating_sub(UNDO_LIMIT);
+                    self.removed.drain(..extra);
+                }
                 self.picked.retain(|id| !ids.contains(id));
                 let open_removed = self.selected.is_some_and(|i| ids.contains(&self.sessions[i].id));
                 match then.and_then(|id| self.sessions.iter().position(|s| s.id == id)) {
@@ -661,6 +738,27 @@ impl App {
             }
             Action::OpenPending(id) => self.open_pending(&id),
             Action::Orchestrate => self.show_orchestration(),
+        }
+    }
+
+    /// Cmd+Z: puts the sessions taken out last back in their workspace, and opens again the
+    /// session that was open then (when this tab lists it), the bar keeping the keyboard.
+    fn undo_remove(&mut self) {
+        let Some(r) = self.removed.pop() else { return };
+        self.sync_workspaces(None);
+        let back: Vec<String> = r.taken.iter().rev().filter(|t| self.workspaces.put_back(t)).map(|t| t.session.clone()).collect();
+        if back.is_empty() {
+            return;
+        }
+        self.save_workspaces();
+        let visible = self.visible();
+        let Some(i) = r.open.and_then(|id| visible.into_iter().find(|&i| self.sessions[i].id == id)) else { return };
+        let keys = self.bar_keys;
+        self.select(i);
+        self.pick_anchor = Some(self.sessions[i].id.clone());
+        self.picked = if back.len() > 1 { back.into_iter().collect() } else { HashSet::new() };
+        if keys {
+            self.focus_prompt = false;
         }
     }
 
@@ -1072,7 +1170,7 @@ impl App {
             ui.add_space(6.0);
             ui.horizontal(|ui| {
                 ui.heading(crate::workspaces::label(&name));
-                ui.label(RichText::new("processes").color(accent));
+                ui.label(RichText::new("processes").weak());
             });
             match crate::processes::ui(ui, sample, &names, &self.orch.processes.stopping, accent) {
                 Some(crate::processes::Event::Open(id)) => match self.sessions.iter().position(|s| s.id == id) {
@@ -1378,7 +1476,8 @@ impl App {
         };
         let mut out = String::new();
         for (w, ws) in self.workspaces.list.iter().enumerate().filter(|(w, _)| only.is_none_or(|o| o == *w)) {
-            out.push_str(&format!("{} (newest first)\n", ws.name));
+            let order = if ws.bar.is_empty() { "newest first" } else { "arranged by hand" };
+            out.push_str(&format!("{} ({order})\n", ws.name));
             for (k, id) in self.bar_ids(w).into_iter().enumerate() {
                 let listed = self.sessions.iter().position(|s| s.id == id);
                 let state = match (self.runs.contains_key(&id), listed) {
@@ -1572,6 +1671,7 @@ impl App {
         self.open = Some(Session { cwd: Some(dir.clone()), ..Default::default() });
         self.new_session = Some(dir);
         self.new_info = None;
+        self.new_choice = runner::Choice::default();
         self.history = History::default();
         self.pinned = None;
         self.picked_message = None;
@@ -1799,6 +1899,9 @@ impl App {
             _ => return,
         };
         if new {
+            if !self.new_choice.is_empty() {
+                self.choices.insert(id.clone(), self.new_choice.clone());
+            }
             self.new_id = Some(id.clone());
             self.sync_workspaces(None);
             if let Some(w) = self.tab {
@@ -1817,7 +1920,8 @@ impl App {
             s.push_prompt(prompt.clone());
             self.history = History::new(s.prompts.clone());
         }
-        let (rx, stop) = runner::send(self.ctx.clone(), id.clone(), cwd.clone(), prompt.clone(), new);
+        let choice = self.choices.get(&id).cloned().unwrap_or_default();
+        let (rx, stop) = runner::send(self.ctx.clone(), id.clone(), cwd.clone(), prompt.clone(), new, choice);
         self.runs.insert(id, Run { rx, live: String::new(), tool: None, new, cwd, prompt, stop, poked: false, answer: String::new() });
     }
 
@@ -2112,10 +2216,14 @@ impl App {
     }
 
     /// Workspace `w`'s sessions (indices into `sessions`) in the order its bar lists them:
-    /// always newest first, by the time each row shows (an arrangement made on the
-    /// orchestration page orders only its cards).
-    fn bar_order(&self, _w: usize, mut sessions: Vec<usize>) -> Vec<usize> {
+    /// newest first, by the time each row shows, unless its rows were dragged into an order;
+    /// then as placed, below any not placed yet (an arrangement of the orchestration page's
+    /// cards orders only them).
+    fn bar_order(&self, w: usize, mut sessions: Vec<usize>) -> Vec<usize> {
         sessions.sort_by_key(|&i| std::cmp::Reverse(self.sessions[i].modified));
+        if let Some(bar) = self.workspaces.list.get(w).map(|ws| &ws.bar).filter(|b| !b.is_empty()) {
+            sessions.sort_by_key(|&i| bar.iter().position(|id| *id == self.sessions[i].id).map_or(0, |p| p + 1));
+        }
         sessions
     }
 
@@ -2315,8 +2423,11 @@ impl App {
                 self.type_into_prompt(ui.ctx(), &typed);
             }
         }
-        let (modifiers, press, pointer, primary_down) =
-            ui.input(|i| (i.modifiers, i.pointer.press_origin(), i.pointer.interact_pos(), i.pointer.primary_down()));
+        let (modifiers, press, pointer, primary_down, released) =
+            ui.input(|i| (i.modifiers, i.pointer.press_origin(), i.pointer.interact_pos(), i.pointer.primary_down(), i.pointer.any_released()));
+        // Inside a scope, with no search, dragging rows up or down reorders the bar.
+        let reorderable = self.tab.is_some() && self.search.trim().is_empty();
+        let arranged = self.tab.and_then(|w| self.workspaces.list.get(w)).is_some_and(|w| !w.bar.is_empty());
         egui::ScrollArea::vertical().show(ui, |ui| {
             // The list's top-left, which moves with the scroll.
             let top = ui.min_rect().min;
@@ -2435,12 +2546,44 @@ impl App {
                         let then = open_id.as_ref().filter(|id| dragging.contains(id)).and_then(|_| after_remove(&order, &dragging));
                         actions.push(Action::Remove(dragging.clone(), then));
                     }
+                    if arranged && ui.button("Sort newest first").on_hover_text("Undo the order the rows were dragged into").clicked() {
+                        actions.push(Action::BarNewestFirst);
+                    }
                     ui.separator();
                     let delete = if n > 1 { format!("Move {n} sessions to Trash…") } else { "Move to Trash…".to_owned() };
                     if ui.button(delete).clicked() {
                         actions.push(Action::Trash(dragging.clone()));
                     }
                 });
+            }
+            // Rows dragged within the list: a line shows where they go, letting go puts them there.
+            if reorderable
+                && let Some(pos) = pointer
+                && let Some(moving) = egui::DragAndDrop::payload::<Vec<String>>(ui.ctx())
+                && ui.clip_rect().contains(pos)
+                && !rects.is_empty()
+            {
+                let ids: Vec<String> = rects.iter().map(|(id, _)| id.clone()).collect();
+                let slot = rects.iter().filter(|(_, r)| r.center().y < pos.y).count();
+                let gap = ui.spacing().item_spacing.y / 2.0;
+                let y = rects.get(slot).map_or_else(|| rects[rects.len() - 1].1.bottom() + gap, |(_, r)| r.top() - gap);
+                let x = rects[0].1.x_range();
+                ui.painter().hline(x, y, Stroke::new(2.0, theme::palette(ui.visuals()).user));
+                if released {
+                    egui::DragAndDrop::clear_payload(ui.ctx());
+                    let order = dropped_order(&ids, &moving, slot);
+                    if order != ids {
+                        actions.push(Action::ArrangeBar(order));
+                    }
+                } else {
+                    // Near the top or bottom edge, the list scrolls to reach more rows.
+                    let clip = ui.clip_rect();
+                    let step = if pos.y < clip.top() + 16.0 { 8.0 } else if pos.y > clip.bottom() - 16.0 { -8.0 } else { 0.0 };
+                    if step != 0.0 {
+                        ui.scroll_with_delta(egui::vec2(0.0, step));
+                    }
+                    ui.ctx().request_repaint();
+                }
             }
             // The space under the rows: a drag there draws a box, a click drops the picks.
             let below = egui::Rect::from_min_max(ui.cursor().min, egui::pos2(ui.max_rect().right(), ui.clip_rect().bottom()));
@@ -2519,15 +2662,34 @@ impl App {
                     workspace_rename_field(ui, w, text, fresh, actions);
                     continue;
                 }
-                let tab = workspaces::tab(ui, &ws.name, ws.color, self.tab == Some(w));
+                let tab = workspaces::tab(ui, &ws.name, ws.color, self.tab == Some(w)).interact(Sense::drag());
                 if tab.clicked() {
                     actions.push(Action::Tab(Some(w)));
                 }
+                // (Taking a payload on release takes it whatever its type: each is looked at first.)
                 if tab.dnd_hover_payload::<Vec<String>>().is_some() {
                     ui.painter().rect_stroke(tab.rect, 3.0, Stroke::new(2.0, theme::palette(ui.visuals()).user), StrokeKind::Outside);
+                    if let Some(ids) = tab.dnd_release_payload::<Vec<String>>() {
+                        actions.push(Action::MoveTo((*ids).clone(), w));
+                    }
                 }
-                if let Some(ids) = tab.dnd_release_payload::<Vec<String>>() {
-                    actions.push(Action::MoveTo((*ids).clone(), w));
+                // Dragged among the tabs: a line on the side of this one it would go.
+                if tab.drag_started() {
+                    tab.dnd_set_drag_payload(TabDrag(w));
+                }
+                if tab.dragged()
+                    && let Some(pos) = ui.ctx().pointer_interact_pos()
+                {
+                    let painter = ui.ctx().layer_painter(LayerId::new(Order::Tooltip, Id::new("tab-drag-ghost")));
+                    painter.text(pos + egui::vec2(14.0, 0.0), Align2::LEFT_CENTER, workspaces::label(&ws.name), egui::FontId::proportional(14.0), theme::palette(ui.visuals()).user);
+                }
+                if let Some(from) = tab.dnd_hover_payload::<TabDrag>().map(|d| d.0).filter(|&from| from != w) {
+                    let after = ui.ctx().pointer_interact_pos().is_some_and(|p| p.x > tab.rect.center().x);
+                    let x = if after { tab.rect.right() + 2.0 } else { tab.rect.left() - 2.0 };
+                    ui.painter().vline(x, tab.rect.y_range(), Stroke::new(2.0, theme::palette(ui.visuals()).user));
+                    if tab.dnd_release_payload::<TabDrag>().is_some() {
+                        actions.push(Action::MoveTab(from, if after { w + 1 } else { w }));
+                    }
                 }
                 tab.context_menu(|ui| {
                     if ui.button("Rename scope").clicked() {
@@ -2585,6 +2747,34 @@ impl App {
         }
         if delete || cancel || modal.should_close() {
             self.confirm_delete = None;
+        }
+    }
+
+    /// "Delete from the context?" for a message's 🗑, when the setting asks for it.
+    fn confirm_delete_message_modal(&mut self, ctx: &egui::Context) {
+        let Some((id, i, text)) = self.confirm_delete_message.clone() else { return };
+        let (mut delete, mut cancel) = (false, false);
+        let modal = egui::Modal::new(Id::new("confirm-delete-message")).show(ctx, |ui| {
+            ui.set_max_width(440.0);
+            ui.label(RichText::new("Delete this message from the context?").strong());
+            let shown = text.lines().find(|l| !l.trim().is_empty() && !l.starts_with("[tool:")).unwrap_or("(tool calls only)");
+            let snippet: String = shown.chars().take(120).collect();
+            ui.label(RichText::new(if snippet.len() < shown.len() { format!("{snippet}…") } else { snippet }).italics().weak());
+            ui.add_space(4.0);
+            ui.label("Claude won't see it from the next prompt on. A reply goes with its tool calls and their results; files it changed stay as they are.");
+            let backups = settings::config_dir().join("backups");
+            ui.label(RichText::new(format!("The session file as it was is kept in {}.", backups.display())).weak().small());
+            ui.add_space(8.0);
+            ui.horizontal(|ui| {
+                delete = ui.button("Delete").clicked();
+                cancel = ui.button("Cancel").clicked();
+            });
+        });
+        if delete {
+            self.delete_message(&id, i, &text);
+        }
+        if delete || cancel || modal.should_close() {
+            self.confirm_delete_message = None;
         }
     }
 
@@ -2676,7 +2866,7 @@ impl App {
                 }
                 ModelPrompt::Done => {
                     ui.label(RichText::new("Speech model installed").strong());
-                    ui.label("Dictation is ready: click the mic to start, click again to stop.");
+                    ui.label("Dictation is ready: click the mic (or Cmd+D) to start, click again or press Enter to stop.");
                     ui.add_space(8.0);
                     ui.horizontal(|ui| {
                         dictate = ui.button("Start dictating").clicked();
@@ -2781,7 +2971,7 @@ impl App {
                 let mut undo = false;
                 ui.horizontal(|ui| {
                     ui.label(RichText::new("✨ Refined").color(pal.note));
-                    undo = ui.link("Undo refine").on_hover_text(format!("{cmd}+Z")).clicked();
+                    undo = tip(ui.link("Undo refine"), "Bring back the text you had before refining", None, &format!("{cmd}+Z")).clicked();
                 });
                 if undo {
                     self.input = original.clone();
@@ -2886,6 +3076,16 @@ impl App {
         let running = self.open_running();
         let enabled = self.open.is_some();
         let focused = ui.memory(|m| m.has_focus(id));
+        // While recording, Enter stops it like Cmd+D (it doesn't send), from the input or with
+        // nothing focused (clicking the mic takes focus away). Then the prompt has focus again.
+        let nothing_focused = ui.memory(|m| m.focused().is_none());
+        if matches!(self.dictation, Dictation::Recording(_))
+            && (focused || nothing_focused)
+            && ui.input_mut(|i| i.consume_key(Modifiers::NONE, Key::Enter))
+        {
+            self.toggle_dictation();
+            self.focus_prompt = true;
+        }
         // Send and refine keys are taken before the TextEdit sees them (it would add a line).
         let (send, refine_key) = if focused {
             let with_mod = self.settings.send_with_modifier;
@@ -2902,6 +3102,17 @@ impl App {
         } else {
             (false, false)
         };
+        // Cmd+D dictates (starts, or stops and transcribes) and Cmd+R refines, wherever the
+        // focus is; the input has it afterwards.
+        let (dictate_key, refine_anywhere) = ui.input_mut(|i| {
+            (dictation::AVAILABLE && i.consume_key(Modifiers::COMMAND, Key::D), i.consume_key(Modifiers::COMMAND, Key::R))
+        });
+        let recording_now = matches!(self.dictation, Dictation::Recording(_));
+        let dictate_key = dictate_key && (recording_now || enabled);
+        let refine_key = refine_key || (refine_anywhere && !self.input.trim().is_empty());
+        if dictate_key || refine_anywhere {
+            self.focus_prompt = true;
+        }
         // Cmd+V with images on the clipboard: they go in as markers, instead of any text that
         // came with them (a copied file's name).
         if images::paste_pressed()
@@ -2988,7 +3199,7 @@ impl App {
                     ui.label(RichText::new(">").monospace().strong().color(pal.prompt_sign));
                     let send_key = if self.settings.send_with_modifier { "cmd+enter" } else { "enter" };
                     let hint = match (&self.open, running) {
-                        _ if recording => "listening… click ⏹ to stop and transcribe".to_owned(),
+                        _ if recording => "listening… enter, cmd+d or ⏹ stops and transcribes".to_owned(),
                         (None, _) => "select a session".to_owned(),
                         (_, true) => format!("claude is working… {send_key} queues a prompt · ctrl+c stops"),
                         _ => format!("type a prompt · {send_key} to send · cmd+enter refines · up/down for history"),
@@ -3051,22 +3262,29 @@ impl App {
                         let cmd = if cfg!(target_os = "macos") { "Cmd" } else { "Ctrl" };
                         let keys = if self.settings.send_with_modifier { format!("{cmd}+Shift+Enter") } else { format!("{cmd}+Enter") };
                         let refine = egui::Button::new("✨").frame(false);
-                        refine_click = ui
-                            .add_enabled(enabled && !waiting && !self.input.trim().is_empty(), refine)
-                            .on_hover_text(format!("Refine the prompt ({keys})"))
-                            .on_disabled_hover_text("Type a prompt to refine it")
-                            .clicked();
+                        let resp = ui.add_enabled(enabled && !waiting && !self.input.trim().is_empty(), refine);
+                        let why = if waiting { "Refining…" } else if enabled { "Type a prompt first" } else { "Select a session first" };
+                        refine_click = tip(
+                            resp,
+                            "Refine: a helper model rewrites the prompt clearly, asking questions if it is ambiguous",
+                            Some(why),
+                            &format!("{cmd}+R, or {keys} in the input"),
+                        )
+                        .clicked();
                         // Added after refine, so it sits to the left of it.
                         if dictation::AVAILABLE {
                             let transcribing = matches!(self.dictation, Dictation::Transcribing(_));
                             let (icon, color) = if recording { ("⏹", pal.error) } else { ("🎤", ui.visuals().text_color()) };
                             let mic = egui::Button::new(RichText::new(icon).color(color)).frame(false);
-                            let hover = if recording { "Stop dictation" } else { "Dictate: click to start, click again to stop" };
-                            dictate_click = ui
-                                .add_enabled(recording || (enabled && !transcribing), mic)
-                                .on_hover_text(hover)
-                                .on_disabled_hover_text(if transcribing { "Transcribing…" } else { "Select a session first" })
-                                .clicked();
+                            let what = if recording {
+                                "Stop dictating: what you said is transcribed into the prompt"
+                            } else {
+                                "Dictate: speak, and the words go into the prompt at the cursor (transcribed on this Mac)"
+                            };
+                            let resp = ui.add_enabled(recording || (enabled && !transcribing), mic);
+                            let why = if transcribing { "Transcribing…" } else { "Select a session first" };
+                            let keys = if recording { format!("Enter or {cmd}+D") } else { format!("{cmd}+D to start, again (or Enter) to stop") };
+                            dictate_click = tip(resp, what, Some(why), &keys).clicked();
                             if transcribing {
                                 ui.spinner();
                                 ui.label(RichText::new("transcribing…").small().weak());
@@ -3076,7 +3294,7 @@ impl App {
                             }
                         }
                         if running {
-                            stop = ui.button("⏹").on_hover_text("Stop Claude (Ctrl+C)").clicked();
+                            stop = tip(ui.button("⏹"), "Stop Claude: its run ends now, and your prompt comes back into the input", None, "Ctrl+C").clicked();
                             ui.spinner();
                         }
                     });
@@ -3085,7 +3303,7 @@ impl App {
         if stop {
             self.stop_open();
         }
-        if dictate_click {
+        if dictate_click || dictate_key {
             self.toggle_dictation();
         }
         if enabled && (refine_key || refine_click) && self.refine.as_ref().is_none_or(|r| r.rx.is_none()) {
@@ -3113,9 +3331,10 @@ impl App {
                 let info = crate::newinfo::gather(&dir, &home, &scope, &|k| std::env::var(k).ok());
                 self.new_info = Some((dir.clone(), info));
             }
-            let status = if self.open_running() { "Starting…" } else { "Type your first prompt below." };
+            let running = self.open_running();
+            let status = if running { "Starting…" } else { "Type your first prompt below." };
             if let Some((_, info)) = &self.new_info {
-                crate::newinfo::show(ui, &dir, info, status);
+                crate::newinfo::show(ui, &dir, info, &mut self.new_choice, !running, status);
             }
             return;
         }
@@ -3143,6 +3362,9 @@ impl App {
         self.heights.resize(s.messages.len(), 0.0);
         let mut top_prompt = None;
         let mut inline_you = false;
+        let mut delete = None;
+        // Deleting rewrites the session file: not while a run writes to it, nor before it exists.
+        let deletable = !self.open_running() && self.new_session.is_none() && self.selected.is_some();
         let open_id = self.open_id();
         let key = self.view_key();
         let mut find = self.find.open.then_some(&mut self.find);
@@ -3192,11 +3414,15 @@ impl App {
                 let rect = if skip {
                     ui.allocate_space(egui::vec2(ui.available_width(), h)).1
                 } else {
-                    let shown = ui.push_id(i, |ui| message(ui, &mut self.md_cache, m, &pal));
+                    let shown = ui.push_id(i, |ui| message(ui, &mut self.md_cache, m, &pal, Some(deletable)));
+                    let (card, delete_clicked) = shown.inner;
+                    if delete_clicked {
+                        delete = Some(i);
+                    }
                     let rect = shown.response.rect;
                     self.heights[i] = rect.height().max(1.0);
                     // A click on a card picks it (a drag still selects text in it).
-                    if let Some(card) = shown.inner {
+                    if let Some(card) = card {
                         if click.is_some_and(|p| card.contains(p) && ui.clip_rect().contains(p)) {
                             self.picked_message = Some(i);
                         }
@@ -3227,7 +3453,7 @@ impl App {
                 // The reply as it is being written, then what Claude is doing right now.
                 if !run.live.is_empty() {
                     let m = session::Message { role: Role::Assistant, text: run.live.clone() };
-                    ui.push_id("live", |ui| message(ui, &mut self.md_cache, &m, &pal));
+                    ui.push_id("live", |ui| message(ui, &mut self.md_cache, &m, &pal, None));
                 }
                 ui.horizontal(|ui| {
                     ui.spinner();
@@ -3242,7 +3468,7 @@ impl App {
                 // What Claude had written when it was stopped, then the mark.
                 if !partial.is_empty() {
                     let m = session::Message { role: Role::Assistant, text: partial.clone() };
-                    ui.push_id("interrupted", |ui| message(ui, &mut self.md_cache, &m, &pal));
+                    ui.push_id("interrupted", |ui| message(ui, &mut self.md_cache, &m, &pal, None));
                 }
                 ui.label(RichText::new("⏹ Interrupted").color(pal.note).monospace());
             }
@@ -3253,6 +3479,38 @@ impl App {
             self.pinned = top_prompt;
             self.inline_you = inline_you;
             ui.ctx().request_repaint();
+        }
+        if let Some(i) = delete {
+            self.ask_delete_message(i);
+        }
+    }
+
+    /// 🗑 on message `i` of the open session: asks first when the setting says so.
+    fn ask_delete_message(&mut self, i: usize) {
+        let Some(text) = self.open.as_ref().and_then(|s| s.messages.get(i)).map(|m| m.text.clone()) else { return };
+        let Some(id) = self.open_id() else { return };
+        if self.settings.confirm_delete_message {
+            self.confirm_delete_message = Some((id, i, text));
+        } else {
+            self.delete_message(&id, i, &text);
+        }
+    }
+
+    /// Takes message `i` (saying `text`) of session `id` out of its file, so Claude no longer
+    /// sees it (see `session::delete_message`); the file as it was goes to the config folder's
+    /// `backups`. The open session then shows what is left.
+    fn delete_message(&mut self, id: &str, i: usize, text: &str) {
+        if self.runs.contains_key(id) {
+            self.error = Some("Claude is working in this session; delete the message once it has finished".into());
+            return;
+        }
+        let Some(path) = self.sessions.iter().find(|s| s.id == id).map(|s| s.path.clone()) else { return };
+        let stamp = SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_millis()).unwrap_or(0);
+        let backup = settings::config_dir().join("backups").join(format!("{id}-{stamp}.jsonl"));
+        match session::delete_message(&path, i, text, &backup) {
+            Ok(()) if self.open_id().as_deref() == Some(id) => self.reload(),
+            Ok(()) => {}
+            Err(e) => self.error = Some(format!("could not delete the message: {e}")),
         }
     }
 
@@ -3850,6 +4108,16 @@ impl App {
         if ctx.input_mut(|i| i.consume_key(Modifiers::CTRL, Key::F) || i.consume_key(Modifiers::COMMAND, Key::F)) {
             self.find.show();
         }
+        // Cmd+Z with no field focused (a focused one undoes its own typing) brings back the
+        // sessions taken out of a workspace last.
+        let modal = !self.confirm_trash.is_empty() || self.confirm_delete.is_some();
+        if !self.removed.is_empty()
+            && !modal
+            && ctx.memory(|m| m.focused().is_none())
+            && ctx.input_mut(|i| i.consume_key(Modifiers::COMMAND, Key::Z))
+        {
+            self.undo_remove();
+        }
         if !self.picked.is_empty() && self.confirm_trash.is_empty() && ctx.input(|i| i.key_pressed(Key::Escape)) {
             self.picked.clear();
         }
@@ -4093,33 +4361,37 @@ fn session_bubble(ui: &mut egui::Ui, selected: bool, title: &str, note: Option<&
 }
 
 /// One message as a card: role label and accent stripe, then its rendered Markdown.
-/// Messages that are only tool calls show as a single dimmed line. Returns where the card
-/// shows (what a click picks), None for what shows no card (a lone stop, tool lines).
-fn message(ui: &mut egui::Ui, cache: &mut CommonMarkCache, m: &session::Message, pal: &theme::Palette) -> Option<egui::Rect> {
+/// Messages that are only tool calls show as a single dimmed line. With `delete` (whether
+/// deleting is possible now), the label's row also has Delete. Returns where the card shows
+/// (what a click picks; None for what shows no card: a lone stop, tool lines) and whether
+/// Delete was clicked.
+fn message(ui: &mut egui::Ui, cache: &mut CommonMarkCache, m: &session::Message, pal: &theme::Palette, delete: Option<bool>) -> (Option<egui::Rect>, bool) {
     if m.role == Role::User && is_interrupt_marker(&m.text) {
         // Claude's record of a stop: alone, after the prompt it stopped, or (merged by the
-        // parser) before the next prompt. Each part shows in its place.
+        // parser) before the next prompt. Each part shows in its place; Delete takes the whole.
         let (before, after) = split_interrupt_marker(&m.text);
         let mut card = None;
+        let mut clicked = false;
         if !before.is_empty() {
-            card = ui.push_id("before", |ui| message(ui, cache, &session::Message { role: Role::User, text: before }, pal)).inner;
+            (card, clicked) = ui.push_id("before", |ui| message(ui, cache, &session::Message { role: Role::User, text: before }, pal, delete)).inner;
         }
         ui.label(RichText::new("⏹ Interrupted").color(pal.note).monospace());
         ui.add_space(6.0);
         if !after.is_empty() {
-            let r = ui.push_id("after", |ui| message(ui, cache, &session::Message { role: Role::User, text: after }, pal)).inner;
+            let (r, c) = ui.push_id("after", |ui| message(ui, cache, &session::Message { role: Role::User, text: after }, pal, delete)).inner;
+            clicked |= c;
             card = match (card, r) {
                 (Some(a), Some(b)) => Some(a.union(b)),
                 (a, b) => a.or(b),
             };
         }
-        return card;
+        return (card, clicked);
     }
     if is_tool_lines(m) {
         if markdown::SHOW_TOOLS.load(std::sync::atomic::Ordering::Relaxed) {
             egui::Frame::new().inner_margin(egui::Margin { left: 14, right: 0, top: 0, bottom: 6 }).show(ui, |ui| markdown::show(ui, cache, &m.text));
         }
-        return None;
+        return (None, false);
     }
     let (who, accent) = match m.role {
         Role::User => ("You", pal.user),
@@ -4129,6 +4401,7 @@ fn message(ui: &mut egui::Ui, cache: &mut CommonMarkCache, m: &session::Message,
         Role::User => accent.gamma_multiply(0.08),
         Role::Assistant => ui.visuals().faint_bg_color,
     };
+    let mut clicked = false;
     let card = egui::Frame::new()
         .fill(fill)
         .corner_radius(6.0)
@@ -4137,7 +4410,12 @@ fn message(ui: &mut egui::Ui, cache: &mut CommonMarkCache, m: &session::Message,
             ui.set_width(ui.available_width());
             ui.horizontal(|ui| {
                 ui.label(RichText::new(who).strong().color(accent));
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| copy_button(ui, m, fill));
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    copy_button(ui, m, fill);
+                    if let Some(can_delete) = delete {
+                        clicked = delete_button(ui, can_delete);
+                    }
+                });
             });
             if m.role == Role::User && images::has_images(&m.text) {
                 with_images(ui, cache, &m.text);
@@ -4149,7 +4427,7 @@ fn message(ui: &mut egui::Ui, cache: &mut CommonMarkCache, m: &session::Message,
     let stripe = egui::Rect::from_min_max(r.min, egui::pos2(r.left() + 3.0, r.bottom()));
     ui.painter().rect_filled(stripe, egui::CornerRadius { nw: 6, sw: 6, ne: 0, se: 0 }, accent);
     ui.add_space(6.0);
-    Some(r)
+    (Some(r), clicked)
 }
 
 /// A Claude message that is only tool calls (shown as dimmed lines, if at all).
@@ -4216,6 +4494,16 @@ fn copy_button(ui: &mut egui::Ui, m: &session::Message, fill: Color32) {
         p.rect_filled(front, 1.5, bg);
         p.rect_stroke(front, 1.5, stroke, egui::StrokeKind::Middle);
     }
+}
+
+/// Delete, left of Copy in a message's label row: small and without a frame until hovered.
+/// True when clicked.
+fn delete_button(ui: &mut egui::Ui, can_delete: bool) -> bool {
+    let icon = egui::Button::new(RichText::new("🗑").small().weak()).small().frame_when_inactive(false);
+    ui.add_enabled(can_delete, icon)
+        .on_hover_text("Delete from the context: Claude won't see this message from the next prompt on")
+        .on_disabled_hover_text("Claude is working in this session; delete once it has finished")
+        .clicked()
 }
 
 /// What Copy on a message puts on the clipboard: its text, without Claude's tool lines.
@@ -4431,6 +4719,16 @@ fn file_size(bytes: u64) -> String {
     }
 }
 
+/// `ids` (a list's order) with `moving` (some of them, in any order) taken out and put
+/// together, in `ids`' order, where the line before `ids[slot]` was.
+fn dropped_order(ids: &[String], moving: &[String], slot: usize) -> Vec<String> {
+    let moved = |id: &&String| moving.contains(id);
+    let mut order: Vec<String> = ids[..slot.min(ids.len())].iter().filter(|id| !moved(id)).cloned().collect();
+    order.extend(ids.iter().filter(moved).cloned());
+    order.extend(ids[slot.min(ids.len())..].iter().filter(|id| !moved(id)).cloned());
+    order
+}
+
 /// When a session row was last active, in local time: "14:32" today, "Nov 2 14:32" this
 /// year, "Nov 2 2025" before.
 pub(crate) fn row_time(t: SystemTime, now: SystemTime) -> String {
@@ -4616,6 +4914,7 @@ impl eframe::App for App {
         }
         self.confirm_delete_modal(&ctx);
         self.confirm_trash_modal(&ctx);
+        self.confirm_delete_message_modal(&ctx);
         self.model_prompt_modal(&ctx);
         // A Cmd+V the input didn't take (it wasn't focused) is over.
         images::paste_pressed();
@@ -4635,6 +4934,18 @@ impl eframe::App for App {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn dropped_rows_go_together_where_the_line_was() {
+        let ids: Vec<String> = ["a", "b", "c", "d"].map(String::from).to_vec();
+        let drop = |moving: &[&str], slot| dropped_order(&ids, &moving.iter().map(|m| m.to_string()).collect::<Vec<_>>(), slot).join("");
+        assert_eq!(drop(&["d"], 0), "dabc");
+        assert_eq!(drop(&["a"], 4), "bcda", "below the last");
+        assert_eq!(drop(&["a"], 2), "bacd");
+        assert_eq!(drop(&["b"], 1), "abcd", "its own place");
+        assert_eq!(drop(&["d", "a"], 2), "badc", "together, in list order");
+        assert_eq!(drop(&["x"], 1), "abcd", "not in the list");
+    }
 
     #[test]
     fn row_time_shows_the_time_today_and_the_date_before() {
