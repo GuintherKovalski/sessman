@@ -2373,7 +2373,7 @@ impl App {
                             ui.label("No scopes yet. Create one with +");
                         }
                         for (w, ws) in self.workspaces.list.iter().enumerate() {
-                            if ui.button(&ws.name).clicked() {
+                            if ui.button(workspaces::label(&ws.name)).clicked() {
                                 actions.push(Action::MoveTo(dragging.clone(), w));
                             }
                         }
@@ -2458,7 +2458,7 @@ impl App {
 
     fn tabs(&mut self, ui: &mut egui::Ui, actions: &mut Vec<Action>) {
         ui.horizontal_wrapped(|ui| {
-            let all = ui.selectable_label(self.tab.is_none(), "Scopes").on_hover_text("Every session, and an overview of the scopes");
+            let all = ui.selectable_label(self.tab.is_none(), "SCOPES").on_hover_text("Every session, and an overview of the scopes");
             if all.clicked() {
                 actions.push(Action::Tab(None));
             }
@@ -2467,14 +2467,7 @@ impl App {
                     workspace_rename_field(ui, w, text, fresh, actions);
                     continue;
                 }
-                let bg = ui.painter().add(egui::Shape::Noop);
-                let tab = ui.selectable_label(self.tab == Some(w), &ws.name);
-                if let Some(c) = ws.color {
-                    ui.painter().set(bg, egui::Shape::rect_filled(tab.rect, 3.0, tint(c, 90)));
-                    if self.tab == Some(w) {
-                        ui.painter().rect_stroke(tab.rect, 3.0, Stroke::new(1.5, rgb(c)), StrokeKind::Inside);
-                    }
-                }
+                let tab = workspaces::tab(ui, &ws.name, ws.color, self.tab == Some(w));
                 if tab.clicked() {
                     actions.push(Action::Tab(Some(w)));
                 }
@@ -2527,8 +2520,8 @@ impl App {
         let name = self.workspaces.list.get(w).map(|w| w.name.clone()).unwrap_or_default();
         let (mut delete, mut cancel) = (false, false);
         let modal = egui::Modal::new(Id::new("confirm-delete")).show(ctx, |ui| {
-            ui.label(RichText::new(format!("Delete scope \"{name}\"?")).strong());
-            ui.label("Its sessions are not deleted; they stay in Scopes.");
+            ui.label(RichText::new(format!("Delete scope \"{}\"?", workspaces::label(&name))).strong());
+            ui.label("Its sessions are not deleted; they stay in SCOPES.");
             ui.add_space(8.0);
             ui.horizontal(|ui| {
                 delete = ui.button("Delete").clicked();
@@ -4453,10 +4446,6 @@ fn short_tokens(n: u64) -> String {
 
 fn rgb([r, g, b]: [u8; 3]) -> Color32 {
     Color32::from_rgb(r, g, b)
-}
-
-fn tint([r, g, b]: [u8; 3], alpha: u8) -> Color32 {
-    Color32::from_rgba_unmultiplied(r, g, b, alpha)
 }
 
 /// "-Users-me-Desktop-foo-bar" → "Desktop-foo-bar"

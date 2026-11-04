@@ -12,13 +12,13 @@ fn a_workspace_another_scope_adds_shows_up_by_itself() {
         .session(session("s-b", "beta prompt", 50))
         .workspaces(&[("Work", &["s-a"])])
         .launch();
-    assert!(!s.sees("Theirs"));
+    assert!(!s.sees("THEIRS"));
     s.env.write_config("workspaces.json", &json!({"list": [
         {"name": "Work", "sessions": ["s-a"], "color": [86, 156, 214]},
         {"name": "Theirs", "sessions": ["s-b"], "color": [214, 122, 78]},
     ]}));
-    s.wait_to_see("Theirs");
-    s.click_first("Theirs");
+    s.wait_to_see("THEIRS");
+    s.click_first("THEIRS");
     assert!(s.sees("beta prompt"));
     assert!(!s.sees("alpha prompt"), "with the sessions they put in it");
 }
@@ -30,11 +30,11 @@ fn a_session_another_scope_takes_out_leaves_the_list_here() {
         .session(session("s-b", "beta prompt", 50))
         .workspaces(&[("Work", &["s-a", "s-b"])])
         .launch();
-    s.click_first("Work");
+    s.click_first("WORK");
     assert!(s.sees("2 sessions"));
     s.env.write_config("workspaces.json", &json!({"list": [{"name": "Work", "sessions": ["s-a"], "color": [86, 156, 214]}]}));
     s.wait_to_see("1 session");
-    assert!(s.is_selected("Work"), "the open tab stays on its workspace");
+    assert!(s.is_selected("WORK"), "the open tab stays on its workspace");
     assert!(s.sees("alpha prompt"));
 }
 

@@ -10,7 +10,7 @@ fn workspace_with_folder() -> Scope {
     let mut s = s
         .workspaces_json(json!({"list": [{"name": "Work", "sessions": ["s-a"], "folder": folder}]}))
         .launch();
-    s.click_first("Work");
+    s.click_first("WORK");
     s
 }
 

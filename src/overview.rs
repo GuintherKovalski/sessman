@@ -434,7 +434,7 @@ pub fn ui(ui: &mut egui::Ui, cards: &[Card], opts: &Options) -> Option<Event> {
     }
     ui.add_space(6.0);
     ui.horizontal(|ui| {
-        ui.heading("Scopes");
+        ui.heading("SCOPES");
         let sessions: usize = cards.iter().map(|c| c.rows.len()).sum();
         let running: usize = cards.iter().map(|c| c.running).sum();
         let finished: usize = cards.iter().map(|c| c.rows.iter().filter(|r| r.finished).count()).sum();
@@ -485,12 +485,9 @@ fn card_ui(ui: &mut egui::Ui, w: usize, card: &Card, columns: usize, now: u64, o
         .inner_margin(egui::Margin { left: 16, right: 12, top: 10, bottom: 10 });
     let shown = frame.show(ui, |ui| {
         ui.set_width(ui.available_width());
-        // Name; how big it is on the right.
+        // Name, drawn as its tab at the top left is; how big it is on the right.
         ui.horizontal(|ui| {
-            let name = ui
-                .add(egui::Label::new(RichText::new(card.name).strong().size(18.0)).sense(Sense::click()))
-                .on_hover_cursor(egui::CursorIcon::PointingHand)
-                .on_hover_text("Open this scope");
+            let name = crate::workspaces::tab(ui, card.name, Some(card.color), false).on_hover_text("Open this scope");
             if name.clicked() {
                 event = Some(Event::Open(w));
             }
