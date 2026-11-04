@@ -23,7 +23,7 @@ fn entries(s: &Scope) -> Vec<String> {
 fn delete_asks_first_then_takes_the_message_out_of_the_session_file() {
     let mut s = two_turns().launch();
     s.click("alpha prompt");
-    assert!(s.all_enabled("📋") && s.all_enabled("🗑"), "every message has both");
+    assert!(s.all_enabled("Copy") && s.all_enabled("🗑"), "every message has both");
     s.click_last("🗑");
     assert!(s.sees("Delete this message from the context?"));
     assert!(s.sees("beta reply"), "the modal shows which message");
@@ -58,7 +58,7 @@ fn delete_waits_while_claude_works_in_the_session() {
     s.env.hold("hold");
     s.send("HOLD busy");
     s.wait_until("the run has started", |s| !s.all_enabled("🗑"));
-    assert!(s.all_enabled("📋"), "copy still works");
+    assert!(s.all_enabled("Copy"), "copy still works");
     s.env.release("hold");
     s.wait_until("the run has ended", |s| s.all_enabled("🗑"));
 }
