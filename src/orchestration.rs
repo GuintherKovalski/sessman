@@ -18,7 +18,7 @@
 //! the app does and lists under the answer.
 use crate::control::Command;
 use crate::markdown;
-use crate::overview::{ago, secs};
+use crate::overview::{self, ago, last_interaction, secs};
 use crate::runner;
 use crate::session;
 use crate::theme;
@@ -610,34 +610,7 @@ pub fn ui(ui: &mut egui::Ui, page: &Page, question: &mut String, renaming: &mut 
     let accent = Color32::from_rgb(r, g, b);
     let report = page.orch.and_then(|o| o.report.as_ref());
 
-    // Header: name and counts on the left, actions on the right.
-    ui.add_space(6.0);
-    ui.horizontal(|ui| {
-        let (dot, _) = ui.allocate_exact_size(egui::vec2(14.0, 14.0), Sense::hover());
-        let c = dot.center();
-        let d = 6.0;
-        ui.painter().add(egui::Shape::convex_polygon(
-            vec![c + egui::vec2(0.0, -d), c + egui::vec2(d, 0.0), c + egui::vec2(0.0, d), c + egui::vec2(-d, 0.0)],
-            accent,
-            Stroke::NONE,
-        ));
-        ui.heading(page.name);
-        ui.label(RichText::new("orchestration").color(accent));
-        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-            let can = !page.busy && !page.sessions.is_empty();
-            let clear = egui::Button::new("Clear & re-summarize");
-            if ui
-                .add_enabled(can, clear)
-                .on_hover_text("Forget the report, what it has seen and the questions below, and summarize every session again from scratch")
-                .clicked()
-            {
-                event = Some(Event::Clear);
-            }
-            if ui.add_enabled(can, egui::Button::new("↻ Update")).on_hover_text("Update the report with the activity since the last one").clicked() {
-                event = Some(Event::Update);
-            }
-        });
-    });
+    // Header, as the Scopes overview's: the name and counts, actions on the right.
     let running = page.sessions.iter().filter(|s| s.running).count();
     let queued: usize = page.sessions.iter().map(|s| s.queued).sum();
     let mut counts = vec![plural(page.sessions.len(), "session")];
@@ -647,8 +620,26 @@ pub fn ui(ui: &mut egui::Ui, page: &Page, question: &mut String, renaming: &mut 
     if queued > 0 {
         counts.push(format!("{queued} queued"));
     }
-    ui.label(RichText::new(counts.join(" · ")).weak());
     ui.add_space(6.0);
+    ui.horizontal(|ui| {
+        ui.heading(page.name);
+        ui.label(RichText::new(counts.join(" · ")).weak());
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            let can = !page.busy && !page.sessions.is_empty();
+            let clear = egui::Button::new("Clear & re-summarize").small();
+            if ui
+                .add_enabled(can, clear)
+                .on_hover_text("Forget the report, what it has seen and the questions below, and summarize every session again from scratch")
+                .clicked()
+            {
+                event = Some(Event::Clear);
+            }
+            if ui.add_enabled(can, egui::Button::new("↻ Update").small()).on_hover_text("Update the report with the activity since the last one").clicked() {
+                event = Some(Event::Update);
+            }
+        });
+    });
+    ui.add_space(8.0);
 
     if page.sessions.is_empty() {
         ui.centered_and_justified(|ui| {
@@ -670,20 +661,20 @@ pub fn ui(ui: &mut egui::Ui, page: &Page, question: &mut String, renaming: &mut 
             if let Some(q) = page.asking {
                 ui.horizontal(|ui| {
                     ui.spinner();
-                    ui.label(RichText::new(format!("Asking: {q}")).weak().italics());
+                    ui.label(RichText::new(format!("Asking: {q}")).weak().small());
                 });
             }
             if let Some(e) = page.ask_error {
-                ui.colored_label(pal.error, format!("Could not answer: {e}"));
+                ui.label(RichText::new(format!("Could not answer: {e}")).small().color(pal.error));
             }
             egui::Frame::new()
                 .fill(pal.prompt_bg)
-                .stroke(Stroke::new(1.0, accent.gamma_multiply(0.7)))
+                .stroke(ui.visuals().widgets.noninteractive.bg_stroke)
                 .inner_margin(egui::Margin::symmetric(10, 8))
-                .corner_radius(4.0)
+                .corner_radius(10.0)
                 .show(ui, |ui| {
                     ui.horizontal(|ui| {
-                        ui.label(RichText::new("?").monospace().strong().color(accent));
+                        ui.label(RichText::new("?").monospace().strong().color(pal.prompt_sign));
                         let hint = "Ask the orchestrator about this scope · Enter to send (Shift+Enter: new line)";
                         let edit = egui::TextEdit::multiline(question)
                             .id(field_id)
@@ -701,119 +692,108 @@ pub fn ui(ui: &mut egui::Ui, page: &Page, question: &mut String, renaming: &mut 
     }
 
     egui::ScrollArea::vertical().id_salt(("orchestration", page.name)).auto_shrink(false).show(ui, |ui| {
-        // The report: progress, summary, what needs the developer, next steps.
-        egui::Frame::new()
-            .fill(Color32::from_rgba_unmultiplied(r, g, b, if ui.visuals().dark_mode { 18 } else { 26 }))
-            .stroke(Stroke::new(1.0, accent.gamma_multiply(0.6)))
-            .corner_radius(8.0)
-            .inner_margin(12.0)
-            .show(ui, |ui| {
-                ui.set_width(ui.available_width());
-                match report {
-                    Some(rep) => {
-                        ui.horizontal(|ui| {
-                            ui.label(RichText::new("PROGRESS").size(10.0).color(accent));
-                            let bar = egui::ProgressBar::new(f32::from(rep.progress) / 100.0).fill(accent).text(format!("{}%", rep.progress));
-                            ui.add(bar);
-                        });
-                        ui.add_space(6.0);
-                        let mut open = |id: Option<String>| {
-                            if let Some(id) = id {
-                                event = Some(Event::Open(id));
-                            }
-                        };
-                        if !rep.summary.is_empty() {
-                            open(linked(ui, &rep.summary, page.sessions, |t| RichText::new(t)));
-                        }
-                        if !rep.attention.is_empty() {
-                            ui.add_space(8.0);
-                            ui.label(RichText::new("NEEDS YOU").size(10.0).strong().color(pal.note));
-                            for a in &rep.attention {
-                                open(linked(ui, &format!("•  {a}"), page.sessions, |t| RichText::new(t).color(pal.note)));
-                            }
-                        }
-                        if !rep.next.is_empty() {
-                            ui.add_space(8.0);
-                            ui.label(RichText::new("NEXT").size(10.0).color(accent));
-                            for n in &rep.next {
-                                open(linked(ui, &format!("•  {n}"), page.sessions, |t| RichText::new(t)));
-                            }
-                        }
+        // The report, in a card like a scope's on the overview: the summary, progress, what
+        // needs the developer and what comes next, then the sessions as tiles, then how fresh.
+        let shown = overview::card_frame(ui.visuals()).show(ui, |ui| {
+            ui.set_width(ui.available_width());
+            let mut open = |id: Option<String>| {
+                if let Some(id) = id {
+                    event = Some(Event::Open(id));
+                }
+            };
+            match report {
+                Some(rep) => {
+                    if !rep.summary.is_empty() {
+                        open(linked(ui, &rep.summary, page.sessions, |t| RichText::new(t).size(overview::TITLE_SIZE)));
                     }
-                    None if page.busy => {
-                        ui.label(RichText::new("Reading every session to write the first report…").weak());
+                    ui.add_space(2.0);
+                    ui.horizontal(|ui| {
+                        ui.label(RichText::new(format!("Progress {}%", rep.progress)).weak().small());
+                        let bar = egui::ProgressBar::new(f32::from(rep.progress) / 100.0).desired_height(5.0).fill(accent);
+                        ui.add(bar);
+                    });
+                    for a in &rep.attention {
+                        open(linked(ui, &format!("⚠ {a}"), page.sessions, |t| RichText::new(t).small().color(pal.note)));
                     }
-                    None => {
-                        ui.label(RichText::new("No report yet. Click ↻ Update to have the orchestrator read every session.").weak());
+                    for n in &rep.next {
+                        open(linked(ui, &format!("Next: {n}"), page.sessions, |t| RichText::new(t).small()));
                     }
                 }
-                ui.add_space(6.0);
-                ui.horizontal(|ui| {
-                    if page.busy {
-                        ui.spinner();
-                        ui.label(RichText::new("Updating…").weak().small());
-                    } else if let Some(e) = page.error {
-                        ui.add(egui::Label::new(RichText::new(format!("Could not update: {e}")).small().color(pal.error)).truncate()).on_hover_text(e);
-                    } else if let Some(o) = page.orch.filter(|o| o.report.is_some()) {
-                        let mut when = format!("Updated {}", ago(o.made, now));
-                        if o.updates > 1 {
-                            when.push_str(&format!(" · {} updates since the last clear", o.updates - 1));
-                        }
-                        ui.label(RichText::new(when).weak().small());
-                    }
-                    ui.label(RichText::new(format!("· {}", page.model)).weak().small());
-                });
-            });
-        ui.add_space(10.0);
-
-        // A card per session: live state first, then what the report says about it.
-        ui.horizontal(|ui| {
-            ui.label(RichText::new("Sessions").strong());
-            ui.label(RichText::new("in the bar's order · drag to reorder · right-click for more").weak().small());
-            if page.arranged {
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    if ui.small_button("Newest first").on_hover_text("List the sessions in the bar newest first again").clicked() {
-                        event = Some(Event::NewestFirst);
-                    }
-                });
+                None if page.busy => {
+                    ui.label(RichText::new("Reading every session to write the first report…").weak());
+                }
+                None => {
+                    ui.label(RichText::new("No report yet. Click ↻ Update to have the orchestrator read every session.").weak());
+                }
             }
-        });
-        ui.add_space(4.0);
-        let columns = ((ui.available_width() / 340.0) as usize).clamp(1, 3);
-        ui.columns(columns, |cols| {
-            for (k, s) in page.sessions.iter().enumerate() {
+            ui.add_space(8.0);
+            ui.horizontal(|ui| {
+                ui.label(RichText::new("In the bar's order · drag a tile onto another to reorder · right-click for more").weak().small());
+                if page.arranged {
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        if ui.small_button("Newest first").on_hover_text("List the sessions in the bar newest first again").clicked() {
+                            event = Some(Event::NewestFirst);
+                        }
+                    });
+                }
+            });
+            ui.add_space(4.0);
+            let columns = overview::tile_columns(ui, page.sessions.iter().map(|s| s.title), ui.available_width());
+            overview::tile_grid(ui, ("orchestration-grid", page.name), page.sessions, columns, |ui, k, s, height| {
                 let status = report.and_then(|r| r.sessions.iter().find(|x| x.id == s.id));
                 let covered = page.orch.and_then(|o| o.covered.get(s.id)).copied().unwrap_or(0);
                 let card = Card { s, k, count: page.sessions.len(), sessions: page.sessions, status, covered, now, accent };
-                if let Some(e) = session_card(&mut cols[k % columns], &card, renaming) {
+                let (e, natural) = session_tile(ui, &card, renaming, height);
+                if let Some(e) = e {
                     event = Some(e);
                 }
-            }
+                natural
+            });
+            // Footer: how fresh, and with which model.
+            ui.horizontal(|ui| {
+                if page.busy {
+                    ui.spinner();
+                    ui.label(RichText::new("Updating…").weak().small());
+                } else if let Some(e) = page.error {
+                    ui.add(egui::Label::new(RichText::new(format!("Could not update: {e}")).small().color(pal.error)).truncate()).on_hover_text(e);
+                } else if let Some(o) = page.orch.filter(|o| o.report.is_some()) {
+                    let mut when = format!("Updated {}", ago(o.made, now));
+                    if o.updates > 1 {
+                        when.push_str(&format!(" · {} updates since the last clear", o.updates - 1));
+                    }
+                    ui.label(RichText::new(when).weak().small());
+                }
+                ui.label(RichText::new(format!("· {}", page.model)).weak().small());
+            });
         });
+        overview::stripe(ui, shown.response.rect, accent);
+        ui.add_space(10.0);
 
-        // Questions asked so far, oldest first.
+        // Questions asked so far, oldest first, in a card of their own, each as a tile.
         if let Some(o) = page.orch.filter(|o| !o.log.is_empty()) {
-            ui.add_space(6.0);
-            ui.label(RichText::new("Questions").strong());
-            ui.add_space(4.0);
-            for (i, e) in o.log.iter().enumerate() {
-                ui.push_id(("exchange", i), |ui| {
-                    egui::Frame::new()
-                        .fill(ui.visuals().faint_bg_color)
-                        .stroke(Stroke::new(1.0, accent.gamma_multiply(0.5)))
-                        .inner_margin(8.0)
-                        .corner_radius(4.0)
-                        .show(ui, |ui| {
+            let shown = overview::card_frame(ui.visuals()).show(ui, |ui| {
+                ui.set_width(ui.available_width());
+                ui.horizontal(|ui| {
+                    ui.label(RichText::new("Questions").strong().size(18.0));
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        ui.label(RichText::new(plural(o.log.len(), "question")).weak().small());
+                    });
+                });
+                ui.add_space(4.0);
+                for (i, e) in o.log.iter().enumerate() {
+                    ui.push_id(("exchange", i), |ui| {
+                        overview::tile_frame(ui.visuals(), false).show(ui, |ui| {
                             ui.set_width(ui.available_width());
                             ui.horizontal_top(|ui| {
                                 let text = (ui.available_width() - 24.0).max(0.0);
                                 ui.allocate_ui_with_layout(egui::vec2(text, 0.0), egui::Layout::top_down(egui::Align::Min), |ui| {
-                                    ui.add(egui::Label::new(RichText::new(&e.question).italics().strong()).wrap());
+                                    ui.add(egui::Label::new(RichText::new(&e.question).size(overview::TITLE_SIZE)).wrap());
                                 });
                                 if ui.small_button("×").on_hover_text("Forget this question").clicked() {
                                     event = Some(Event::Forget(i));
                                 }
                             });
+                            ui.add_space(2.0);
                             // References read as the session's name, linked to it.
                             let answer = map_refs(&e.answer, |id| {
                                 Some(match name_of(page.sessions, id) {
@@ -829,11 +809,15 @@ pub fn ui(ui: &mut egui::Ui, page: &Page, question: &mut String, renaming: &mut 
                                 let color = if d.starts_with("Could not") { pal.error } else { pal.add_fg };
                                 ui.add(egui::Label::new(RichText::new(format!("✔ {d}")).small().color(color)).wrap());
                             }
-                            ui.label(RichText::new(ago(e.at, now)).weak().small());
+                            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                                ui.label(RichText::new(ago(e.at, now)).weak().size(10.0));
+                            });
                         });
-                });
-                ui.add_space(4.0);
-            }
+                    });
+                    ui.add_space(overview::GAP);
+                }
+            });
+            overview::stripe(ui, shown.response.rect, accent);
         }
     });
     event
@@ -894,12 +878,18 @@ struct Card<'a> {
     accent: Color32,
 }
 
-/// A session's card. Clicking opens the session, dragging it onto another card moves it there
-/// in the bar, the pencil renames it, and right-click has all of these.
-fn session_card(ui: &mut egui::Ui, card: &Card, renaming: &mut Option<Rename>) -> Option<Event> {
+/// A session's tile, drawn like its tile on the Scopes overview: its name, then in small
+/// print what it is doing and what comes next, and at the bottom how it stands (✔ done,
+/// ✋ waiting, ⚠ blocked) on the left and when it was last touched, or a spinner while it
+/// works, on the right. Clicking opens the session, dragging it onto another tile moves it
+/// there in the bar, the pencil renames it, and right-click has all of these. At least
+/// `height` tall; also returns how tall it would be on its own.
+fn session_tile(ui: &mut egui::Ui, card: &Card, renaming: &mut Option<Rename>, height: f32) -> (Option<Event>, f32) {
     let Card { s, k, count, sessions, status, covered, now, accent } = *card;
     let mut event = None;
-    let pal = theme::palette(ui.visuals());
+    let mut natural = 0.0;
+    let v = ui.visuals().clone();
+    let pal = theme::palette(&v);
     // Working is a live fact: a report's "working" on a session that has stopped is out of
     // date. Its verdict, which has read its newest change, says how it ended instead.
     let state = match (s.running, s.verdict) {
@@ -913,126 +903,142 @@ fn session_card(ui: &mut egui::Ui, card: &Card, renaming: &mut Option<Rename>) -
     // What it did: the report's line, unless the verdict read activity the report hasn't.
     let newer = s.verdict.filter(|v| !s.running && v.at > covered && !v.why.is_empty());
     let status = if newer.is_some() { None } else { status };
-    let state_color = match state {
-        "working" => pal.user,
-        "waiting" => pal.note,
-        "blocked" => pal.error,
-        "done" => pal.add_fg,
-        _ => ui.visuals().weak_text_color(),
+    let mark = match state {
+        "waiting" => Some(("✋ waiting", pal.note)),
+        "blocked" => Some(("⚠ blocked", pal.error)),
+        "done" => Some(("✔ done", pal.add_fg)),
+        "idle" => Some(("idle", v.weak_text_color())),
+        _ => None,
     };
     let editing = renaming.as_ref().is_some_and(|r| r.id == s.id);
     let rename = || Rename { id: s.id.to_owned(), text: s.title.to_owned(), fresh: true };
+    let hover_id = ui.id().with(("orchestration-tile", s.id));
+    let hovered: bool = ui.data(|d| d.get_temp(hover_id)).unwrap_or(false);
     // Sensing before its contents, so the pencil and links on it still get their clicks.
     let shown = ui.scope_builder(egui::UiBuilder::new().id_salt(("orchestration-card", s.id)).sense(Sense::click_and_drag()), |ui| {
-        // Text on it doesn't take the card's clicks and drags.
+        // Text on it doesn't take the tile's clicks and drags.
         ui.style_mut().interaction.selectable_labels = false;
-        egui::Frame::new()
-            .fill(ui.visuals().faint_bg_color)
-            .stroke(Stroke::new(1.0, ui.visuals().widgets.noninteractive.bg_stroke.color))
-            .corner_radius(8.0)
-            .inner_margin(egui::Margin { left: 14, right: 10, top: 8, bottom: 8 })
-            .show(ui, |ui| {
-                ui.set_width(ui.available_width());
-                ui.horizontal(|ui| {
-                    if s.running {
-                        ui.spinner();
+        overview::tile_frame(&v, hovered).show(ui, |ui| {
+            ui.set_width(ui.available_width());
+            let top = ui.min_rect().top();
+            match renaming.as_mut().filter(|r| r.id == s.id) {
+                Some(r) => {
+                    let id = Id::new(("orchestration-rename", s.id));
+                    let edit = egui::TextEdit::singleline(&mut r.text).id(id).font(egui::FontId::proportional(overview::TITLE_SIZE)).desired_width(ui.available_width());
+                    let mut out = edit.show(ui);
+                    if r.fresh {
+                        r.fresh = false;
+                        out.response.request_focus();
+                        let all = CCursorRange::two(CCursor::new(0), CCursor::new(r.text.chars().count()));
+                        out.state.cursor.set_char_range(Some(all));
+                        out.state.store(ui.ctx(), id);
                     }
-                    let title_width = (ui.available_width() - 70.0).max(40.0);
-                    ui.scope(|ui| {
-                        ui.set_max_width(title_width);
-                        match renaming.as_mut().filter(|r| r.id == s.id) {
-                            Some(r) => {
-                                let id = Id::new(("orchestration-rename", s.id));
-                                let mut out = egui::TextEdit::singleline(&mut r.text).id(id).desired_width(title_width).show(ui);
-                                if r.fresh {
-                                    r.fresh = false;
-                                    out.response.request_focus();
-                                    let all = CCursorRange::two(CCursor::new(0), CCursor::new(r.text.chars().count()));
-                                    out.state.cursor.set_char_range(Some(all));
-                                    out.state.store(ui.ctx(), id);
-                                }
-                                if out.response.lost_focus() {
-                                    if !ui.input(|i| i.key_pressed(Key::Escape)) {
-                                        event = Some(Event::Rename(r.id.clone(), r.text.clone()));
-                                    }
-                                    *renaming = None;
-                                }
-                            }
-                            None => {
-                                ui.add(egui::Label::new(RichText::new(s.title).strong()).truncate());
-                                if ui.small_button("✏").on_hover_text("Rename").clicked() {
-                                    *renaming = Some(rename());
-                                }
-                            }
+                    if out.response.lost_focus() {
+                        if !ui.input(|i| i.key_pressed(Key::Escape)) {
+                            event = Some(Event::Rename(r.id.clone(), r.text.clone()));
                         }
-                    });
-                    if !state.is_empty() {
-                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                            let chip = ui.label(RichText::new(state).small().strong().color(state_color));
-                            ui.painter().rect_stroke(chip.rect.expand2(egui::vec2(5.0, 1.0)), 6.0, Stroke::new(1.0, state_color.gamma_multiply(0.7)), StrokeKind::Outside);
-                        });
-                    }
-                });
-                if let Some(tool) = s.tool.filter(|_| s.running) {
-                    ui.label(RichText::new(format!("⚙ {tool}…")).monospace().weak().small());
-                }
-                if let Some(v) = newer {
-                    ui.label(&v.why);
-                }
-                if let Some(st) = status {
-                    let mut open = |id: Option<String>| {
-                        if let Some(id) = id {
-                            event = Some(Event::Open(id));
-                        }
-                    };
-                    if !st.now.is_empty() {
-                        open(linked(ui, &st.now, sessions, |t| RichText::new(t)));
-                    }
-                    if !st.next.is_empty() {
-                        open(linked(ui, &format!("Next: {}", st.next), sessions, |t| RichText::new(t).weak()));
+                        *renaming = None;
                     }
                 }
-                if let Some((done, total)) = s.checklist.filter(|&(_, t)| t > 0) {
+                None => {
                     ui.horizontal(|ui| {
-                        ui.label(RichText::new(format!("Goal {done}/{total}")).small().weak());
-                        ui.add(egui::ProgressBar::new(done as f32 / total as f32).desired_height(5.0).fill(accent.gamma_multiply(0.8)));
+                        let name = (ui.available_width() - 22.0).max(20.0);
+                        ui.scope(|ui| {
+                            ui.set_max_width(name);
+                            ui.add(egui::Label::new(RichText::new(s.title).size(overview::TITLE_SIZE)).truncate());
+                        });
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            let pencil = egui::Button::new(RichText::new("✏").small()).frame(false);
+                            if ui.add_visible(hovered, pencil).on_hover_text("Rename").clicked() {
+                                *renaming = Some(rename());
+                            }
+                        });
                     });
                 }
-                let mut meta = vec![ago(s.modified, now)];
-                if s.queued > 0 {
-                    meta.push(format!("+{} queued", s.queued));
+            }
+            ui.add_space(2.0);
+            if let Some(tool) = s.tool.filter(|_| s.running) {
+                ui.label(RichText::new(format!("⚙ {tool}…")).monospace().weak().small());
+            }
+            let mut said = false;
+            if let Some(v) = newer {
+                ui.add(egui::Label::new(RichText::new(&v.why).small()).wrap());
+                said = true;
+            }
+            if let Some(st) = status {
+                let mut open = |id: Option<String>| {
+                    if let Some(id) = id {
+                        event = Some(Event::Open(id));
+                    }
+                };
+                if !st.now.is_empty() {
+                    open(linked(ui, &st.now, sessions, |t| RichText::new(t).small()));
+                    said = true;
                 }
-                ui.label(RichText::new(meta.join(" · ")).weak().small());
-            })
+                if !st.next.is_empty() {
+                    open(linked(ui, &format!("Next: {}", st.next), sessions, |t| RichText::new(t).small().weak()));
+                    said = true;
+                }
+            }
+            if !said {
+                ui.label(RichText::new(if s.running { "Working…" } else { "Not in the report yet." }).weak().small());
+            }
+            if let Some((done, total)) = s.checklist.filter(|&(_, t)| t > 0) {
+                ui.horizontal(|ui| {
+                    ui.label(RichText::new(format!("Goal {done}/{total}")).weak().small());
+                    ui.add(egui::ProgressBar::new(done as f32 / total as f32).desired_height(5.0).fill(accent.gamma_multiply(0.8)));
+                });
+            }
+            // The bottom line sits at the bottom of the tile, level with its neighbours'.
+            natural = overview::level_bottom(ui, top, height);
+            let line = egui::vec2(ui.available_width(), ui.spacing().interact_size.y);
+            ui.allocate_ui_with_layout(line, egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                if s.running {
+                    ui.label(RichText::new("working").weak().small());
+                    ui.add(egui::Spinner::new().size(12.0));
+                } else {
+                    ui.label(RichText::new(last_interaction(s.modified, now)).weak().size(10.0));
+                }
+                if s.queued > 0 {
+                    ui.label(RichText::new(format!("+{} queued", s.queued)).weak().small());
+                }
+                if let Some((text, color)) = mark {
+                    ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
+                        ui.label(RichText::new(text).small().color(color));
+                    });
+                }
+            });
+        })
     });
-    let card = shown.response;
-    // The card's own stripe, in its state's color.
-    let rect = shown.inner.response.rect;
-    let stripe = egui::Rect::from_min_max(rect.min + egui::vec2(4.0, 8.0), egui::pos2(rect.min.x + 7.0, rect.max.y - 8.0));
-    ui.painter().rect_filled(stripe, 1.5, state_color);
-
-    // Dragged onto another card: it takes that one's place.
-    if card.drag_started() && !editing {
-        card.dnd_set_drag_payload(s.id.to_owned());
+    let tile = shown.response;
+    let rect = tile.rect;
+    if tile.contains_pointer() != hovered {
+        ui.data_mut(|d| d.insert_temp(hover_id, tile.contains_pointer()));
+        ui.ctx().request_repaint();
     }
-    if card.dragged()
+
+    // Dragged onto another tile: it takes that one's place.
+    if tile.drag_started() && !editing {
+        tile.dnd_set_drag_payload(s.id.to_owned());
+    }
+    if tile.dragged()
         && let Some(pos) = ui.ctx().pointer_interact_pos()
     {
         let painter = ui.ctx().layer_painter(egui::LayerId::new(egui::Order::Tooltip, Id::new("orchestration-drag")));
         painter.text(pos + egui::vec2(14.0, 0.0), egui::Align2::LEFT_CENTER, s.title, egui::FontId::proportional(14.0), pal.user);
     }
-    if card.dnd_hover_payload::<String>().is_some_and(|from| *from != s.id) {
-        ui.painter().rect_stroke(rect, 8.0, Stroke::new(2.0, accent), StrokeKind::Outside);
+    if tile.dnd_hover_payload::<String>().is_some_and(|from| *from != s.id) {
+        ui.painter().rect_stroke(rect, 10.0, Stroke::new(2.0, accent), StrokeKind::Outside);
     }
-    if let Some(from) = card.dnd_release_payload::<String>().filter(|from| **from != s.id) {
+    if let Some(from) = tile.dnd_release_payload::<String>().filter(|from| **from != s.id) {
         event = Some(Event::Move((*from).clone(), k));
     }
 
-    let card = card.on_hover_cursor(egui::CursorIcon::PointingHand).on_hover_text("Open this session · drag onto another to reorder");
-    if card.clicked() && !editing {
+    let tile = tile.on_hover_cursor(egui::CursorIcon::PointingHand).on_hover_text("Open this session · drag onto another to reorder");
+    if tile.clicked() && !editing && event.is_none() {
         event = Some(Event::Open(s.id.to_owned()));
     }
-    card.context_menu(|ui| {
+    tile.context_menu(|ui| {
         let mut chosen = None;
         if ui.button("Open").clicked() {
             chosen = Some(Event::Open(s.id.to_owned()));
@@ -1053,8 +1059,7 @@ fn session_card(ui: &mut egui::Ui, card: &Card, renaming: &mut Option<Rename>) -
             ui.close();
         }
     });
-    ui.add_space(8.0);
-    event
+    (event, natural)
 }
 
 fn plural(n: usize, word: &str) -> String {

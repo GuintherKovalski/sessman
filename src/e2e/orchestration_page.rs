@@ -23,9 +23,9 @@ fn on_page() -> Scope {
 fn the_workspace_bubble_opens_the_page_which_writes_its_first_report() {
     let mut s = on_page();
     assert!(s.sees("42%"));
-    assert!(s.sees("NEEDS YOU"));
+    assert!(s.sees("⚠ Review "), "what needs the developer, in the overview's ⚠ style");
     assert!(s.sees("Fake next step"));
-    assert!(s.sees("waiting"), "the first session's state chip");
+    assert!(s.sees("✋ waiting"), "the first session's state, at the bottom of its tile");
     assert!(s.sees("fake doing"));
     assert!(s.sees("Next: fake step"));
     // [[1]] reads as the newest session's name.
