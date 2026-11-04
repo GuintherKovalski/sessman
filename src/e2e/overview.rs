@@ -23,7 +23,7 @@ fn each_workspace_shows_its_scope_and_what_each_session_does_and_needs() {
     s.wait_to_see("Fake scope");
     s.wait_to_see("Fake doing");
     assert!(s.sees("⚠ Fake decision"), "what it needs from the developer");
-    assert!(s.sees("last interaction 5 min ago"));
+    assert!(s.sees("· 5 min ago"));
     assert!(s.sees("No sessions yet. Drag some onto its tab."), "an empty workspace's card");
     assert!(s.sees("1 session not in a scope."));
     assert!(!s.sees("Finish session"), "nothing is old enough");
@@ -43,8 +43,8 @@ fn every_session_is_listed_newest_first() {
         .launch();
     s.frames(10);
     assert!(s.sees("3 sessions"));
-    assert!(s.shows_before("last interaction 1 min ago", "last interaction 8 min ago"));
-    assert!(s.shows_before("last interaction 8 min ago", "last interaction 15 min ago"));
+    assert!(s.shows_before("· 1 min ago", "· 8 min ago"));
+    assert!(s.shows_before("· 8 min ago", "· 15 min ago"));
 }
 
 #[test]
@@ -101,7 +101,7 @@ fn the_workspace_with_the_latest_idle_session_comes_first() {
         .launch();
     s.frames(10);
     assert!(s.shows_before("beta prompt", "alpha prompt"));
-    assert!(s.shows_before("last interaction 1 min ago", "last interaction 15 min ago"), "Play's card, though its tab is second");
+    assert!(s.shows_before("· 1 min ago", "· 15 min ago"), "Play's card, though its tab is second");
 }
 
 #[test]
@@ -117,7 +117,7 @@ fn clicking_a_card_name_opens_its_workspace() {
 fn clicking_a_session_opens_it_in_its_workspace() {
     let mut s = two_workspaces();
     s.wait_to_see("Fake doing");
-    s.click("last interaction 3 min ago");
+    s.click("· 3 min ago");
     assert!(s.is_selected("Play"), "its workspace's tab");
     assert!(s.sees("Reply to beta prompt"), "the session itself");
     assert!(!s.sees("alpha prompt about ABC-123"));
@@ -131,7 +131,7 @@ fn a_session_idle_too_long_is_red_and_can_be_finished() {
         .workspaces(&[("Work", &["s-old", "s-new"])])
         .launch();
     s.frames(10);
-    assert!(s.sees("last interaction 1 d ago"));
+    assert!(s.sees("· 1 d ago"));
     s.click("Finish session");
     s.wait_until("it left the workspace", |s| s.env.config_json("workspaces.json").to_string().contains("s-new") && !s.env.config_json("workspaces.json").to_string().contains("s-old"));
     assert!(s.sees("1 session not in a scope."), "the session itself is kept");

@@ -76,19 +76,29 @@ it to zoom. At its right end, a dimmed **⚙** opens Settings.
 In "All sessions", the main area shows an overview of the workspaces until a session is
 opened; clicking "All sessions" again comes back to it.
 - One card per workspace, the one whose session went idle most recently first (sessions
-  still working don't count; workspaces with none idle come last), in its tab's color (a dot by the name, a stripe down the left
-  edge, a light tint). Click the name to open the workspace. Under it, its **scope of work**
-  in one short sentence, and up to 3 Jira tickets, epics and parent tickets first (only keys
+  still working don't count; workspaces with none idle come last). Its color shows only as a
+  stripe down the card's left edge; cards are full width, with a grey border and no fill.
+  Click the name to open the workspace. Under it, its **scope of work** in one short sentence,
+  in a larger font, and up to 3 Jira tickets, epics and parent tickets first (only keys
   that really appear in the sessions or the branch; with a Jira URL in Settings they link to
   the ticket).
-- Then **every session** of the workspace, strictly newest first. Each shows its name, what
-  it is doing, and, in yellow (⚠), any decision or action it needs from you. At its bottom
-  right: `last interaction 5 min ago`, or a spinner while Claude works in it.
-- A session with no activity for 24 hours (Settings → Overview, 0 = never) shows that time in
-  red, with **Finish session**: it leaves the workspace (the session itself is kept).
-- A session whose run ended after you last had it open is outlined in green and marked
+- Then **every session** of the workspace, strictly newest first, as a grid of equal
+  tiles read row by row. Every card has the same number of columns: as many as fit when each
+  is as wide as the longest short session name shown, at least 3. Short names (at most 4
+  words, as Haiku names sessions) never wrap or get cut; a longer one, the first line of a
+  prompt not renamed yet, doesn't count and is cut at the tile's edge. Tiles in a row
+  are the same height. They are drawn like the sessions in the list
+  (same fill, grey border and roundness). Each shows its name in a larger font, then
+  in small print what it is doing and, in bold after ⚠, any decision or action it needs from
+  you. At its bottom right, small: `14:32 · 5 min ago` (the time as the list shows it), or a spinner while Claude works in
+  it.
+- A session with no activity for 24 hours (Settings → Overview, 0 = never) shows **Finish
+  session**: it leaves the workspace (the session itself is kept).
+- A session whose run ended after you last had it open is marked
   **✓ Finished** (it is not moved: the order stays newest first); opening it clears the mark.
   What was last seen is kept in `state.json`.
+- Only two small marks are colored, in the colors the orchestration page uses for the same
+  states: what a session needs from you in its gold, **✓ Finished** in its green.
 - Click a session to open it, in its workspace's tab.
 - What the helper model made of each workspace is kept in `~/.config/scope/overview.json`.
   It is written when missing, then again (a few minutes apart at most) for the sessions with
