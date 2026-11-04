@@ -103,3 +103,36 @@ fn model_and_effort_picked_for_a_new_session_go_with_all_its_prompts() {
         assert!(args.windows(2).any(|w| w[0] == "--effort" && w[1] == "high"), "{args:?}");
     }
 }
+
+#[test]
+fn the_rest_of_the_setup_can_be_changed_for_a_new_session_too() {
+    let s = setup().session(session("s-a", "alpha prompt", 100));
+    let home = s.env().home.clone();
+    std::fs::create_dir_all(home.join(".claude/skills/notes")).unwrap();
+    std::fs::write(home.join(".claude/skills/notes/SKILL.md"), "").unwrap();
+    std::fs::write(home.join(".claude/settings.json"), r#"{"hooks":{"Stop":[{"hooks":[{}]}]},"mcpServers":{"jira":{}}}"#).unwrap();
+    let folder = s.env().folder("newproj");
+    let mut s = s.workspaces_json(json!({"list": [{"name": "Work", "sessions": ["s-a"], "folder": folder}]})).launch();
+    s.click_first("WORK");
+    s.click("+  New session");
+    s.click("default (asks) (as set)");
+    s.click("plan");
+    s.click("thinking off (as set)");
+    s.click("thinking on");
+    s.click("1 server (as set)");
+    s.click("no MCP servers");
+    s.click("1 hook event (as set)");
+    s.click("no hooks");
+    s.click("1 skill (as set)");
+    s.click("no skills or commands");
+    s.click("all of them (as set)");
+    s.click("your settings only");
+    s.send("first");
+    s.wait_to_see("Echo: first");
+    let call = s.env.calls().into_iter().rfind(|c| c["args"].as_array().unwrap().iter().any(|a| a == "--session-id")).unwrap();
+    let args: Vec<String> = call["args"].as_array().unwrap().iter().map(|a| a.as_str().unwrap().to_owned()).collect();
+    let has = |k: &str, v: &str| args.windows(2).any(|w| w[0] == k && w[1] == v);
+    assert!(has("--permission-mode", "plan") && has("--setting-sources", "user"), "{args:?}");
+    assert!(has("--settings", r#"{"alwaysThinkingEnabled":true,"disableAllHooks":true}"#), "{args:?}");
+    assert!(args.contains(&"--strict-mcp-config".to_owned()) && args.contains(&"--disable-slash-commands".to_owned()), "{args:?}");
+}

@@ -13,11 +13,62 @@ use std::sync::{Arc, Mutex, RwLock};
 pub struct Choice {
     pub model: String,
     pub effort: String,
+    /// `--permission-mode`.
+    pub permissions: String,
+    /// "on" / "off": `alwaysThinkingEnabled`.
+    pub thinking: String,
+    /// `--setting-sources`, e.g. "user" or "project,local".
+    pub sources: String,
+    /// "none": no MCP servers.
+    pub mcp: String,
+    /// "off": no skills or slash commands.
+    pub slash: String,
+    /// `--agent`: the agent the session runs as.
+    pub agent: String,
+    /// "off": no hooks.
+    pub hooks: String,
+    /// Plugins to switch off, comma-separated.
+    pub plugins: String,
 }
 
 impl Choice {
     pub fn is_empty(&self) -> bool {
-        self.model.is_empty() && self.effort.is_empty()
+        *self == Self::default()
+    }
+
+    /// The arguments this choice adds to a run.
+    pub fn args(&self) -> Vec<String> {
+        let mut args: Vec<String> = Vec::new();
+        let mut pair = |k: &str, v: &str| {
+            if !v.is_empty() {
+                args.extend([k.to_owned(), v.to_owned()]);
+            }
+        };
+        pair("--effort", &self.effort);
+        pair("--permission-mode", &self.permissions);
+        pair("--setting-sources", &self.sources);
+        pair("--agent", &self.agent);
+        let mut settings = serde_json::Map::new();
+        if !self.thinking.is_empty() {
+            settings.insert("alwaysThinkingEnabled".into(), Value::Bool(self.thinking == "on"));
+        }
+        if self.hooks == "off" {
+            settings.insert("disableAllHooks".into(), Value::Bool(true));
+        }
+        let off: serde_json::Map<String, Value> = self.plugins.split(',').map(str::trim).filter(|p| !p.is_empty()).map(|p| (p.to_owned(), Value::Bool(false))).collect();
+        if !off.is_empty() {
+            settings.insert("enabledPlugins".into(), Value::Object(off));
+        }
+        if !settings.is_empty() {
+            args.extend(["--settings".into(), Value::Object(settings).to_string()]);
+        }
+        if self.mcp == "none" {
+            args.extend(["--strict-mcp-config".into(), "--mcp-config".into(), r#"{"mcpServers":{}}"#.into()]);
+        }
+        if self.slash == "off" {
+            args.push("--disable-slash-commands".into());
+        }
+        args
     }
 }
 
@@ -158,9 +209,7 @@ pub fn send_args(c: &Claude, choice: &Choice, id: &str, prompt: &str, new: bool)
     if !model.is_empty() {
         args.extend(["--model".into(), model.clone()]);
     }
-    if !choice.effort.is_empty() {
-        args.extend(["--effort".into(), choice.effort.clone()]);
-    }
+    args.extend(choice.args());
     args.extend(["--output-format", "stream-json", "--verbose", "--include-partial-messages"].map(String::from));
     // A prompt with images goes in on stdin, as a message with image blocks.
     if crate::images::has_images(prompt) {
@@ -576,6 +625,28 @@ mod tests {
     }
 
     #[test]
+    fn a_sessions_choice_becomes_its_flags() {
+        assert!(Choice::default().args().is_empty());
+        let c = Choice {
+            permissions: "plan".into(),
+            thinking: "on".into(),
+            sources: "user".into(),
+            mcp: "none".into(),
+            slash: "off".into(),
+            agent: "reviewer".into(),
+            hooks: "off".into(),
+            plugins: "a@m,b@m".into(),
+            ..Default::default()
+        };
+        let args = c.args();
+        let has = |k: &str, v: &str| args.windows(2).any(|w| w[0] == k && w[1] == v);
+        assert!(has("--permission-mode", "plan") && has("--setting-sources", "user") && has("--agent", "reviewer"));
+        assert!(has("--settings", r#"{"alwaysThinkingEnabled":true,"disableAllHooks":true,"enabledPlugins":{"a@m":false,"b@m":false}}"#), "{args:?}");
+        assert!(has("--strict-mcp-config", "--mcp-config") && has("--mcp-config", r#"{"mcpServers":{}}"#));
+        assert!(args.contains(&"--disable-slash-commands".to_owned()));
+    }
+
+    #[test]
     fn send_args_follow_settings() {
         let mut c = Claude::default();
         let none = Choice::default();
@@ -587,7 +658,7 @@ mod tests {
         let args = send_args(&c, &none, "id2", "hi", true);
         assert_eq!(args[..4], ["--session-id", "id2", "--model", "opus"]);
         // A session's own choice wins over Settings, and adds its effort.
-        let mine = Choice { model: "fable".into(), effort: "high".into() };
+        let mine = Choice { model: "fable".into(), effort: "high".into(), ..Default::default() };
         let args = send_args(&c, &mine, "id3", "hi", false);
         assert_eq!(args[..6], ["--resume", "id3", "--model", "fable", "--effort", "high"]);
         let mut s = crate::settings::Settings::default();
