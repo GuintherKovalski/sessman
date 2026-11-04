@@ -12,11 +12,12 @@ there. Each change is specified first with Spec Kit (see [How the project is bui
 A thin bar runs along the top of the window, above everything else. The macOS close /
 minimize / zoom buttons sit in it (the content runs under a transparent title bar), so they
 never cover the panels, also in full screen. Drag the bar to move the window; double-click
-it to zoom.
+it to zoom. At its right end, a dimmed **⚙** opens Settings.
 
 ```
+ ● ● ●                                                                         ⚙
 ┌──────────────────┬──────────────────────────────────────┬─────────────────────┐
-│ All │ A │ B │ +  │ ┌──────────────────────────────────┐ │ Changes │ Info  ☾☀▣ │
+│ All │ A │ B │ +  │ ┌──────────────────────────────────┐ │ Changes │ Info      │
 │                  │ │ You  (pinned prompt)             │ │ src/app.rs          │
 │ [+ New session ] │ └──────────────────────────────────┘ │ - old line          │
 │▌Session title    │ You                                  │ + new line          │
@@ -40,7 +41,14 @@ it to zoom.
   generated title, or your first prompt) and its project folder. The list refreshes on its
   own (every 10 s and after each reply), so sessions started elsewhere show up by themselves.
   A session that is working shows ⏳, and `+N queued` when prompts are waiting for it.
-- **⚙** (next to the search, or **Cmd+,**) opens the Settings page in the main area.
+  One that has stopped shows how its work ended, beside its time: **✔ done**, **✋ needs you**
+  or **⚠ blocked** (the reason on hover; `scope list` adds `[done]`, `[needs you]`,
+  `[blocked]`). After each run ends, the helper model reads the end of the conversation and
+  decides; scope also checks, a couple at a time, the workspace sessions changed in the last 3
+  days that no verdict has read (runs that ended while it was closed, or in a terminal). Any
+  newer activity drops the tag until it is checked again. Settings → Tag finished sessions
+  turns it off.
+- **⚙** (right end of the top bar, or **Cmd+,**) opens the Settings page in the main area.
 - **Search** (bottom of the panel): typing filters the list (within the open tab). Name
   matches come first, then goal summaries, then the conversations' own text (with a snippet
   under the name). Close spellings still match names and goals. **Enter** asks Claude Haiku
@@ -51,7 +59,9 @@ it to zoom.
 - **Double-click** a session name to rename it, like a folder: the name is selected, type the
   new one, **Enter** (or click elsewhere) saves, **Escape** cancels. Saving an empty name
   brings back the original one. Names are scope's own; Claude Code keeps its own title.
-- **Tabs** at the top: "All sessions", one tab per workspace, and **+**. Selecting a workspace tab
+- **Tabs** at the top: **SCOPES** (all sessions), one tab per workspace, and **+**. A
+  workspace's name always shows in upper case (in its tab, its overview card, its
+  orchestration page and the Move to menu); it is kept as typed, and found by it. Selecting a workspace tab
   opens the session that was last open in it (or its newest session; an empty workspace shows
   an empty main area); each remembers its last session across restarts. "All sessions" opens
   on the workspaces overview.
@@ -68,25 +78,37 @@ it to zoom.
     Settings; the sessions themselves are untouched).
   - A session belongs to at most one workspace; "All sessions" always shows everything.
   - Every workspace has its own color (no two share one). Its tab is tinted with it, and in
-    "All sessions" each session in a workspace gets a colored stripe and tint (the ▌ above).
+    "All sessions" each session in a workspace gets a bar in its color down its left edge and
+    is otherwise drawn like any other (the ▌ above).
 
 ### Middle: workspaces overview (All sessions)
 In "All sessions", the main area shows an overview of the workspaces until a session is
 opened; clicking "All sessions" again comes back to it.
 - One card per workspace, the one whose session went idle most recently first (sessions
-  still working don't count; workspaces with none idle come last), in its tab's color (a dot by the name, a stripe down the left
-  edge, a light tint). Click the name to open the workspace. Under it, its **scope of work**
-  in one short sentence, and up to 3 Jira tickets, epics and parent tickets first (only keys
+  still working don't count; workspaces with none idle come last). Its color shows only as a
+  stripe down the card's left edge and on its name, which is drawn exactly as its tab at the
+  top left; cards are full width, with a grey border and no fill. Click the name to open the
+  workspace. Under it, its **scope of work** in one short sentence,
+  in a larger font, and up to 3 Jira tickets, epics and parent tickets first (only keys
   that really appear in the sessions or the branch; with a Jira URL in Settings they link to
   the ticket).
-- Then **every session** of the workspace, strictly newest first. Each shows its name, what
-  it is doing, and, in yellow (⚠), any decision or action it needs from you. At its bottom
-  right: `last interaction 5 min ago`, or a spinner while Claude works in it.
-- A session with no activity for 24 hours (Settings → Overview, 0 = never) shows that time in
-  red, with **Finish session**: it leaves the workspace (the session itself is kept).
-- A session whose run ended after you last had it open is outlined in green and marked
-  **✓ Finished** (it is not moved: the order stays newest first); opening it clears the mark.
+- Then **every session** of the workspace, strictly newest first, as a grid of equal
+  tiles read row by row. Every card has the same number of columns: as many as fit when each
+  is as wide as the longest short session name shown, at least 3. Short names (at most 4
+  words, as Haiku names sessions) never wrap or get cut; a longer one, the first line of a
+  prompt not renamed yet, doesn't count and is cut at the tile's edge. Tiles in a row
+  are the same height. They are drawn like the sessions in the list
+  (same fill, grey border and roundness). Each shows its name in a larger font, then
+  in small print what it is doing and, in bold after ⚠, any decision or action it needs from
+  you. At its bottom right, small: `14:32 · 5 min ago` (the time as the list shows it), or a spinner while Claude works in
+  it.
+- A session with no activity for 24 hours (Settings → Overview, 0 = never) shows **Finish
+  session**: it leaves the workspace (the session itself is kept).
+- A session whose run ended after you last had it open is marked
+  **✔ Finished** (it is not moved: the order stays newest first); opening it clears the mark.
   What was last seen is kept in `state.json`.
+- Only two small marks are colored, in the colors the orchestration page uses for the same
+  states: what a session needs from you in its gold, **✔ Finished** in its green.
 - Click a session to open it, in its workspace's tab.
 - What the helper model made of each workspace is kept in `~/.config/scope/overview.json`.
   It is written when missing, then again (a few minutes apart at most) for the sessions with
@@ -101,7 +123,9 @@ opened; clicking "All sessions" again comes back to it.
   workspace opens on it too): overall **progress**, a summary, **Needs you**, **Next**, then a
   card per session with its live state (working spinner and tool, queued prompts, last activity,
   goal checklist) and what the report says (working / waiting / blocked / done / idle, what it is
-  doing, its next step). Click a card to open the session.
+  doing, its next step). Click a card to open the session. Working is a live fact: a stopped
+  session's card takes its state from its tag (and the tag's reason when the report hasn't read
+  its last activity yet), never from a report written while it was still running.
 - The report is written by the orchestration model (the helper model unless set) from the
   orchestration harness in Settings. Updates are incremental: the previous report plus only the
   sessions with new activity. It updates on its own when missing, or every N minutes (Settings)
@@ -113,6 +137,14 @@ opened; clicking "All sessions" again comes back to it.
 - Wherever the orchestrator mentions a session (summary, Needs you, Next, the cards and its
   answers), it reads as the session's current name and is a link: click it to open the session.
 - Saved in `~/.config/scope/orchestration.json`, by workspace name.
+- **Report / Processes** tabs at the top of the page. **Processes** (`Processes · N` when
+  something runs) lists what the workspace's sessions are running right now, refreshed every
+  2 s: one card per working session (click its name to open it) with its `claude` and, as a
+  tree under it, everything it started: **Bash** commands (with Claude's description of each),
+  **MCP** servers, **search** (ripgrep for Grep / Glob) and any other process. Each row shows
+  CPU (of one core), RAM, how long it has been running and, for a Bash command, how much of
+  its time limit is left (2 min unless the call set one; a background command has none).
+  That limit is the only end known in advance: how far a command itself has got isn't.
 
 ### Middle: conversation and file tabs
 - When a file is open, a tab bar appears on top: **Main** (the conversation) and one tab per
@@ -124,8 +156,12 @@ opened; clicking "All sessions" again comes back to it.
 - **File tabs belong to their session.** Opening another session shows only its own tabs;
   coming back brings yours back as they were (active tab, scroll position, Rendered / Source,
   the Changes filter, and what you were typing).
-- **Click anywhere** in the main area to put the cursor in the prompt input, like a terminal.
-  Opening a session also focuses it.
+- **Click anywhere** else in the main area to put the cursor in the prompt input, like a
+  terminal. Opening a session also focuses it.
+- **Click a message** in the conversation to pick it (outlined): the conversation then has the
+  keyboard, and **Up / Down** move to the previous / next message, scrolling its start to the
+  top, to read back through a long session one message at a time. Dragging still selects text.
+  **Esc**, typing, or a click elsewhere hands the keyboard back to the input (typing goes in).
 - **Prompt input** at the bottom, styled like a terminal line (`>` prompt, monospace). With it
   focused:
   - It grows **upwards** as you type, up to 10 lines (a setting), then scrolls; the
@@ -176,12 +212,15 @@ opened; clicking "All sessions" again comes back to it.
   aligned columns, scroll sideways when wide). Tool calls are a small dimmed line
   (`⚙ Read · Edit`). Only messages near the visible area are drawn, so long sessions scroll
   smoothly.
+- A **copy** button (two overlapping squares) at the top right of every You / Claude card copies the whole message as its
+  Markdown source (Claude's without its tool lines); it shows a check mark for a moment after.
 
 ### Right: Changes and Info tabs
 - **Changes**: one card per changed file, in order of its first change: file name, folder,
   and `+added -removed` counts, then each edit as diff hunks with syntax highlighting, green /
   red tinted rows for added / removed lines, and unchanged stretches collapsed to 3 lines of
-  context (`⋮` marks a gap). At the bottom, **Files** lists every changed file:
+  context (`⋮` marks a gap). At the bottom, **Files** lists every changed file
+  with its folder (relative to the session's, in full if it's outside it):
   - **click** a file (or a card's header) to show only its changes; click again or
     **Show all** to see everything;
   - **double-click** to open it in the main area (see below).
@@ -223,6 +262,12 @@ the settings; each changed setting has a ↺ to reset it. Changes apply and save
   notify when a run finishes while scope is in the background.
 - **Keyboard shortcuts** (a list) and **About** (version, config folder with Open in Finder,
   status line).
+- **Updates** (under About): scope looks for a newer GitHub release at start and every 12 hours
+  (only when it runs as an installed scope.app; off with *Check for updates automatically*).
+  When there is one, the top bar shows *scope X is available* on the right, which opens
+  Settings; **Install X and restart** downloads the release's `.zip`, checks its signature
+  (same Developer ID team as the running app), swaps it in place of scope.app and restarts
+  into it. Quitting doesn't end the sessions scope runs; the new scope picks them up.
 
 ### Restarting
 Closing and opening scope brings everything back: window size and position, panel widths,
@@ -230,6 +275,14 @@ the input's size, the workspace tab and open session, every session's file tabs,
 positions, drafts and queued prompts (queues come back paused), the right panel tab and the
 search text. Sessions or files that no longer exist are skipped; a damaged state file is
 moved aside (`state.json.bad`) and the app starts fresh.
+
+### Several windows
+Every scope running on the same config folder (two windows, or one started while another
+runs) shows the same workspaces (members, order, names, colors), session names, goals,
+settings, overviews and orchestrations: what one saves, the others take within half a second,
+without a restart. A change is made on top of what the others saved, so two windows never
+undo each other's work. `scope` commands are run by whichever window takes them first, once.
+What each window shows (its open tab and session, panels, drafts) stays its own.
 
 ## How it works
 
@@ -242,6 +295,7 @@ moved aside (`state.json.bad`) and the app starts fresh.
 | Sending a prompt | Runs `claude -p [extra args] --resume <session-id> [--model <m>] --output-format stream-json --verbose --include-partial-messages "<prompt>"` in the session's folder, in its own process group, in the background; its streamed lines update the open conversation as they arrive. |
 | Images in prompts | Kept in `~/.config/scope/images/`, named after their data, and written in the prompt as `[image:<name>]`. A prompt with images goes to `claude -p --input-format stream-json` on stdin, as one user message of text and image blocks in order. Claude Code keeps them in the session file; reading it back turns them into the same markers (and saves the files of images pasted elsewhere). Cmd+V is seen through an AppKit key monitor (egui only hears about pastes with text); the image comes from the macOS pasteboard. |
 | Runs scope did not start | Every 2 s `ps` lists `claude -p` processes on a listed session (`--resume` / `--session-id <id>`) that aren't scope's own children: runs a scope left going when it quit (`claude` finishes and saves its reply with no one reading its output), or ones another scope or a terminal started. Each shows as working; its steps are read from the session file as Claude saves them (whole steps, no letter-by-letter text), until its process ends. Stop, the queue and notifications work as for scope's own runs. So quitting or restarting scope loses no run. |
+| Processes tab | Every 2 s while the orchestration page is open, `ps -axww -o pid,ppid,pgid,%cpu,rss,etime,args`. A session's `claude` is one with `--resume` / `--session-id <id>` of a session in the workspace (side questions don't count); under it, its descendants and what kept its process group. A Bash command is the `eval '…'` in Claude Code's shell (it sources `shell-snapshots/`), matched to its `Bash` call in the session file for the description, `timeout` and `run_in_background`. |
 | Stopping (Ctrl+C) | SIGINT to that process group (SIGKILL after 2 s). Claude Code saves the partial reply and an `[Request interrupted by user]` marker, shown as ⏹ Interrupted. |
 | Queue | Kept per session in memory and in `state.json`; the next prompt is sent when a run ends normally. |
 | Workspaces overview | `claude -p --model <helper> --no-session-persistence` with a digest of the workspace's 8 newest sessions (title, goal, conversation), the git branch and the Jira keys found in them; it answers in JSON with purpose, now, heading and tickets. |
@@ -250,6 +304,7 @@ moved aside (`state.json.bad`) and the app starts fresh.
 | Model, context tokens | The latest reply's `model` and `usage` in the session file. |
 | Context size, usage limits | Claude Code's status-line data, saved by `scope statusline` to `~/.config/scope/status/`. Without it, the size is inferred from the model. |
 | Search | An in-memory index (names, goals, conversation text) rebuilt in the background for changed files every 10 s. Enter-search: `claude -p --model haiku --no-session-persistence` with a numbered list of recent sessions (name, goal, first prompts). |
+| Session tags | `claude -p --model haiku --no-session-persistence` with the end of the conversation (about 4000 characters) after each run, and in a sweep every 10 s (two at a time) for workspace sessions with unjudged activity from the last 3 days that have been quiet for a minute. Saved by session id, with the change it read, to `~/.config/scope/verdicts.json` (shared with other scope windows, like names); a failed check isn't retried until the session changes again. |
 | Goal and checklist | `claude -p --model haiku --no-session-persistence` with a digest of the conversation, on request; saved (with your ticks) to `~/.config/scope/goals.json`. |
 | Goal questions | `claude -p --resume <id> --fork-session --no-session-persistence "<question>"`: full context, original session untouched, nothing saved. |
 | Settings (theme included) | scope's own file: `~/.config/scope/settings.json`. |
@@ -286,12 +341,16 @@ src/
 ├── markdown.rs    Markdown rendering: tables and tool lines drawn by scope, the rest by egui_commonmark
 ├── theme.rs       the colors for dark and light
 ├── settings.rs    the Settings page, its file, and the config folder
+├── shared.rs      config files every scope on one config folder shares: refresh, save, watch
 ├── state.rs       what is restored after a restart; per-session views (file tabs, draft)
 ├── queue.rs       prompts waiting for a session's run
+├── processes.rs the orchestration page's Processes tab: ps, process trees, Bash calls, time limits
 ├── refine.rs      Refine prompt: the request to the helper model and its reply
 ├── runner.rs      runs `claude -p` (streaming send, stop, helper questions), folder picker, notifications
 ├── search.rs      session search: background index, matching and ranking, Haiku search format
 ├── status.rs      `scope statusline`: saves Claude Code's status data; usage limits
+├── verdict.rs     session tags: done / needs you / blocked, judged by the helper model
+├── update.rs      finds newer releases on GitHub, installs one in place of scope.app
 └── workspaces.rs  workspaces: create, move, remove, delete, load/save
 ```
 

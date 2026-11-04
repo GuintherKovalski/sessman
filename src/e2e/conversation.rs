@@ -79,3 +79,47 @@ fn the_mic_offers_to_download_the_speech_model_first() {
     s.click("Not now");
     assert!(!s.sees("Download the speech model?"));
 }
+
+/// A session whose replies are each taller than the window: "line k of rN", 40 lines each.
+fn long_turns() -> Scope {
+    let reply = |n: usize| (1..=40).map(|k| format!("line {k} of r{n}")).collect::<Vec<_>>().join("\n\n");
+    let mut f = session("s-long", "prompt one", 100).reply(&reply(1));
+    for n in 2..=4 {
+        f = f.turn(&format!("prompt {n}"), &reply(n));
+    }
+    let mut s = setup().session(f).launch();
+    s.click("prompt one");
+    s.settle();
+    s
+}
+
+/// Whether `label` shows near the top of the conversation (below the tabs and the pinned prompt).
+fn at_top(s: &Scope, label: &str) -> bool {
+    s.sees(label) && (20.0..260.0).contains(&s.top_of(label))
+}
+
+#[test]
+fn arrows_move_through_messages_once_the_conversation_is_clicked() {
+    let mut s = long_turns();
+    assert!(s.sees("line 40 of r4"), "it opens at the bottom");
+    s.click("line 40 of r4");
+    assert_eq!(s.prompt(), "", "the click didn't go to the input");
+    s.press(eframe::egui::Key::ArrowUp);
+    s.wait_until("prompt 4 is at the top", |s| at_top(s, "prompt 4"));
+    s.press(eframe::egui::Key::ArrowUp);
+    s.wait_until("r3 starts at the top", |s| at_top(s, "line 1 of r3"));
+    s.press(eframe::egui::Key::ArrowUp);
+    s.wait_until("prompt 3 is at the top", |s| at_top(s, "prompt 3"));
+    s.press(eframe::egui::Key::ArrowDown);
+    s.press(eframe::egui::Key::ArrowDown);
+    s.wait_until("r4 starts at the top", |s| at_top(s, "line 1 of r4"));
+}
+
+#[test]
+fn typing_with_the_conversation_clicked_goes_to_the_input() {
+    let mut s = long_turns();
+    s.click("line 40 of r4");
+    s.type_here("h");
+    s.type_here("i");
+    assert_eq!(s.prompt(), "hi", "the first key moved the keyboard to the input, the next typed there");
+}

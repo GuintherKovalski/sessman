@@ -21,7 +21,7 @@ fn cmd_comma_opens_settings_as_a_main_area_tab() {
 }
 
 #[test]
-fn the_gear_button_opens_settings_too() {
+fn the_gear_in_the_title_bar_opens_settings_too() {
     let mut s = setup().session(session("s-a", "alpha prompt", 100)).launch();
     s.click("⚙");
     assert!(s.sees("⚙ Settings"));

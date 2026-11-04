@@ -20,13 +20,13 @@ fn list_shows_each_workspace_in_bar_order() {
         "Work (newest first)\n  1. gamma prompt  cccccccc-3333\n  2. beta prompt  bbbbbbbb-2222\n  3. alpha prompt  aaaaaaaa-1111\nEmpty (newest first)"
     );
     assert_eq!(s.command(json!({"do": "list", "workspace": "work"})).unwrap().lines().count(), 4, "names match in any case");
-    assert!(s.command(json!({"do": "list", "workspace": "Nope"})).unwrap_err().contains("no workspace is called \"Nope\""));
+    assert!(s.command(json!({"do": "list", "workspace": "Nope"})).unwrap_err().contains("no scope is called \"Nope\""));
 }
 
 #[test]
 fn list_without_workspaces_says_so() {
     let mut s = setup().session(session("s-a", "alpha", 10)).launch();
-    assert_eq!(s.list(), "No workspaces yet.");
+    assert_eq!(s.list(), "No scopes yet.");
 }
 
 #[test]
@@ -52,32 +52,31 @@ fn ambiguous_names_ask_for_the_id() {
 }
 
 #[test]
-fn move_places_a_session_in_its_bar() {
+fn move_places_a_card_and_the_bar_stays_newest_first() {
     let mut s = three_in_work();
-    assert_eq!(s.command(json!({"do": "move", "session": "alpha prompt", "to": "top"})).unwrap(), "Moved \"alpha prompt\" to place 1 of 3 in the Work bar");
-    assert!(s.list().starts_with("Work (arranged by hand)\n  1. alpha prompt"));
+    let newest_first = "Work (newest first)\n  1. gamma prompt  cccccccc-3333\n  2. beta prompt  bbbbbbbb-2222\n  3. alpha prompt  aaaaaaaa-1111\nEmpty (newest first)";
+    assert_eq!(s.command(json!({"do": "move", "session": "alpha prompt", "to": "top"})).unwrap(), "Moved \"alpha prompt\" to place 1 of 3 on the Work orchestration page");
     s.command(json!({"do": "move", "session": "alpha prompt", "to": "down"})).unwrap();
     s.command(json!({"do": "move", "session": "gamma prompt", "to": "bottom"})).unwrap();
-    assert_eq!(
-        s.list(),
-        "Work (arranged by hand)\n  1. alpha prompt  aaaaaaaa-1111\n  2. beta prompt  bbbbbbbb-2222\n  3. gamma prompt  cccccccc-3333\nEmpty (newest first)"
-    );
+    assert_eq!(s.env.config_json("workspaces.json")["list"][0]["sessions"], json!(["aaaaaaaa-1111", "bbbbbbbb-2222", "cccccccc-3333"]));
     s.command(json!({"do": "move", "session": "beta prompt", "to": "3"})).unwrap();
+    assert_eq!(s.env.config_json("workspaces.json")["list"][0]["sessions"], json!(["aaaaaaaa-1111", "cccccccc-3333", "bbbbbbbb-2222"]));
     s.command(json!({"do": "move", "session": "beta prompt", "to": "up"})).unwrap();
-    assert!(s.list().contains("1. alpha prompt  aaaaaaaa-1111\n  2. beta prompt  bbbbbbbb-2222\n  3. gamma prompt"));
+    assert_eq!(s.env.config_json("workspaces.json")["list"][0]["sessions"], json!(["aaaaaaaa-1111", "bbbbbbbb-2222", "cccccccc-3333"]));
+    assert_eq!(s.list(), newest_first, "the bar ignores the cards' order");
     let err = s.command(json!({"do": "move", "session": "loose prompt", "to": "top"})).unwrap_err();
-    assert_eq!(err, "that session is in no workspace, so it has no place in a bar to move to");
+    assert_eq!(err, "that session is in no scope, so it has no card to move");
     let err = s.command(json!({"do": "move", "session": "alpha prompt", "to": "sideways"})).unwrap_err();
     assert!(err.starts_with("move where? \"sideways\""), "{err}");
 }
 
 #[test]
-fn the_bar_shows_the_arranged_order() {
+fn the_bar_lists_newest_first_even_when_arranged() {
     let mut s = three_in_work();
     s.command(json!({"do": "move", "session": "alpha prompt", "to": "top"})).unwrap();
-    s.click_first("Work");
-    assert!(s.shows_before("alpha prompt", "gamma prompt"));
+    s.click_first("WORK");
     assert!(s.shows_before("gamma prompt", "beta prompt"));
+    assert!(s.shows_before("beta prompt", "alpha prompt"));
 }
 
 #[test]
@@ -109,7 +108,7 @@ fn new_defaults_to_the_callers_workspace_and_its_folder() {
 fn new_without_a_folder_to_go_by_says_so() {
     let mut s = setup().workspaces(&[("Empty", &[])]).launch();
     let err = s.command(json!({"do": "new", "prompt": "x", "workspace": "Empty"})).unwrap_err();
-    assert_eq!(err, "which folder? the workspace has none yet; use --folder");
+    assert_eq!(err, "which folder? the scope has none yet; use --folder");
     let err = s.command(json!({"do": "new", "prompt": "x", "folder": "/definitely/not/here"})).unwrap_err();
     assert_eq!(err, "/definitely/not/here is not a folder");
 }
@@ -130,7 +129,7 @@ fn a_new_session_lists_as_starting_until_it_is_indexed() {
 fn ask_without_a_workspace_says_which() {
     let mut s = three_in_work();
     let err = s.command(json!({"do": "ask", "question": "how is it going?"})).unwrap_err();
-    assert_eq!(err, "which workspace? none is open; use --workspace");
+    assert_eq!(err, "which scope? none is open; use --scope");
 }
 
 #[test]

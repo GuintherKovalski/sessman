@@ -9,8 +9,10 @@ mod goal;
 mod history;
 mod images;
 mod names;
+mod newinfo;
 mod orchestration;
 mod overview;
+mod processes;
 mod queue;
 mod refine;
 mod runner;
@@ -18,9 +20,12 @@ mod search;
 mod markdown;
 mod session;
 mod settings;
+mod shared;
 mod state;
 mod status;
 mod theme;
+mod update;
+mod verdict;
 mod workspaces;
 
 fn main() -> eframe::Result {
