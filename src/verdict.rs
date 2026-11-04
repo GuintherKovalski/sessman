@@ -27,9 +27,9 @@ impl Verdict {
     /// How the bar and `scope list` show it.
     pub fn label(&self) -> &'static str {
         match self.state.as_str() {
-            "done" => "✓ done",
-            "blocked" => "! blocked",
-            _ => "● needs you",
+            "done" => "✔ done",
+            "blocked" => "⚠ blocked",
+            _ => "✋ needs you",
         }
     }
 }

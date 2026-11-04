@@ -827,7 +827,7 @@ pub fn ui(ui: &mut egui::Ui, page: &Page, question: &mut String, renaming: &mut 
                             }
                             for d in &e.done {
                                 let color = if d.starts_with("Could not") { pal.error } else { pal.add_fg };
-                                ui.add(egui::Label::new(RichText::new(format!("✓ {d}")).small().color(color)).wrap());
+                                ui.add(egui::Label::new(RichText::new(format!("✔ {d}")).small().color(color)).wrap());
                             }
                             ui.label(RichText::new(ago(e.at, now)).weak().small());
                         });

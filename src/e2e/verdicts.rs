@@ -21,7 +21,7 @@ fn a_finished_run_is_tagged_done_until_there_is_newer_activity() {
     assert_eq!(verdict_calls(&s), 0, "nothing new to judge");
     s.send("ship it");
     s.wait_to_see("Echo: ship it");
-    s.wait_to_see("✓ done");
+    s.wait_to_see("✔ done");
     s.wait_until("the list has the tag", |s| s.list().contains("s-a  [done]"));
     assert_eq!(s.env.config_json("verdicts.json")["s-a"]["why"], "Fake work shipped");
     assert_eq!(verdict_calls(&s), 1);
