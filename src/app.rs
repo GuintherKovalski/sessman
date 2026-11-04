@@ -1071,7 +1071,7 @@ impl App {
             let names: HashMap<&str, &str> = live.iter().map(|s| (s.id, s.title)).collect();
             ui.add_space(6.0);
             ui.horizontal(|ui| {
-                ui.heading(&name);
+                ui.heading(crate::workspaces::label(&name));
                 ui.label(RichText::new("processes").color(accent));
             });
             if let Some(id) = crate::processes::ui(ui, sample, &names, accent) {
