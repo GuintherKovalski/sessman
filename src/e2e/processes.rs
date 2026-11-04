@@ -10,7 +10,7 @@ fn work() -> Scope {
         .session(session("s-b", "beta prompt", 200))
         .workspaces(&[("Work", &[ID, "s-b"])])
         .launch();
-    s.click_first("Work");
+    s.click_first("WORK");
     s
 }
 
