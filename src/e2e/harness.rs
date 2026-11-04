@@ -208,8 +208,12 @@ impl SessionFile {
         let mut lines = Vec::new();
         let cwd_s = cwd.display().to_string();
         let last = self.turns.len() - 1;
+        // Each entry points at the one before it, as Claude Code chains them.
+        let mut parent = Value::Null;
         for (n, (prompt, reply)) in self.turns.iter().enumerate() {
-            lines.push(json!({"type": "user", "sessionId": self.id, "cwd": cwd_s, "message": {"role": "user", "content": prompt}}));
+            let (u, a) = (format!("{}-u{n}", self.id), format!("{}-a{n}", self.id));
+            lines.push(json!({"type": "user", "uuid": u, "parentUuid": parent, "sessionId": self.id, "cwd": cwd_s, "message": {"role": "user", "content": prompt}}));
+            parent = json!(a);
             let mut content = vec![json!({"type": "text", "text": reply})];
             if n == last {
                 for (file, old, new) in &self.edits {
@@ -217,7 +221,7 @@ impl SessionFile {
                 }
             }
             lines.push(json!({
-                "type": "assistant", "sessionId": self.id, "cwd": cwd_s,
+                "type": "assistant", "uuid": a, "parentUuid": u, "sessionId": self.id, "cwd": cwd_s,
                 "message": {"role": "assistant", "model": self.model, "usage": {"input_tokens": self.tokens}, "content": content},
             }));
         }
@@ -471,6 +475,14 @@ impl Scope {
             }
         }
         out.join("\n")
+    }
+
+    /// Whether every widget labelled exactly `label` (at least one) can be used.
+    #[track_caller]
+    pub fn all_enabled(&self, label: &str) -> bool {
+        let nodes: Vec<_> = self.h.query_all_by_label(label).collect();
+        assert!(!nodes.is_empty(), "nothing labelled \"{label}\" on screen:\n{}", self.screen());
+        nodes.iter().all(|n| !n.accesskit_node().is_disabled())
     }
 
     /// The window's zoom factor.

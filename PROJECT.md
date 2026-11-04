@@ -220,8 +220,14 @@ opened; clicking "All sessions" again comes back to it.
   aligned columns, scroll sideways when wide). Tool calls are a small dimmed line
   (`⚙ Read · Edit`). Only messages near the visible area are drawn, so long sessions scroll
   smoothly.
-- A **copy** button (two overlapping squares) at the top right of every You / Claude card copies the whole message as its
-  Markdown source (Claude's without its tool lines); it shows a check mark for a moment after.
+- At the top right of every You / Claude card, two small buttons:
+  - **Copy** (two overlapping squares) copies the whole message as its Markdown source
+    (Claude's without its tool lines); it shows a check mark for a moment after.
+  - **🗑** deletes the message **from the context**: Claude no longer sees it from the next
+    prompt on. A reply goes with all its tool calls and their results. Files it changed stay
+    as they are. It asks first (Settings → Behaviour can turn that off) and is disabled while
+    Claude works in the session. Two prompts left next to each other merge into one card, as
+    consecutive prompts always do.
 
 ### Right: Changes and Info tabs
 - **Changes**: one card per changed file, in order of its first change: file name, folder,
@@ -296,7 +302,7 @@ What each window shows (its open tab and session, panels, drafts) stays its own.
 
 | What | Where it comes from |
 |------|---------------------|
-| Session list and conversations | `~/.claude/projects/<project>/<session-id>.jsonl`, written by Claude Code. Read-only. |
+| Session list and conversations | `~/.claude/projects/<project>/<session-id>.jsonl`, written by Claude Code. Read-only, but for Move to Trash and deleting a message. |
 | Session title | The `ai-title` entry in the session file, else the first prompt. |
 | Prompt history | The prompts you typed in that session (tool results and slash-command wrappers are skipped). |
 | Diffs | The `Edit` / `MultiEdit` / `Write` tool calls recorded in the session, diffed line by line. |
@@ -315,16 +321,18 @@ What each window shows (its open tab and session, panels, drafts) stays its own.
 | Session tags | `claude -p --model haiku --no-session-persistence` with the end of the conversation (about 4000 characters) after each run, and in a sweep every 10 s (two at a time) for workspace sessions with unjudged activity from the last 3 days that have been quiet for a minute. Saved by session id, with the change it read, to `~/.config/scope/verdicts.json` (shared with other scope windows, like names); a failed check isn't retried until the session changes again. |
 | Goal and checklist | `claude -p --model haiku --no-session-persistence` with a digest of the conversation, on request; saved (with your ticks) to `~/.config/scope/goals.json`. |
 | Goal questions | `claude -p --resume <id> --fork-session --no-session-persistence "<question>"`: full context, original session untouched, nothing saved. |
+| Deleting a message | Its span in the session file: from its first entry to the next message's. The `user` / `assistant` entries there are removed (attachments and Claude Code's own records stay), and entries that pointed at a removed one (`parentUuid`, `logicalParentUuid`, `leafUuid`) point at what it pointed at. Refused if the message changed since it was shown, or if it would split a tool call from its result (an interrupted run can leave the next prompt between them). The file as it was is copied to `~/.config/scope/backups/<id>-<ms>.jsonl` first. |
 | Settings (theme included) | scope's own file: `~/.config/scope/settings.json`. |
 | App state | `~/.config/scope/state.json` (sessions' tabs, drafts, queues, layout) and `window.ron` (window, panel sizes, scroll positions, saved by eframe). Saved every 2 s when changed and on quit. |
 | Bare URLs | Turned into Markdown autolinks before rendering (not inside code or existing links). |
 | Workspaces and their colors | scope's own file: `~/.config/scope/workspaces.json`. |
 | Custom session names | scope's own file: `~/.config/scope/names.json`. |
 
-scope never writes to Claude's session files. Everything it adds (workspaces, names, goals,
+scope writes to Claude's session files only when you ask it to, with **Move to Trash** and a
+message's **🗑**, which keeps a backup first. Everything it adds (workspaces, names, goals,
 settings, app state, status data) lives in its own config folder (`$SCOPE_CONFIG` overrides
-it, e.g. to run a test copy next to your own). The one exception is the opt-in **Enable** button,
-which sets `statusLine` in `~/.claude/settings.json` and nothing else.
+it, e.g. to run a test copy next to your own). Its only other write outside that folder is the
+opt-in **Enable** button, which sets `statusLine` in `~/.claude/settings.json` and nothing else.
 
 ### Current limitations
 - `claude -p` is non-interactive, so tools that need your approval are refused (Settings →

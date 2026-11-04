@@ -19,6 +19,7 @@ mod conversation;
 mod copy;
 mod find;
 mod images;
+mod message_actions;
 mod foreign_runs;
 mod info;
 mod new_session;
