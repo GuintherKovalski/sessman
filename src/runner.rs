@@ -179,8 +179,7 @@ pub struct Stop(Arc<Mutex<Option<u32>>>);
 impl Stop {
     pub fn stop(&self) {
         let Some(pid) = *self.0.lock().unwrap() else { return };
-        // Runs scope starts lead their own group; one started in a terminal may not.
-        let group = if unsafe { libc::getpgid(pid as i32) } == pid as i32 { -(pid as i32) } else { pid as i32 };
+        let group = signal_target(pid);
         unsafe { libc::kill(group, libc::SIGINT) };
         let me = self.clone();
         std::thread::spawn(move || {
@@ -190,6 +189,19 @@ impl Stop {
             }
         });
     }
+}
+
+/// Where a stop for `pid` goes: its process group when it leads one (runs scope starts do),
+/// else (one started in a terminal shares the shell's group) just it.
+fn signal_target(pid: u32) -> i32 {
+    if unsafe { libc::getpgid(pid as i32) } == pid as i32 { -(pid as i32) } else { pid as i32 }
+}
+
+/// Interrupts a `claude` scope doesn't follow (Claude Code in a terminal) like Ctrl+C there:
+/// one SIGINT, which stops what it is doing. Nothing harder: that would end the terminal's
+/// session too, which Ctrl+C doesn't.
+pub fn interrupt(pid: u32) {
+    unsafe { libc::kill(signal_target(pid), libc::SIGINT) };
 }
 
 /// What a running `claude -p` reports, as it happens.

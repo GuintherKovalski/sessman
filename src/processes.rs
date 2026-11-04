@@ -406,9 +406,42 @@ fn sample(sessions: &[(String, PathBuf)]) -> Vec<Group> {
     groups
 }
 
+/// The pids of row `i` and of everything listed under it.
+pub fn subtree(rows: &[Row], i: usize) -> Vec<u32> {
+    let depth = rows[i].depth;
+    std::iter::once(rows[i].pid).chain(rows[i + 1..].iter().take_while(|r| r.depth > depth).map(|r| r.pid)).collect()
+}
+
+/// Ends processes: SIGTERM to each, then SIGKILL to those still there 2 s later.
+pub fn terminate(pids: Vec<u32>) {
+    for &pid in &pids {
+        unsafe { libc::kill(pid as i32, libc::SIGTERM) };
+    }
+    std::thread::spawn(move || {
+        std::thread::sleep(Duration::from_secs(2));
+        for pid in pids {
+            if unsafe { libc::kill(pid as i32, 0) } == 0 {
+                unsafe { libc::kill(pid as i32, libc::SIGKILL) };
+            }
+        }
+    });
+}
+
+/// What the developer did on the tab.
+pub enum Event {
+    /// Open this session.
+    Open(String),
+    /// Stop this session's `claude` (its run, like Ctrl+C), the pid given.
+    StopClaude(String, u32),
+    /// End these processes (a row and what it started).
+    Stop(Vec<u32>),
+}
+
 /// Samples in the background while the page asks for it, every [`EVERY`].
 #[derive(Default)]
 pub struct Monitor {
+    /// Processes asked to stop, shown as stopping until a sample no longer lists them.
+    pub stopping: HashSet<u32>,
     rx: Option<Receiver<Vec<Group>>>,
     asked: Option<Instant>,
     /// The latest sample, and the workspace it is of.
@@ -427,6 +460,8 @@ impl Monitor {
         if let Some(rx) = &self.rx {
             match rx.try_recv() {
                 Ok(groups) => {
+                    let alive: HashSet<u32> = groups.iter().flat_map(|g| g.rows.iter().map(|r| r.pid)).collect();
+                    self.stopping.retain(|p| alive.contains(p));
                     self.last = Some((workspace.to_owned(), groups));
                     self.rx = None;
                 }
@@ -488,8 +523,9 @@ pub fn limit_progress(r: &Row) -> Option<(f32, String)> {
     Some(((r.elapsed as f32 / limit as f32).min(1.0), text))
 }
 
-/// The Processes tab. `names` gives each session's name; returns a session to open.
-pub fn ui(ui: &mut egui::Ui, groups: Option<&[Group]>, names: &HashMap<&str, &str>, accent: Color32) -> Option<String> {
+/// The Processes tab. `names` gives each session's name; `stopping`, the processes already
+/// asked to stop.
+pub fn ui(ui: &mut egui::Ui, groups: Option<&[Group]>, names: &HashMap<&str, &str>, stopping: &HashSet<u32>, accent: Color32) -> Option<Event> {
     let mut open = None;
     let pal = crate::theme::palette(ui.visuals());
     let Some(groups) = groups else {
@@ -539,20 +575,36 @@ pub fn ui(ui: &mut egui::Ui, groups: Option<&[Group]>, names: &HashMap<&str, &st
                     let name = names.get(g.session.as_str()).copied().unwrap_or(g.session.as_str());
                     let link = ui.add(egui::Label::new(RichText::new(name).size(crate::overview::TITLE_SIZE)).sense(egui::Sense::click()));
                     if link.on_hover_cursor(egui::CursorIcon::PointingHand).on_hover_text("Open this session").clicked() {
-                        open = Some(g.session.clone());
+                        open = Some(Event::Open(g.session.clone()));
                     }
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         ui.label(RichText::new(format!("{} · {:.0}% CPU · {}", plural(g.rows.len(), "process"), g.cpu(), memory(g.rss_kb()))).weak().small());
                     });
                 });
                 ui.add_space(4.0);
-                egui::Grid::new(("processes", &g.session)).striped(true).num_columns(5).spacing([14.0, 4.0]).show(ui, |ui| {
-                    for h in ["What", "CPU", "RAM", "Running for", "Progress"] {
+                egui::Grid::new(("processes", &g.session)).striped(true).num_columns(6).spacing([14.0, 4.0]).show(ui, |ui| {
+                    for h in ["What", "CPU", "RAM", "Running for", "Progress", ""] {
                         ui.label(RichText::new(h).small().weak());
                     }
                     ui.end_row();
-                    for r in &g.rows {
+                    for (i, r) in g.rows.iter().enumerate() {
                         process_row(ui, r, &pal);
+                        if stopping.contains(&r.pid) {
+                            ui.spinner().on_hover_text("Stopping…");
+                        } else {
+                            let hover = match r.kind {
+                                Kind::Claude => "Stop Claude in this session, like Ctrl+C: it and everything it started end, the queue pauses",
+                                Kind::Bash => "End this command and what it started; Claude sees it fail and carries on",
+                                _ => "End this process and what it started (SIGTERM, SIGKILL 2 s later if still there)",
+                            };
+                            let button = egui::Button::new(RichText::new("⏹").color(pal.error));
+                            if ui.add(button).on_hover_text(hover).clicked() {
+                                open = Some(match r.kind {
+                                    Kind::Claude => Event::StopClaude(g.session.clone(), r.pid),
+                                    _ => Event::Stop(subtree(&g.rows, i)),
+                                });
+                            }
+                        }
                         ui.end_row();
                     }
                 });
@@ -743,6 +795,23 @@ mod tests {
         match_calls(&mut g[0].rows, &calls);
         assert_eq!(g[0].rows[1].what, "cat <<EOF\nhi\tthere\nEOF", "shown as written, not as ps escapes it");
         assert!(g[0].rows[1].call.is_some());
+    }
+
+    #[test]
+    fn stopping_a_row_takes_what_is_under_it() {
+        let text = [
+            ps_line(100, 1, 100, &format!("claude -p --resume {ID}")),
+            ps_line(101, 100, 100, &bash_shell("'make'")),
+            ps_line(102, 101, 100, "make"),
+            ps_line(103, 102, 100, "cc a.c"),
+            ps_line(104, 100, 100, "npx some-mcp-server"),
+        ]
+        .join("\n");
+        let g = groups(&parse_ps(&text), &[ID.to_owned()]);
+        assert_eq!(subtree(&g[0].rows, 1), [101, 102, 103]);
+        assert_eq!(subtree(&g[0].rows, 3), [103]);
+        assert_eq!(subtree(&g[0].rows, 4), [104]);
+        assert_eq!(subtree(&g[0].rows, 0), [100, 101, 102, 103, 104]);
     }
 
     #[test]

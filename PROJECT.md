@@ -153,6 +153,10 @@ opened; clicking "All sessions" again comes back to it.
   CPU (of one core), RAM, how long it has been running and, for a Bash command, how much of
   its time limit is left (2 min unless the call set one; a background command has none).
   That limit is the only end known in advance: how far a command itself has got isn't.
+  **⏹** at a row's end stops it and everything listed under it (SIGTERM, SIGKILL 2 s later
+  if still there): a stopped Bash command fails and Claude carries on. On the `claude` row it
+  stops the session's run like Ctrl+C (⏹ Interrupted, the queue pauses); a Claude Code in a
+  terminal gets one SIGINT, as Ctrl+C there.
 
 ### Middle: conversation and file tabs
 - When a file is open, a tab bar appears on top: **Main** (the conversation) and one tab per
