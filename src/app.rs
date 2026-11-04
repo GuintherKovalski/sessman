@@ -1025,6 +1025,43 @@ impl App {
                 }
             })
             .collect();
+        // Report / Processes tabs. Processes are sampled while the page is open, so the tab
+        // can say how many there are.
+        let color = self.workspaces.list[w].color.unwrap_or([128, 128, 128]);
+        let accent = egui::Color32::from_rgb(color[0], color[1], color[2]);
+        self.orch.processes.poll(ui.ctx(), &name, members.iter().map(|m| (m.id.clone(), m.path.clone())).collect());
+        let sample = self.orch.processes.of(&name);
+        let count = sample.map(|g| g.iter().map(|g| g.rows.len()).sum::<usize>());
+        egui::Panel::top("orchestration-tabs").show_separator_line(true).resizable(false).show(ui, |ui| {
+            ui.horizontal(|ui| {
+                if ui.selectable_label(!self.orch.show_processes, RichText::new("Report").strong()).clicked() {
+                    self.orch.show_processes = false;
+                }
+                let label = match count {
+                    Some(n) if n > 0 => format!("Processes · {n}"),
+                    _ => "Processes".to_owned(),
+                };
+                let tab = ui.selectable_label(self.orch.show_processes, RichText::new(label).strong());
+                if tab.on_hover_text("What this scope's sessions are running now: CPU, RAM, how long, time left").clicked() {
+                    self.orch.show_processes = true;
+                }
+            });
+        });
+        if self.orch.show_processes {
+            let names: HashMap<&str, &str> = live.iter().map(|s| (s.id, s.title)).collect();
+            ui.add_space(6.0);
+            ui.horizontal(|ui| {
+                ui.heading(&name);
+                ui.label(RichText::new("processes").color(accent));
+            });
+            if let Some(id) = crate::processes::ui(ui, sample, &names, accent) {
+                match self.sessions.iter().position(|s| s.id == id) {
+                    Some(i) => self.select(i),
+                    None => self.open_pending(&id),
+                }
+            }
+            return;
+        }
         let model = match self.settings.orchestration_model.trim() {
             "" => format!("{} (helper model)", Settings::harness(&self.settings.helper_model, "haiku")),
             m => m.to_owned(),

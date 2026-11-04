@@ -167,6 +167,9 @@ pub struct Jobs {
     pub question: String,
     /// A session card's name being edited.
     pub renaming: Option<Rename>,
+    /// The page shows its Processes tab (else the report), and what that tab samples.
+    pub show_processes: bool,
+    pub processes: crate::processes::Monitor,
 }
 
 /// A session's name being edited on the page, and whether the field was just opened.
