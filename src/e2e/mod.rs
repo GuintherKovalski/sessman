@@ -24,6 +24,7 @@ mod info;
 mod new_session;
 mod orchestration_page;
 mod overview;
+mod processes;
 mod prompt;
 mod refine;
 mod search;

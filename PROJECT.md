@@ -137,6 +137,14 @@ opened; clicking "All sessions" again comes back to it.
 - Wherever the orchestrator mentions a session (summary, Needs you, Next, the cards and its
   answers), it reads as the session's current name and is a link: click it to open the session.
 - Saved in `~/.config/scope/orchestration.json`, by workspace name.
+- **Report / Processes** tabs at the top of the page. **Processes** (`Processes · N` when
+  something runs) lists what the workspace's sessions are running right now, refreshed every
+  2 s: one card per working session (click its name to open it) with its `claude` and, as a
+  tree under it, everything it started: **Bash** commands (with Claude's description of each),
+  **MCP** servers, **search** (ripgrep for Grep / Glob) and any other process. Each row shows
+  CPU (of one core), RAM, how long it has been running and, for a Bash command, how much of
+  its time limit is left (2 min unless the call set one; a background command has none).
+  That limit is the only end known in advance: how far a command itself has got isn't.
 
 ### Middle: conversation and file tabs
 - When a file is open, a tab bar appears on top: **Main** (the conversation) and one tab per
@@ -287,6 +295,7 @@ What each window shows (its open tab and session, panels, drafts) stays its own.
 | Sending a prompt | Runs `claude -p [extra args] --resume <session-id> [--model <m>] --output-format stream-json --verbose --include-partial-messages "<prompt>"` in the session's folder, in its own process group, in the background; its streamed lines update the open conversation as they arrive. |
 | Images in prompts | Kept in `~/.config/scope/images/`, named after their data, and written in the prompt as `[image:<name>]`. A prompt with images goes to `claude -p --input-format stream-json` on stdin, as one user message of text and image blocks in order. Claude Code keeps them in the session file; reading it back turns them into the same markers (and saves the files of images pasted elsewhere). Cmd+V is seen through an AppKit key monitor (egui only hears about pastes with text); the image comes from the macOS pasteboard. |
 | Runs scope did not start | Every 2 s `ps` lists `claude -p` processes on a listed session (`--resume` / `--session-id <id>`) that aren't scope's own children: runs a scope left going when it quit (`claude` finishes and saves its reply with no one reading its output), or ones another scope or a terminal started. Each shows as working; its steps are read from the session file as Claude saves them (whole steps, no letter-by-letter text), until its process ends. Stop, the queue and notifications work as for scope's own runs. So quitting or restarting scope loses no run. |
+| Processes tab | Every 2 s while the orchestration page is open, `ps -axww -o pid,ppid,pgid,%cpu,rss,etime,args`. A session's `claude` is one with `--resume` / `--session-id <id>` of a session in the workspace (side questions don't count); under it, its descendants and what kept its process group. A Bash command is the `eval '…'` in Claude Code's shell (it sources `shell-snapshots/`), matched to its `Bash` call in the session file for the description, `timeout` and `run_in_background`. |
 | Stopping (Ctrl+C) | SIGINT to that process group (SIGKILL after 2 s). Claude Code saves the partial reply and an `[Request interrupted by user]` marker, shown as ⏹ Interrupted. |
 | Queue | Kept per session in memory and in `state.json`; the next prompt is sent when a run ends normally. |
 | Workspaces overview | `claude -p --model <helper> --no-session-persistence` with a digest of the workspace's 8 newest sessions (title, goal, conversation), the git branch and the Jira keys found in them; it answers in JSON with purpose, now, heading and tickets. |
@@ -335,6 +344,7 @@ src/
 ├── shared.rs      config files every scope on one config folder shares: refresh, save, watch
 ├── state.rs       what is restored after a restart; per-session views (file tabs, draft)
 ├── queue.rs       prompts waiting for a session's run
+├── processes.rs the orchestration page's Processes tab: ps, process trees, Bash calls, time limits
 ├── refine.rs      Refine prompt: the request to the helper model and its reply
 ├── runner.rs      runs `claude -p` (streaming send, stop, helper questions), folder picker, notifications
 ├── search.rs      session search: background index, matching and ranking, Haiku search format
