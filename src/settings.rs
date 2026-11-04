@@ -154,6 +154,8 @@ pub fn shortcuts(s: &Settings) -> Vec<(&'static str, String)> {
         ("Send the prompt (queued while Claude works)", send),
         ("New line in the prompt", newline),
         ("Refine the prompt", refine),
+        ("Refine the prompt, wherever the focus is", format!("{cmd}+R")),
+        ("Dictate: start, or stop and transcribe (Enter stops too)", format!("{cmd}+D")),
         ("Stop Claude", "Ctrl+C".to_owned()),
         ("Previous / next prompt (or pull back a queued one)", "Up / Down".to_owned()),
         ("Open settings", format!("{cmd}+,")),
@@ -269,11 +271,13 @@ pub fn ui(ui: &mut egui::Ui, s: &mut Settings, filter: &mut String, about: &mut 
             }
             ui.add(egui::TextEdit::singleline(&mut s.claude_path).desired_width(260.0));
         });
-        page.row("Model for prompts", "e.g. opus, sonnet; empty = Claude Code's default", s.model != defaults.model, |ui, reset| {
+        page.row("Model for prompts", "Default = Claude Code's default", s.model != defaults.model, |ui, reset| {
             if reset {
                 s.model = defaults.model.clone();
             }
-            ui.add(egui::TextEdit::singleline(&mut s.model).hint_text("default").desired_width(260.0));
+            for (v, label) in [("", "Default"), ("opus", "Opus"), ("fable", "Fable")] {
+                ui.selectable_value(&mut s.model, v.to_owned(), label);
+            }
         });
         page.row("Helper model", "Search, goals and Refine", s.helper_model != defaults.helper_model, |ui, reset| {
             if reset {
@@ -550,6 +554,7 @@ mod tests {
     fn shortcuts_follow_the_send_setting() {
         let mut s = Settings::default();
         assert!(shortcuts(&s).iter().any(|(_, k)| k == "Enter"));
+        assert!(shortcuts(&s).iter().any(|(w, k)| w.starts_with("Dictate") && k.ends_with("+D")));
         s.send_with_modifier = true;
         assert!(shortcuts(&s).iter().any(|(w, k)| w.starts_with("Refine") && k.ends_with("Shift+Enter")));
     }

@@ -199,7 +199,7 @@ opened; clicking "All sessions" again comes back to it.
     What it had written stays, marked **⏹ Interrupted**; the stopped prompt comes back into
     the input to fix and resend; the queue **pauses** (with **Resume queue**) so nothing else
     is sent unasked. A failed run pauses the queue the same way.
-  - **✨ Refine** (the button at the input's right, or **Cmd+Enter**) asks the helper model
+  - **✨ Refine** (the button at the input's right, **Cmd+Enter** in the input, or **Cmd+R** wherever the focus is) asks the helper model
     (Haiku by default) to rewrite the prompt clearly, using the session's goal and recent
     prompts as context. If the prompt is ambiguous it first asks up to 3 questions above the
     input, each with suggested answers, an "Other…" field and **Skip**; **Skip all** refines
@@ -265,7 +265,7 @@ the settings; each changed setting has a ↺ to reset it. Changes apply and save
   Cmd+Shift+Enter), maximum height in lines, keep a draft per session.
 - **Conversation**: show or hide the `⚙ Read · Edit` tool lines.
 - **Files**: line numbers, wrap long lines, tab width, open Markdown rendered.
-- **Claude**: path to `claude`, model for prompts, helper model (search, goals, refine),
+- **Claude**: path to `claude`, model for prompts (default, Opus or Fable), helper model (search, goals, refine),
   extra arguments for every `claude -p` (e.g. `--permission-mode acceptEdits`), default
   folder for new sessions.
 - **Overview**: Jira URL the ticket keys link to (e.g. `https://acme.atlassian.net`).

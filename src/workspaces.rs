@@ -39,6 +39,15 @@ pub const PALETTE: [[u8; 3]; 10] = [
     [200, 150, 110],
 ];
 
+/// Where a session taken out of a workspace was, to put it back.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Taken {
+    pub session: String,
+    pub workspace: String,
+    at: usize,
+    bar_at: Option<usize>,
+}
+
 /// User-defined groups of sessions. A session lives in at most one workspace.
 #[derive(Serialize, Deserialize, Default, Debug)]
 pub struct Workspaces {
@@ -199,6 +208,34 @@ impl Workspaces {
         }
     }
 
+    /// Takes a session out of its workspace, saying where it was, for `put_back` to undo.
+    pub fn take(&mut self, session: &str) -> Option<Taken> {
+        let w = self.list.iter().position(|w| w.sessions.iter().any(|s| s == session))?;
+        let ws = &self.list[w];
+        let taken = Taken {
+            session: session.to_owned(),
+            workspace: ws.name.clone(),
+            at: ws.sessions.iter().position(|s| s == session).unwrap_or(0),
+            bar_at: ws.bar.iter().position(|s| s == session),
+        };
+        self.remove(session);
+        Some(taken)
+    }
+
+    /// Puts a session taken out back where it was, unless its workspace is gone or it is in
+    /// a workspace again. Whether it went back.
+    pub fn put_back(&mut self, t: &Taken) -> bool {
+        if self.list.iter().any(|w| w.sessions.contains(&t.session)) {
+            return false;
+        }
+        let Some(w) = self.list.iter_mut().find(|w| w.name == t.workspace) else { return false };
+        w.sessions.insert(t.at.min(w.sessions.len()), t.session.clone());
+        if let Some(b) = t.bar_at {
+            w.bar.insert(b.min(w.bar.len()), t.session.clone());
+        }
+        true
+    }
+
     /// The session last open in a tab (None = All sessions).
     pub fn last(&self, tab: Option<usize>) -> Option<&str> {
         match tab {
@@ -304,6 +341,27 @@ fn hue_to_rgb(hue: f32) -> [u8; 3] {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_session_taken_out_goes_back_where_it_was() {
+        let mut w = Workspaces::default();
+        let a = w.add("a").unwrap();
+        for s in ["s1", "s2", "s3"] {
+            w.move_to(s, a);
+        }
+        w.arrange_bar(a, &["s3".to_owned(), "s2".to_owned(), "s1".to_owned()]);
+        let before = w.list[a].clone();
+        let t2 = w.take("s2").unwrap();
+        let t1 = w.take("s1").unwrap();
+        assert_eq!(w.list[a].sessions, vec!["s3"]);
+        assert!(w.take("nope").is_none());
+        // Undone last first, like Cmd+Z.
+        assert!(w.put_back(&t1) && w.put_back(&t2));
+        assert_eq!(w.list[a], before);
+        assert!(!w.put_back(&t2), "already back");
+        w.delete(a);
+        assert!(!w.put_back(&t1), "its workspace is gone");
+    }
 
     #[test]
     fn each_tab_remembers_its_last_session() {

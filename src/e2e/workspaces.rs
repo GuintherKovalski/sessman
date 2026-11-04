@@ -371,3 +371,43 @@ fn delete_does_nothing_in_all_sessions() {
     assert_eq!(members(&s, "Work").len(), 3);
     assert!(s.sees("beta prompt"));
 }
+
+#[test]
+fn cmd_z_puts_removed_sessions_back_one_removal_at_a_time() {
+    let mut s = three_in_work();
+    s.click("beta prompt");
+    s.press(Key::Delete);
+    s.press(Key::Delete);
+    assert_eq!(members(&s, "Work"), vec!["s-a"]);
+    s.press_with(Modifiers::COMMAND, Key::Z);
+    assert_eq!(members(&s, "Work"), vec!["s-a", "s-c"]);
+    assert!(s.is_selected("gamma prompt"), "the session open then opens again");
+    s.press_with(Modifiers::COMMAND, Key::Z);
+    assert_eq!(members(&s, "Work"), vec!["s-a", "s-b", "s-c"], "back in its place");
+    assert!(s.is_selected("beta prompt"));
+    // Nothing left to undo, and the bar still has the keyboard.
+    s.press_with(Modifiers::COMMAND, Key::Z);
+    s.press(Key::ArrowUp);
+    assert!(s.is_selected("gamma prompt"));
+}
+
+#[test]
+fn cmd_z_undoes_remove_from_scope_in_the_menu_too() {
+    let mut s = three_in_work();
+    s.click("beta prompt");
+    s.right_click("alpha prompt");
+    s.click("Remove from scope");
+    assert_eq!(members(&s, "Work"), vec!["s-b", "s-c"]);
+    s.press_with(Modifiers::COMMAND, Key::Z);
+    assert_eq!(members(&s, "Work"), vec!["s-a", "s-b", "s-c"]);
+}
+
+#[test]
+fn cmd_z_in_the_input_undoes_typing_not_a_removal() {
+    let mut s = three_in_work();
+    s.click("beta prompt");
+    s.press(Key::Delete);
+    s.type_prompt("hello");
+    s.press_with(Modifiers::COMMAND, Key::Z);
+    assert_eq!(members(&s, "Work"), vec!["s-a", "s-c"]);
+}

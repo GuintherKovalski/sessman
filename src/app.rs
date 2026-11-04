@@ -71,6 +71,15 @@ enum Action {
 /// What a dragged workspace tab carries: its index.
 struct TabDrag(usize);
 
+/// Sessions one action took out of workspaces, and the session open before it.
+struct Removal {
+    taken: Vec<workspaces::Taken>,
+    open: Option<String>,
+}
+
+/// How many removals Cmd+Z can go back through.
+const UNDO_LIMIT: usize = 50;
+
 #[derive(PartialEq)]
 enum RightTab {
     Changes,
@@ -132,6 +141,8 @@ pub struct App {
     /// then open the session above or below, Delete/Backspace take the highlighted ones out of
     /// the open workspace.
     bar_keys: bool,
+    /// Sessions taken out of workspaces, latest last, for Cmd+Z to put back.
+    removed: Vec<Removal>,
     /// Set when the arrows moved the pick: the conversation scrolls to it on the next frame.
     scroll_to_pick: bool,
     /// The message at the top of the conversation last frame, where the arrows start without a pick.
@@ -231,6 +242,10 @@ pub struct App {
     /// started keeping this (sessions it has never had open count as seen then). A session
     /// changed since is marked finished in the overview.
     seen: HashMap<String, u64>,
+    /// Session id → the model and effort picked for it on the new session page.
+    choices: HashMap<String, runner::Choice>,
+    /// What the new session page has picked so far.
+    new_choice: runner::Choice,
     seen_from: u64,
     /// Whether each session's work looks finished (verdict.rs), the checks under way, the
     /// checks that failed (id → the change they read; not retried until there is a newer one),
@@ -315,6 +330,19 @@ const MIC_METER_WIDTH: f32 = 120.0;
 
 /// What shows while recording: a pulsing red dot, the time so far, and a level meter that
 /// scrolls right to left, so it is clear the microphone is on and hearing something.
+/// A button's tooltip: what it does, then its shortcut, shown whether or not it is enabled
+/// (a disabled one adds why, so the shortcut is still there to learn).
+fn tip(resp: egui::Response, what: &str, why_not: Option<&str>, keys: &str) -> egui::Response {
+    let body = |ui: &mut egui::Ui, extra: Option<&str>| {
+        ui.label(what);
+        if let Some(e) = extra {
+            ui.label(RichText::new(e).italics());
+        }
+        ui.label(RichText::new(keys).monospace().weak());
+    };
+    resp.on_hover_ui(|ui| body(ui, None)).on_disabled_hover_ui(|ui| body(ui, why_not))
+}
+
 fn recording_meter(ui: &mut egui::Ui, recorder: &dictation::Recorder, levels: &mut std::collections::VecDeque<f32>, red: Color32) {
     // A new bar every 60 ms, holding the loudest sample since the last one.
     let now = ui.input(|i| i.time);
@@ -403,6 +431,7 @@ impl App {
             picked_message: None,
             conversation_keys: false,
             bar_keys: false,
+            removed: Vec::new(),
             scroll_to_pick: false,
             top_message: None,
             conversation_rect: None,
@@ -463,6 +492,8 @@ impl App {
             overview_jobs: HashMap::new(),
             overview_errors: HashMap::new(),
             seen: HashMap::new(),
+            choices: HashMap::new(),
+            new_choice: runner::Choice::default(),
             seen_from: 0,
             verdicts: Shared::load(Verdicts::path()),
             judging: Vec::new(),
@@ -480,6 +511,7 @@ impl App {
         }
         let mut st = State::load(&state::path());
         app.seen = std::mem::take(&mut st.seen);
+        app.choices = std::mem::take(&mut st.choices);
         app.seen_from = match st.seen_from {
             0 => overview::secs(SystemTime::now()),
             t => t,
@@ -529,6 +561,7 @@ impl App {
             prompt_collapsed: self.prompt_collapsed,
             seen: self.seen.iter().filter(|(id, _)| self.sessions.iter().any(|s| s.id == **id)).map(|(k, v)| (k.clone(), *v)).collect(),
             seen_from: self.seen_from,
+            choices: self.choices.clone(),
         }
     }
 
@@ -662,10 +695,14 @@ impl App {
             }
             Action::Remove(ids, then) => {
                 self.sync_workspaces(None);
-                for id in &ids {
-                    self.workspaces.remove(id);
-                }
+                let taken: Vec<workspaces::Taken> = ids.iter().filter_map(|id| self.workspaces.take(id)).collect();
                 self.save_workspaces();
+                if !taken.is_empty() {
+                    let open = self.selected.map(|i| self.sessions[i].id.clone());
+                    self.removed.push(Removal { taken, open });
+                    let extra = self.removed.len().saturating_sub(UNDO_LIMIT);
+                    self.removed.drain(..extra);
+                }
                 self.picked.retain(|id| !ids.contains(id));
                 let open_removed = self.selected.is_some_and(|i| ids.contains(&self.sessions[i].id));
                 match then.and_then(|id| self.sessions.iter().position(|s| s.id == id)) {
@@ -701,6 +738,27 @@ impl App {
             }
             Action::OpenPending(id) => self.open_pending(&id),
             Action::Orchestrate => self.show_orchestration(),
+        }
+    }
+
+    /// Cmd+Z: puts the sessions taken out last back in their workspace, and opens again the
+    /// session that was open then (when this tab lists it), the bar keeping the keyboard.
+    fn undo_remove(&mut self) {
+        let Some(r) = self.removed.pop() else { return };
+        self.sync_workspaces(None);
+        let back: Vec<String> = r.taken.iter().rev().filter(|t| self.workspaces.put_back(t)).map(|t| t.session.clone()).collect();
+        if back.is_empty() {
+            return;
+        }
+        self.save_workspaces();
+        let visible = self.visible();
+        let Some(i) = r.open.and_then(|id| visible.into_iter().find(|&i| self.sessions[i].id == id)) else { return };
+        let keys = self.bar_keys;
+        self.select(i);
+        self.pick_anchor = Some(self.sessions[i].id.clone());
+        self.picked = if back.len() > 1 { back.into_iter().collect() } else { HashSet::new() };
+        if keys {
+            self.focus_prompt = false;
         }
     }
 
@@ -1112,7 +1170,7 @@ impl App {
             ui.add_space(6.0);
             ui.horizontal(|ui| {
                 ui.heading(crate::workspaces::label(&name));
-                ui.label(RichText::new("processes").color(accent));
+                ui.label(RichText::new("processes").weak());
             });
             if let Some(id) = crate::processes::ui(ui, sample, &names, accent) {
                 match self.sessions.iter().position(|s| s.id == id) {
@@ -1598,6 +1656,7 @@ impl App {
         self.open = Some(Session { cwd: Some(dir.clone()), ..Default::default() });
         self.new_session = Some(dir);
         self.new_info = None;
+        self.new_choice = runner::Choice::default();
         self.history = History::default();
         self.pinned = None;
         self.picked_message = None;
@@ -1825,6 +1884,9 @@ impl App {
             _ => return,
         };
         if new {
+            if !self.new_choice.is_empty() {
+                self.choices.insert(id.clone(), self.new_choice.clone());
+            }
             self.new_id = Some(id.clone());
             self.sync_workspaces(None);
             if let Some(w) = self.tab {
@@ -1843,7 +1905,8 @@ impl App {
             s.push_prompt(prompt.clone());
             self.history = History::new(s.prompts.clone());
         }
-        let (rx, stop) = runner::send(self.ctx.clone(), id.clone(), cwd.clone(), prompt.clone(), new);
+        let choice = self.choices.get(&id).cloned().unwrap_or_default();
+        let (rx, stop) = runner::send(self.ctx.clone(), id.clone(), cwd.clone(), prompt.clone(), new, choice);
         self.runs.insert(id, Run { rx, live: String::new(), tool: None, new, cwd, prompt, stop, poked: false, answer: String::new() });
     }
 
@@ -2788,7 +2851,7 @@ impl App {
                 }
                 ModelPrompt::Done => {
                     ui.label(RichText::new("Speech model installed").strong());
-                    ui.label("Dictation is ready: click the mic to start, click again to stop.");
+                    ui.label("Dictation is ready: click the mic (or Cmd+D) to start, click again or press Enter to stop.");
                     ui.add_space(8.0);
                     ui.horizontal(|ui| {
                         dictate = ui.button("Start dictating").clicked();
@@ -2893,7 +2956,7 @@ impl App {
                 let mut undo = false;
                 ui.horizontal(|ui| {
                     ui.label(RichText::new("✨ Refined").color(pal.note));
-                    undo = ui.link("Undo refine").on_hover_text(format!("{cmd}+Z")).clicked();
+                    undo = tip(ui.link("Undo refine"), "Bring back the text you had before refining", None, &format!("{cmd}+Z")).clicked();
                 });
                 if undo {
                     self.input = original.clone();
@@ -2998,6 +3061,16 @@ impl App {
         let running = self.open_running();
         let enabled = self.open.is_some();
         let focused = ui.memory(|m| m.has_focus(id));
+        // While recording, Enter stops it like Cmd+D (it doesn't send), from the input or with
+        // nothing focused (clicking the mic takes focus away). Then the prompt has focus again.
+        let nothing_focused = ui.memory(|m| m.focused().is_none());
+        if matches!(self.dictation, Dictation::Recording(_))
+            && (focused || nothing_focused)
+            && ui.input_mut(|i| i.consume_key(Modifiers::NONE, Key::Enter))
+        {
+            self.toggle_dictation();
+            self.focus_prompt = true;
+        }
         // Send and refine keys are taken before the TextEdit sees them (it would add a line).
         let (send, refine_key) = if focused {
             let with_mod = self.settings.send_with_modifier;
@@ -3014,6 +3087,17 @@ impl App {
         } else {
             (false, false)
         };
+        // Cmd+D dictates (starts, or stops and transcribes) and Cmd+R refines, wherever the
+        // focus is; the input has it afterwards.
+        let (dictate_key, refine_anywhere) = ui.input_mut(|i| {
+            (dictation::AVAILABLE && i.consume_key(Modifiers::COMMAND, Key::D), i.consume_key(Modifiers::COMMAND, Key::R))
+        });
+        let recording_now = matches!(self.dictation, Dictation::Recording(_));
+        let dictate_key = dictate_key && (recording_now || enabled);
+        let refine_key = refine_key || (refine_anywhere && !self.input.trim().is_empty());
+        if dictate_key || refine_anywhere {
+            self.focus_prompt = true;
+        }
         // Cmd+V with images on the clipboard: they go in as markers, instead of any text that
         // came with them (a copied file's name).
         if images::paste_pressed()
@@ -3100,7 +3184,7 @@ impl App {
                     ui.label(RichText::new(">").monospace().strong().color(pal.prompt_sign));
                     let send_key = if self.settings.send_with_modifier { "cmd+enter" } else { "enter" };
                     let hint = match (&self.open, running) {
-                        _ if recording => "listening… click ⏹ to stop and transcribe".to_owned(),
+                        _ if recording => "listening… enter, cmd+d or ⏹ stops and transcribes".to_owned(),
                         (None, _) => "select a session".to_owned(),
                         (_, true) => format!("claude is working… {send_key} queues a prompt · ctrl+c stops"),
                         _ => format!("type a prompt · {send_key} to send · cmd+enter refines · up/down for history"),
@@ -3163,22 +3247,29 @@ impl App {
                         let cmd = if cfg!(target_os = "macos") { "Cmd" } else { "Ctrl" };
                         let keys = if self.settings.send_with_modifier { format!("{cmd}+Shift+Enter") } else { format!("{cmd}+Enter") };
                         let refine = egui::Button::new("✨").frame(false);
-                        refine_click = ui
-                            .add_enabled(enabled && !waiting && !self.input.trim().is_empty(), refine)
-                            .on_hover_text(format!("Refine the prompt ({keys})"))
-                            .on_disabled_hover_text("Type a prompt to refine it")
-                            .clicked();
+                        let resp = ui.add_enabled(enabled && !waiting && !self.input.trim().is_empty(), refine);
+                        let why = if waiting { "Refining…" } else if enabled { "Type a prompt first" } else { "Select a session first" };
+                        refine_click = tip(
+                            resp,
+                            "Refine: a helper model rewrites the prompt clearly, asking questions if it is ambiguous",
+                            Some(why),
+                            &format!("{cmd}+R, or {keys} in the input"),
+                        )
+                        .clicked();
                         // Added after refine, so it sits to the left of it.
                         if dictation::AVAILABLE {
                             let transcribing = matches!(self.dictation, Dictation::Transcribing(_));
                             let (icon, color) = if recording { ("⏹", pal.error) } else { ("🎤", ui.visuals().text_color()) };
                             let mic = egui::Button::new(RichText::new(icon).color(color)).frame(false);
-                            let hover = if recording { "Stop dictation" } else { "Dictate: click to start, click again to stop" };
-                            dictate_click = ui
-                                .add_enabled(recording || (enabled && !transcribing), mic)
-                                .on_hover_text(hover)
-                                .on_disabled_hover_text(if transcribing { "Transcribing…" } else { "Select a session first" })
-                                .clicked();
+                            let what = if recording {
+                                "Stop dictating: what you said is transcribed into the prompt"
+                            } else {
+                                "Dictate: speak, and the words go into the prompt at the cursor (transcribed on this Mac)"
+                            };
+                            let resp = ui.add_enabled(recording || (enabled && !transcribing), mic);
+                            let why = if transcribing { "Transcribing…" } else { "Select a session first" };
+                            let keys = if recording { format!("Enter or {cmd}+D") } else { format!("{cmd}+D to start, again (or Enter) to stop") };
+                            dictate_click = tip(resp, what, Some(why), &keys).clicked();
                             if transcribing {
                                 ui.spinner();
                                 ui.label(RichText::new("transcribing…").small().weak());
@@ -3188,7 +3279,7 @@ impl App {
                             }
                         }
                         if running {
-                            stop = ui.button("⏹").on_hover_text("Stop Claude (Ctrl+C)").clicked();
+                            stop = tip(ui.button("⏹"), "Stop Claude: its run ends now, and your prompt comes back into the input", None, "Ctrl+C").clicked();
                             ui.spinner();
                         }
                     });
@@ -3197,7 +3288,7 @@ impl App {
         if stop {
             self.stop_open();
         }
-        if dictate_click {
+        if dictate_click || dictate_key {
             self.toggle_dictation();
         }
         if enabled && (refine_key || refine_click) && self.refine.as_ref().is_none_or(|r| r.rx.is_none()) {
@@ -3225,9 +3316,10 @@ impl App {
                 let info = crate::newinfo::gather(&dir, &home, &scope, &|k| std::env::var(k).ok());
                 self.new_info = Some((dir.clone(), info));
             }
-            let status = if self.open_running() { "Starting…" } else { "Type your first prompt below." };
+            let running = self.open_running();
+            let status = if running { "Starting…" } else { "Type your first prompt below." };
             if let Some((_, info)) = &self.new_info {
-                crate::newinfo::show(ui, &dir, info, status);
+                crate::newinfo::show(ui, &dir, info, &mut self.new_choice, !running, status);
             }
             return;
         }
@@ -4000,6 +4092,16 @@ impl App {
         }
         if ctx.input_mut(|i| i.consume_key(Modifiers::CTRL, Key::F) || i.consume_key(Modifiers::COMMAND, Key::F)) {
             self.find.show();
+        }
+        // Cmd+Z with no field focused (a focused one undoes its own typing) brings back the
+        // sessions taken out of a workspace last.
+        let modal = !self.confirm_trash.is_empty() || self.confirm_delete.is_some();
+        if !self.removed.is_empty()
+            && !modal
+            && ctx.memory(|m| m.focused().is_none())
+            && ctx.input_mut(|i| i.consume_key(Modifiers::COMMAND, Key::Z))
+        {
+            self.undo_remove();
         }
         if !self.picked.is_empty() && self.confirm_trash.is_empty() && ctx.input(|i| i.key_pressed(Key::Escape)) {
             self.picked.clear();

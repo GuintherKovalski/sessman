@@ -638,6 +638,15 @@ impl Scope {
         self.frames(4);
     }
 
+    /// Rests the pointer on the widget labelled `label`, long enough for its tooltip.
+    #[track_caller]
+    pub fn hover(&mut self, label: &str) {
+        self.steady();
+        let at = self.node(label).rect().center();
+        self.h.hover_at(at);
+        self.frames(60);
+    }
+
     /// Drags the widget labelled `from` onto the one labelled `to`.
     #[track_caller]
     pub fn drag(&mut self, from: &str, to: &str) {

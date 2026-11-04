@@ -69,6 +69,8 @@ pub struct State {
     /// this is kept: what the overview marks as finished and not yet looked at.
     pub seen: HashMap<String, u64>,
     pub seen_from: u64,
+    /// Session id → the model and effort picked for it when it was made.
+    pub choices: HashMap<String, crate::runner::Choice>,
 }
 
 pub fn path() -> PathBuf {
