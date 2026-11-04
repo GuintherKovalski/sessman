@@ -3864,7 +3864,7 @@ impl App {
         if let (true, Some(id)) = (ask, &id) {
             let question = std::mem::take(&mut self.goal_question).trim().to_owned();
             let harness = Settings::harness(&self.settings.question_harness, goal::QUESTION_HARNESS);
-            let rx = runner::btw(ui.ctx().clone(), id.clone(), s.cwd.clone(), goal_question_prompt(harness, self.goals.get(id), &question));
+            let rx = runner::btw(ui.ctx().clone(), id.clone(), s.cwd.clone(), goal::question_prompt(harness, self.goals.get(id), &question));
             self.btw.entry(id.clone()).or_default().push(Btw { question, answer: None, rx: Some(rx) });
         }
         if let (true, Some(id)) = (start_summary, id) {
@@ -4767,14 +4767,6 @@ fn short_duration(d: std::time::Duration) -> String {
 
 /// The question sent to the forked session: the harness (Settings), then the current goal and
 /// checklist for focus.
-fn goal_question_prompt(harness: &str, goal: Option<&str>, question: &str) -> String {
-    let harness = harness.trim();
-    match goal {
-        Some(raw) => format!("{harness}\nThe session's goal and subgoal checklist:\n{raw}\n\nQuestion: {question}"),
-        None => format!("{harness}\n\nQuestion: {question}"),
-    }
-}
-
 fn section(ui: &mut egui::Ui, title: &str) {
     ui.add_space(10.0);
     ui.label(RichText::new(title).strong());

@@ -264,20 +264,34 @@ opened; clicking "All sessions" again comes back to it.
 ### Settings
 **⚙ Settings** opens as a tab in the main area (close it with its `×`). A search field filters
 the settings; each changed setting has a ↺ to reset it. Changes apply and save at once.
-- **Appearance**: theme (dark / light / system), zoom, monospace font size.
+Settings are grouped in cards drawn like a scope's (grey border, round, the group's color as a
+stripe down the left edge and on its upper-case title, with a line on what it is about). A
+search shows only the groups (and cards) with a match; a group's or card's title matches all
+of it.
+- **Appearance**: theme (dark / light / system), zoom (− / + buttons; Cmd +/−/0 too),
+  monospace font size.
 - **Prompt input**: send with Cmd/Ctrl+Enter instead of Enter (Refine then moves to
   Cmd+Shift+Enter), maximum height in lines, keep a draft per session.
-- **Conversation**: show or hide the `⚙ Read · Edit` tool lines.
-- **Files**: line numbers, wrap long lines, tab width, open Markdown rendered.
-- **Claude**: path to `claude`, model for prompts (default, Opus or Fable), helper model (search, goals, refine),
-  extra arguments for every `claude -p` (e.g. `--permission-mode acceptEdits`), default
-  folder for new sessions.
-- **Overview**: Jira URL the ticket keys link to (e.g. `https://acme.atlassian.net`).
-- **Harness**: the instructions each helper starts from, editable (empty = default, ↺ resets):
-  workspace orchestration (plus its model and update interval), questions in the right panel,
-  and finding sessions in the left panel. The reply formats the app parses stay fixed.
-- **Behaviour**: confirm before deleting a workspace, restore the previous state at start,
-  notify when a run finishes while scope is in the background.
+- **Conversation and files**: show or hide the `⚙ Read · Edit` tool lines; line numbers, wrap
+  long lines, tab width, open Markdown rendered.
+- **Claude Code**: path to `claude`, model for prompts, extra arguments for every `claude -p`
+  (e.g. `--permission-mode acceptEdits`), default folder for new sessions.
+- **Sessions and scopes**: tag finished sessions, notify when a run finishes in the
+  background, restore the previous state at start, confirm before deleting a scope or a
+  message, the idle hours after which the overview offers Finish session, the Jira URL ticket
+  keys link to (e.g. `https://acme.atlassian.net`).
+- **AI helpers and harnesses**: the helper model, then one card per place you ask something,
+  each saying where it is, which model answers, what it sees and gives back, with its harness
+  (the instructions it starts from: editable, empty = default, ↺ resets; *default* / *edited*
+  beside it) and **Full prompt**, folded: the whole prompt as it is sent, built by the same
+  code with `<placeholders>` for what scope fills in, with Copy.
+  - **🔍 Search bar** (Enter in the session list's search).
+  - **◆ Orchestrator** (a scope's report and its Ask field, `scope ask` too): one harness for
+    both, its model, the update interval, and a Full prompt for each.
+  - **💬 Ask about this goal** (Info tab).
+  - **Built-in helpers**, fixed because scope parses their replies: session names, goal and
+    checklist, finish tags, Refine, overview cards, and what every session's system prompt
+    gets; each folds open to its prompt. The reply formats the app parses stay fixed.
 - **Keyboard shortcuts** (a list) and **About** (version, config folder with Open in Finder,
   status line).
 - **Updates** (under About): scope looks for a newer GitHub release at start and every 12 hours

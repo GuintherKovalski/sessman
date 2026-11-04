@@ -423,6 +423,40 @@ sessions, move their cards on the orchestration page, or start new sessions. To 
 \"to\" is \"top\", \"bottom\", \"up\", \"down\" or a position among the cards from 1. They are done in order, \
 right after your reply; above the block, say briefly what you are doing. Without a request to act, add no block.";
 
+/// The question request: the harness, how to answer and act, the current report, the last
+/// questions, the cards' order, a digest of each session, then the question.
+pub fn ask_request(harness: &str, members: &[Member], digests: &[String], bar: &[String], orch: Option<&Orchestration>, question: &str) -> String {
+    let ids: Vec<String> = members.iter().map(|m| m.id.clone()).collect();
+    let mut p = format!(
+        "{}\n\nAnswer the developer's QUESTION about this scope, briefly, in Markdown. Use the \
+         report and the sessions below; say so when they don't tell. {REFS}\n\n{ACTIONS}\n",
+        harness.trim()
+    );
+    if let Some(r) = orch.and_then(|o| o.report.as_ref()) {
+        p.push_str(&format!("\nCURRENT REPORT:\n{}\n", r.numbered(&ids)));
+    }
+    let recent: Vec<&Exchange> = orch.map(|o| o.log.iter().rev().take(3).rev().collect()).unwrap_or_default();
+    if !recent.is_empty() {
+        p.push_str("\nEARLIER QUESTIONS:\n");
+        for e in recent {
+            let short: String = e.answer.chars().take(600).collect();
+            p.push_str(&format!("Q: {}\nA: {}\n", e.question, number_ids(&short, &ids)));
+        }
+    }
+    let order: Vec<String> = bar.iter().filter_map(|id| ids.iter().position(|x| x == id)).map(|n| format!("[[{}]]", n + 1)).collect();
+    p.push_str(&format!("\nTHE CARDS on the orchestration page are in this order, top first: {}\n", order.join(", ")));
+    p.push_str("\nSESSIONS, newest first:\n");
+    for (n, (m, digest)) in members.iter().zip(digests).enumerate() {
+        p.push_str(&format!("\n## Session {}: {}\n", n + 1, m.title));
+        if let Some(g) = &m.goal {
+            p.push_str(&format!("Goal and checklist:\n{}\n", g.trim()));
+        }
+        p.push_str(digest);
+    }
+    p.push_str(&format!("\nQUESTION: {question}\n"));
+    p
+}
+
 /// Answers a question about the workspace on a thread, from the report, recent questions and a
 /// short digest of each session. `bar` is the workspace's sessions in the bar's order.
 pub fn ask(ctx: egui::Context, harness: String, model: String, members: Vec<Member>, bar: Vec<String>, orch: Option<Orchestration>, question: String) -> Receiver<Result<Answer, String>> {
@@ -430,35 +464,8 @@ pub fn ask(ctx: egui::Context, harness: String, model: String, members: Vec<Memb
     std::thread::spawn(move || {
         let members: Vec<Member> = members.into_iter().take(MAX_SESSIONS).collect();
         let ids: Vec<String> = members.iter().map(|m| m.id.clone()).collect();
-        let mut p = format!(
-            "{}\n\nAnswer the developer's QUESTION about this scope, briefly, in Markdown. Use the \
-             report and the sessions below; say so when they don't tell. {REFS}\n\n{ACTIONS}\n",
-            harness.trim()
-        );
-        if let Some(r) = orch.as_ref().and_then(|o| o.report.as_ref()) {
-            p.push_str(&format!("\nCURRENT REPORT:\n{}\n", r.numbered(&ids)));
-        }
-        let recent: Vec<&Exchange> = orch.as_ref().map(|o| o.log.iter().rev().take(3).rev().collect()).unwrap_or_default();
-        if !recent.is_empty() {
-            p.push_str("\nEARLIER QUESTIONS:\n");
-            for e in recent {
-                let short: String = e.answer.chars().take(600).collect();
-                p.push_str(&format!("Q: {}\nA: {}\n", e.question, number_ids(&short, &ids)));
-            }
-        }
-        let order: Vec<String> = bar.iter().filter_map(|id| ids.iter().position(|x| x == id)).map(|n| format!("[[{}]]", n + 1)).collect();
-        p.push_str(&format!("\nTHE CARDS on the orchestration page are in this order, top first: {}\n", order.join(", ")));
-        p.push_str("\nSESSIONS, newest first:\n");
-        for (n, m) in members.iter().enumerate() {
-            p.push_str(&format!("\n## Session {}: {}\n", n + 1, m.title));
-            if let Some(g) = &m.goal {
-                p.push_str(&format!("Goal and checklist:\n{}\n", g.trim()));
-            }
-            if let Ok(s) = session::load(&m.path) {
-                p.push_str(&session::digest(&s.messages, 200, 1_500));
-            }
-        }
-        p.push_str(&format!("\nQUESTION: {question}\n"));
+        let digests: Vec<String> = members.iter().map(|m| session::load(&m.path).map(|s| session::digest(&s.messages, 200, 1_500)).unwrap_or_default()).collect();
+        let p = ask_request(&harness, &members, &digests, &bar, orch.as_ref(), &question);
         let result = runner::ask_model(ctx.clone(), &model, p)
             .recv()
             .unwrap_or_else(|_| Err("the model stopped unexpectedly".into()))
