@@ -269,9 +269,9 @@ pub fn show(ui: &mut egui::Ui, dir: &Path, info: &NewInfo, choice: &mut crate::r
     egui::ScrollArea::vertical().id_salt("new-info").auto_shrink(false).show(ui, |ui| {
         ui.vertical_centered(|ui| {
             ui.add_space(24.0);
-            ui.label(RichText::new(format!("New session in {}", dir.display())).strong().size(15.0));
+            ui.label(RichText::new(format!("New session in {}", dir.display())).strong().size(22.0));
             if let Some(b) = &info.branch {
-                ui.label(RichText::new(format!("on {b}")).weak());
+                ui.label(RichText::new(format!("on {b}")).weak().size(15.0));
             }
             ui.add_space(14.0);
             let width = ui.available_width().min(640.0);
