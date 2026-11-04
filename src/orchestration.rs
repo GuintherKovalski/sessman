@@ -621,7 +621,7 @@ pub fn ui(ui: &mut egui::Ui, page: &Page, question: &mut String, renaming: &mut 
             accent,
             Stroke::NONE,
         ));
-        ui.heading(page.name);
+        ui.heading(crate::workspaces::label(page.name));
         ui.label(RichText::new("orchestration").color(accent));
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
             let can = !page.busy && !page.sessions.is_empty();

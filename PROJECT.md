@@ -59,7 +59,9 @@ it to zoom. At its right end, a dimmed **⚙** opens Settings.
 - **Double-click** a session name to rename it, like a folder: the name is selected, type the
   new one, **Enter** (or click elsewhere) saves, **Escape** cancels. Saving an empty name
   brings back the original one. Names are scope's own; Claude Code keeps its own title.
-- **Tabs** at the top: "All sessions", one tab per workspace, and **+**. Selecting a workspace tab
+- **Tabs** at the top: **SCOPES** (all sessions), one tab per workspace, and **+**. A
+  workspace's name always shows in upper case (in its tab, its overview card, its
+  orchestration page and the Move to menu); it is kept as typed, and found by it. Selecting a workspace tab
   opens the session that was last open in it (or its newest session; an empty workspace shows
   an empty main area); each remembers its last session across restarts. "All sessions" opens
   on the workspaces overview.
@@ -84,8 +86,9 @@ In "All sessions", the main area shows an overview of the workspaces until a ses
 opened; clicking "All sessions" again comes back to it.
 - One card per workspace, the one whose session went idle most recently first (sessions
   still working don't count; workspaces with none idle come last). Its color shows only as a
-  stripe down the card's left edge; cards are full width, with a grey border and no fill.
-  Click the name to open the workspace. Under it, its **scope of work** in one short sentence,
+  stripe down the card's left edge and on its name, which is drawn exactly as its tab at the
+  top left; cards are full width, with a grey border and no fill. Click the name to open the
+  workspace. Under it, its **scope of work** in one short sentence,
   in a larger font, and up to 3 Jira tickets, epics and parent tickets first (only keys
   that really appear in the sessions or the branch; with a Jira URL in Settings they link to
   the ticket).

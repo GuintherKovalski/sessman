@@ -15,7 +15,7 @@ fn verdict_calls(s: &Scope) -> usize {
 fn a_finished_run_is_tagged_done_until_there_is_newer_activity() {
     // Ten days old: too old for the sweep, so only the run gets it checked.
     let mut s = work().session(session("s-a", "alpha prompt", 10 * 24 * 3600)).workspaces(&[("Work", &["s-a"])]).launch();
-    s.click_first("Work");
+    s.click_first("WORK");
     s.click("alpha prompt");
     s.settle();
     assert_eq!(verdict_calls(&s), 0, "nothing new to judge");
@@ -57,7 +57,7 @@ fn a_session_that_needs_you_says_so_on_its_orchestration_card() {
     let mut s = setup.launch();
     s.wait_until("tagged", |s| s.list().contains("s-a  [needs you]"));
     s.env.reply("orchestration", &json!({"progress": 50, "summary": "S", "sessions": [{"n": 1, "state": "working", "now": "watching CI", "next": ""}], "attention": [], "next": []}).to_string());
-    s.click_first("Work");
+    s.click_first("WORK");
     s.click("Orchestration");
     s.wait_to_see("watching CI");
     assert!(s.sees("waiting"), "the verdict's state, not the report's stale working");
