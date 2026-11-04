@@ -9,6 +9,7 @@ mod goal;
 mod history;
 mod images;
 mod names;
+mod newinfo;
 mod orchestration;
 mod overview;
 mod queue;

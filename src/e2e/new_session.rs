@@ -21,6 +21,7 @@ fn new_session_opens_an_empty_session_in_the_workspace_folder() {
     s.click("+  New session");
     assert!(s.sees(&format!("New session in {}", folder.display())));
     assert!(s.sees("Type your first prompt below."));
+    assert!(s.sees("Model") && s.sees("Effort") && s.sees("Permissions") && s.sees("MCP servers"), "what it will start with");
     assert!(s.env.runs().is_empty(), "nothing exists until the first prompt");
 }
 
