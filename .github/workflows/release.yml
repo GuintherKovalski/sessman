@@ -1,0 +1,166 @@
+# Publishes a release: a universal scope.app, signed and notarized, as a .dmg and a .zip, on a
+# GitHub release tagged v<version>, and (with a tap token) the Homebrew cask for it.
+#
+# It runs by itself when a version bump reaches main (ci.yml calls it after promoting stage;
+# make one with `scripts/flow.sh release <version>`), or by hand from the Actions tab.
+#
+# Settings (repository → Settings → Secrets and variables → Actions). All optional; without the
+# signing ones the app is ad-hoc signed and macOS warns that it can't check it.
+#   Secrets
+#     MACOS_CERTIFICATE           base64 of the "Developer ID Application" certificate (.p12)
+#     MACOS_CERTIFICATE_PASSWORD  its password
+#     APPLE_ID, APPLE_TEAM_ID, APPLE_APP_PASSWORD   notarization with an app-specific password
+#     (or NOTARY_KEY (base64 .p8), NOTARY_KEY_ID, NOTARY_ISSUER: an App Store Connect API key)
+#     RELEASE_TOKEN               token that can write releases to RELEASE_REPO, when that is
+#                                 another repository (this one's own token can't)
+#     TAP_TOKEN                   token that can push to HOMEBREW_TAP
+#   Variables
+#     RELEASE_REPO   owner/name where releases are published (default: this repository). It must
+#                    be public for downloads, updates and Homebrew to work for others.
+#     HOMEBREW_TAP   owner/homebrew-<name> holding Casks/scope.rb (default: <owner>/homebrew-scope)
+name: release
+
+on:
+  workflow_call:
+    inputs:
+      version: { required: true, type: string }
+      ref: { required: true, type: string }
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Version to release; must be the one in Cargo.toml on main (e.g. 0.2.0)"
+        required: true
+
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+jobs:
+  release:
+    runs-on: macos-latest
+    permissions:
+      contents: write
+    env:
+      VERSION: ${{ inputs.version }}
+      RELEASE_REPO: ${{ vars.RELEASE_REPO || github.repository }}
+      HOMEBREW_TAP: ${{ vars.HOMEBREW_TAP || format('{0}/homebrew-scope', github.repository_owner) }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.ref || 'main' }}
+          fetch-depth: 0
+
+      - name: Check the version
+        run: |
+          VERSION="${VERSION#v}"
+          echo "VERSION=$VERSION" >> "$GITHUB_ENV"
+          have=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -n 1)
+          if [ "$have" != "$VERSION" ]; then
+            echo "::error::Cargo.toml says $have, not $VERSION. Bump it first: scripts/flow.sh release $VERSION"
+            exit 1
+          fi
+          if ! git merge-base --is-ancestor HEAD origin/main; then
+            echo "::error::releases are made from main only"
+            exit 1
+          fi
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-apple-darwin, x86_64-apple-darwin
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Import the signing certificate
+        env:
+          CERT: ${{ secrets.MACOS_CERTIFICATE }}
+          CERT_PASSWORD: ${{ secrets.MACOS_CERTIFICATE_PASSWORD }}
+        run: |
+          if [ -z "$CERT" ]; then
+            echo "::warning::No MACOS_CERTIFICATE secret: this release is ad-hoc signed and not notarized, so macOS will warn when people open it."
+            exit 0
+          fi
+          keychain="$RUNNER_TEMP/signing.keychain-db"
+          kc_pass=$(uuidgen)
+          echo "$CERT" | base64 --decode > "$RUNNER_TEMP/cert.p12"
+          security create-keychain -p "$kc_pass" "$keychain"
+          security set-keychain-settings -lut 21600 "$keychain"
+          security unlock-keychain -p "$kc_pass" "$keychain"
+          security import "$RUNNER_TEMP/cert.p12" -P "$CERT_PASSWORD" -A -t cert -f pkcs12 -k "$keychain"
+          security set-key-partition-list -S apple-tool:,apple: -k "$kc_pass" "$keychain" >/dev/null
+          security list-keychains -d user -s "$keychain" $(security list-keychains -d user | tr -d '"')
+          rm "$RUNNER_TEMP/cert.p12"
+          identity=$(security find-identity -v -p codesigning "$keychain" | sed -n 's/.*"\(Developer ID Application:[^"]*\)".*/\1/p' | head -n 1)
+          if [ -z "$identity" ]; then
+            echo "::error::the certificate has no Developer ID Application identity"
+            exit 1
+          fi
+          echo "SCOPE_SIGN_IDENTITY=$identity" >> "$GITHUB_ENV"
+
+      - name: Build, sign and notarize
+        env:
+          SCOPE_RELEASE_REPO: ${{ env.RELEASE_REPO }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          APPLE_APP_PASSWORD: ${{ secrets.APPLE_APP_PASSWORD }}
+          NOTARY_KEY: ${{ secrets.NOTARY_KEY }}
+          NOTARY_KEY_ID: ${{ secrets.NOTARY_KEY_ID }}
+          NOTARY_ISSUER: ${{ secrets.NOTARY_ISSUER }}
+        run: |
+          if [ -n "$NOTARY_KEY" ]; then
+            export NOTARY_KEY_PATH="$RUNNER_TEMP/notary.p8"
+            echo "$NOTARY_KEY" | base64 --decode > "$NOTARY_KEY_PATH"
+          fi
+          scripts/release.sh
+
+      - name: Add the installer script
+        run: sed "s#GuintherKovalski/sessman#$RELEASE_REPO#g" packaging/install.sh > dist/install.sh
+
+      - name: Publish the GitHub release
+        env:
+          GH_TOKEN: ${{ secrets.RELEASE_TOKEN || github.token }}
+        run: |
+          tag="v$VERSION"
+          prev=$(git describe --tags --abbrev=0 --match 'v*' HEAD^ 2>/dev/null || true)
+          {
+            echo "## Install"
+            echo
+            echo "- **One line**: \`curl -fsSL https://github.com/$RELEASE_REPO/releases/latest/download/install.sh | sh\`"
+            echo "- **Download** [scope-$VERSION.dmg](https://github.com/$RELEASE_REPO/releases/download/$tag/scope-$VERSION.dmg), open it and drag scope to Applications."
+            echo "- **Homebrew**: \`brew install --cask $(echo "$HOMEBREW_TAP" | sed 's#/homebrew-#/#')/scope\`"
+            echo "- **Already have scope?** It offers the update itself (Settings → About)."
+            echo
+            echo "Needs macOS 11 or later (Apple Silicon or Intel) and [Claude Code](https://docs.claude.com/en/docs/claude-code)."
+            echo
+            echo "## Changes"
+            echo
+            git log --no-merges --format='- %s' ${prev:+"$prev..HEAD"} | head -n 100
+          } > "$RUNNER_TEMP/notes.md"
+          # The tag lives here, on the commit built, whichever repository gets the release.
+          if ! git ls-remote --exit-code --tags origin "refs/tags/$tag" >/dev/null; then
+            git tag "$tag" HEAD
+            git push origin "refs/tags/$tag"
+          fi
+          if [ "$RELEASE_REPO" = "$GITHUB_REPOSITORY" ]; then target=(--verify-tag); else target=(); fi
+          gh release create "$tag" --repo "$RELEASE_REPO" "${target[@]}" \
+            --title "scope $VERSION" --notes-file "$RUNNER_TEMP/notes.md" \
+            dist/scope-$VERSION.dmg dist/scope-macos.zip dist/SHA256SUMS dist/install.sh
+        shell: bash
+
+      - name: Update the Homebrew cask
+        env:
+          TAP_TOKEN: ${{ secrets.TAP_TOKEN }}
+        run: |
+          if [ -z "$TAP_TOKEN" ]; then
+            echo "::notice::No TAP_TOKEN secret: the Homebrew cask in $HOMEBREW_TAP was not updated."
+            exit 0
+          fi
+          sha=$(shasum -a 256 "dist/scope-$VERSION.dmg" | cut -d' ' -f1)
+          git clone "https://x-access-token:$TAP_TOKEN@github.com/$HOMEBREW_TAP.git" "$RUNNER_TEMP/tap"
+          mkdir -p "$RUNNER_TEMP/tap/Casks"
+          sed -e "s#REPO#$RELEASE_REPO#g" -e "s#\"VERSION\"#\"$VERSION\"#" -e "s#\"SHA256\"#\"$sha\"#" \
+            packaging/homebrew/scope.rb | grep -v '^# ' > "$RUNNER_TEMP/tap/Casks/scope.rb"
+          cd "$RUNNER_TEMP/tap"
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add Casks/scope.rb
+          git commit -m "scope $VERSION"
+          git push

@@ -1,12 +1,12 @@
-//! The overview shown in "All sessions": one card per workspace, in its color, with its scope of
-//! work and the high-level Jira tickets it mentions, then every one of its sessions, newest
+//! The overview shown in "All sessions": one card per workspace, marked by a stripe in its
+//! color, with its scope of work and the high-level Jira tickets it mentions, then every one of its sessions, newest
 //! first: what it is doing, what it needs from the developer, and how recent it is. What the
 //! helper model made of them is kept in `overview.json`, keyed by workspace name, and written
 //! again for the sessions with new activity.
 use crate::runner;
-use crate::session;
 use crate::theme;
-use eframe::egui::{self, Color32, RichText, Sense, Stroke, StrokeKind};
+use crate::session;
+use eframe::egui::{self, Color32, RichText, Sense, StrokeKind};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeSet, HashMap};
 use std::path::{Path, PathBuf};
@@ -53,23 +53,13 @@ pub struct Note {
 }
 
 /// Workspace name → its summary, saved as JSON.
-#[derive(Default, Debug)]
+#[derive(Default, Debug, Serialize, Deserialize)]
+#[serde(transparent)]
 pub struct Overviews(HashMap<String, Summary>);
 
 impl Overviews {
     pub fn path() -> PathBuf {
         crate::settings::config_dir().join("overview.json")
-    }
-
-    pub fn load(path: &Path) -> Self {
-        Self(std::fs::read_to_string(path).ok().and_then(|s| serde_json::from_str(&s).ok()).unwrap_or_default())
-    }
-
-    pub fn save(&self, path: &Path) -> std::io::Result<()> {
-        if let Some(dir) = path.parent() {
-            std::fs::create_dir_all(dir)?;
-        }
-        std::fs::write(path, serde_json::to_string_pretty(&self.0)?)
     }
 
     pub fn get(&self, name: &str) -> Option<&Summary> {
@@ -209,7 +199,7 @@ pub fn start(ctx: egui::Context, sources: Vec<Source>, previous: Option<Summary>
 /// those numbered in `read` with their conversation, the others with what was said of them.
 pub fn request(sessions: &str, scope: Option<&str>, branch: Option<&str>, keys: &[String], read: &[usize]) -> String {
     let mut p = String::from(
-        "You write the overview card of a WORKSPACE: a group of related Claude Code sessions \
+        "You write the overview card of a SCOPE: a group of related Claude Code sessions \
          (a developer working with an AI coding agent). From the sessions below, reply with JSON \
          only, in this shape:\n\
          {\"scope\": \"the scope of work of the whole workspace, in one short sentence (at most 15 words)\",\n \
@@ -372,9 +362,10 @@ pub fn ago(then: u64, now: u64) -> String {
     }
 }
 
-/// "last interaction 5 min ago".
+/// "14:32 · 5 min ago": when, as the session list shows it, and how long ago.
 pub fn last_interaction(then: u64, now: u64) -> String {
-    format!("last interaction {}", ago(then, now))
+    let at = |t: u64| std::time::UNIX_EPOCH + std::time::Duration::from_secs(t);
+    format!("{} · {}", crate::app::row_time(at(then), at(now)), ago(then, now))
 }
 
 /// One workspace as the overview shows it.
@@ -437,17 +428,17 @@ pub fn ui(ui: &mut egui::Ui, cards: &[Card], opts: &Options) -> Option<Event> {
     let now = secs(SystemTime::now());
     if cards.is_empty() {
         ui.centered_and_justified(|ui| {
-            ui.label(RichText::new("No workspaces yet.\n\nCreate one with + at the top left, then drag sessions onto it.\nEach one gets a card here with what it is about.").weak());
+            ui.label(RichText::new("No scopes yet.\n\nCreate one with + at the top left, then drag sessions onto it.\nEach one gets a card here with what it is about.").weak());
         });
         return None;
     }
     ui.add_space(6.0);
     ui.horizontal(|ui| {
-        ui.heading("Workspaces");
+        ui.heading("SCOPES");
         let sessions: usize = cards.iter().map(|c| c.rows.len()).sum();
         let running: usize = cards.iter().map(|c| c.running).sum();
         let finished: usize = cards.iter().map(|c| c.rows.iter().filter(|r| r.finished).count()).sum();
-        let mut totals = format!("{} · {}", plural(cards.len(), "workspace"), plural(sessions, "session"));
+        let mut totals = format!("{} · {}", plural(cards.len(), "scope"), plural(sessions, "session"));
         if running > 0 {
             totals.push_str(&format!(" · {running} working"));
         }
@@ -457,24 +448,23 @@ pub fn ui(ui: &mut egui::Ui, cards: &[Card], opts: &Options) -> Option<Event> {
         ui.label(RichText::new(totals).weak());
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
             let busy = cards.iter().any(|c| c.busy);
-            if ui.add_enabled(!busy, egui::Button::new("↻ Refresh all").small()).on_hover_text("Summarize every workspace again with the helper model").clicked() {
+            if ui.add_enabled(!busy, egui::Button::new("↻ Refresh all").small()).on_hover_text("Summarize every scope again with the helper model").clicked() {
                 event = Some(Event::RefreshAll);
             }
         });
     });
     ui.add_space(8.0);
     egui::ScrollArea::vertical().id_salt("overview").auto_shrink(false).show(ui, |ui| {
-        let columns = ((ui.available_width() / 460.0) as usize).clamp(1, 2);
-        ui.columns(columns, |cols| {
-            for (k, card) in cards.iter().enumerate() {
-                if let Some(e) = card_ui(&mut cols[k % columns], card.w, card, now, opts) {
-                    event = Some(e);
-                }
+        // The card's inner width: its margins and border.
+        let columns = columns(ui, cards, ui.available_width() - 30.0);
+        for card in cards {
+            if let Some(e) = card_ui(ui, card.w, card, columns, now, opts) {
+                event = Some(e);
             }
-        });
+        }
         if opts.loose > 0 {
             ui.add_space(6.0);
-            ui.label(RichText::new(format!("{} not in a workspace.", plural(opts.loose, "session"))).weak().small());
+            ui.label(RichText::new(format!("{} not in a scope.", plural(opts.loose, "session"))).weak().small());
         }
     });
     event
@@ -484,31 +474,20 @@ fn plural(n: usize, word: &str) -> String {
     if n == 1 { format!("1 {word}") } else { format!("{n} {word}s") }
 }
 
-/// Yellow, readable on either theme: what needs the developer.
-fn needs_color(dark: bool) -> Color32 {
-    if dark { Color32::from_rgb(235, 200, 60) } else { Color32::from_rgb(165, 120, 0) }
-}
-
-fn card_ui(ui: &mut egui::Ui, w: usize, card: &Card, now: u64, opts: &Options) -> Option<Event> {
+fn card_ui(ui: &mut egui::Ui, w: usize, card: &Card, columns: usize, now: u64, opts: &Options) -> Option<Event> {
     let mut event = None;
     let [r, g, b] = card.color;
     let color = Color32::from_rgb(r, g, b);
     let v = ui.visuals().clone();
     let frame = egui::Frame::new()
-        .fill(Color32::from_rgba_unmultiplied(r, g, b, if v.dark_mode { 14 } else { 22 }))
-        .stroke(Stroke::new(1.0, Color32::from_rgba_unmultiplied(r, g, b, 110)))
+        .stroke(v.widgets.noninteractive.bg_stroke)
         .corner_radius(10.0)
         .inner_margin(egui::Margin { left: 16, right: 12, top: 10, bottom: 10 });
     let shown = frame.show(ui, |ui| {
         ui.set_width(ui.available_width());
-        // Name, with its color dot; how big it is on the right.
+        // Name, drawn as its tab at the top left is; how big it is on the right.
         ui.horizontal(|ui| {
-            let (dot, _) = ui.allocate_exact_size(egui::vec2(10.0, 10.0), Sense::hover());
-            ui.painter().circle_filled(dot.center(), 5.0, color);
-            let name = ui
-                .add(egui::Label::new(RichText::new(card.name).strong().size(16.0)).sense(Sense::click()))
-                .on_hover_cursor(egui::CursorIcon::PointingHand)
-                .on_hover_text("Open this workspace");
+            let name = crate::workspaces::tab(ui, card.name, Some(card.color), false).on_hover_text("Open this scope");
             if name.clicked() {
                 event = Some(Event::Open(w));
             }
@@ -523,12 +502,12 @@ fn card_ui(ui: &mut egui::Ui, w: usize, card: &Card, now: u64, opts: &Options) -
         // Its scope of work, and the tickets it is about.
         match summary.filter(|s| !s.scope.is_empty()) {
             Some(s) => {
-                ui.add(egui::Label::new(&s.scope).wrap());
+                ui.add(egui::Label::new(RichText::new(&s.scope).size(16.0)).wrap());
                 if !s.tickets.is_empty() {
                     ui.add_space(2.0);
                     ui.horizontal_wrapped(|ui| {
                         for t in &s.tickets {
-                            ticket(ui, t, color, opts.jira_url);
+                            ticket(ui, t, opts.jira_url);
                         }
                     });
                 }
@@ -541,13 +520,9 @@ fn card_ui(ui: &mut egui::Ui, w: usize, card: &Card, now: u64, opts: &Options) -
                 ui.label(RichText::new("Not summarized yet.").weak());
             }
         }
-        ui.add_space(6.0);
-        for row in &card.rows {
-            let note = summary.and_then(|s| s.sessions.get(row.id));
-            if let Some(e) = row_ui(ui, w, row, note, now, opts.stale_after) {
-                event = Some(e);
-            }
-            ui.add_space(4.0);
+        ui.add_space(8.0);
+        if let Some(e) = rows_grid(ui, w, card, columns, now, opts.stale_after) {
+            event = Some(e);
         }
         // Footer: how fresh, and refresh.
         ui.horizontal(|ui| {
@@ -568,7 +543,7 @@ fn card_ui(ui: &mut egui::Ui, w: usize, card: &Card, now: u64, opts: &Options) -
             }
         });
     });
-    // The workspace's color as a stripe down the card's left edge, like its tab.
+    // The workspace's color shows only as a stripe down the card's left edge.
     let rect = shown.response.rect;
     let stripe = egui::Rect::from_min_max(rect.min + egui::vec2(5.0, 10.0), egui::pos2(rect.min.x + 8.0, rect.max.y - 10.0));
     ui.painter().rect_filled(stripe, 1.5, color);
@@ -576,82 +551,150 @@ fn card_ui(ui: &mut egui::Ui, w: usize, card: &Card, now: u64, opts: &Options) -
     event
 }
 
-/// A session: its name, what it is doing, what it needs from the developer (yellow), and at
-/// the bottom right when it was last touched (red once stale, with **Finish session**) or a
-/// spinner while it works. One whose run finished unseen is outlined and marked. Clicking it
-/// opens it.
-fn row_ui(ui: &mut egui::Ui, w: usize, row: &Row, note: Option<&Note>, now: u64, stale_after: u64) -> Option<Event> {
+/// Size of a session's name in its tile.
+const TITLE_SIZE: f32 = 16.0;
+const GAP: f32 = 8.0;
+
+/// How many columns of tiles every card has, the same for all: as many as fit when each is as
+/// wide as the longest short session name of any card, at least 3. Short names (the ones
+/// Haiku or the developer gave, at most 4 words) never wrap or get cut; longer ones, the
+/// first line of a prompt not renamed yet, don't count and are cut at the tile's edge.
+fn columns(ui: &egui::Ui, cards: &[Card], avail: f32) -> usize {
+    let font = egui::FontId::proportional(TITLE_SIZE);
+    let color = ui.visuals().text_color();
+    let longest = cards.iter().flat_map(|c| &c.rows).filter(|r| is_short_name(r.title)).map(|r| ui.painter().layout_no_wrap(r.title.to_owned(), font.clone(), color).size().x).fold(0.0, f32::max);
+    // The name, plus the tile's margins and border; a floor so the details have room.
+    let tile = (longest + 28.0).max(MIN_TILE);
+    (((avail + GAP) / (tile + GAP)) as usize).max(3)
+}
+
+/// A name made to be one (at most 4 words), not the first line of a prompt.
+fn is_short_name(title: &str) -> bool {
+    title.split_whitespace().count() <= 4
+}
+
+/// The narrowest a tile gets, however short the names.
+const MIN_TILE: f32 = 190.0;
+
+/// A card's sessions as a grid of `columns` equal tiles, newest first, row by row. The tiles
+/// of a row share the height of the tallest.
+fn rows_grid(ui: &mut egui::Ui, w: usize, card: &Card, columns: usize, now: u64, stale_after: u64) -> Option<Event> {
     let mut event = None;
-    let pal = theme::palette(ui.visuals());
+    let width = ((ui.available_width() - GAP * (columns - 1) as f32) / columns as f32).max(1.0);
+    for (k, chunk) in card.rows.chunks(columns).enumerate() {
+        let id = ui.id().with(("overview-grid", w, k));
+        let height: f32 = ui.data(|d| d.get_temp(id)).unwrap_or(0.0);
+        let mut tallest = 0.0f32;
+        ui.horizontal_top(|ui| {
+            ui.spacing_mut().item_spacing.x = GAP;
+            for row in chunk {
+                let note = card.summary.and_then(|s| s.sessions.get(row.id));
+                let shown = ui.allocate_ui_with_layout(egui::vec2(width, 0.0), egui::Layout::top_down(egui::Align::Min), |ui| {
+                    ui.set_width(width);
+                    row_ui(ui, w, row, note, now, stale_after, height)
+                });
+                let (clicked, natural) = shown.inner;
+                tallest = tallest.max(natural);
+                if let Some(e) = clicked {
+                    event = Some(e);
+                }
+            }
+        });
+        // Measured this frame, used for the next: tiles of a row end level.
+        if (tallest - height).abs() > 0.5 {
+            ui.data_mut(|d| d.insert_temp(id, tallest));
+            ui.ctx().request_repaint();
+        }
+        ui.add_space(GAP);
+    }
+    event
+}
+
+/// A session's tile: its name, then in small print what it is doing and what it needs from
+/// the developer (⚠, in the orchestration page's gold), and at the bottom right when it was
+/// last touched, small like the list's time (with **Finish session** once stale) or a spinner
+/// while it works. One whose run finished unseen is marked ✔ in green. Clicking it opens it. At least `height` tall; also returns how tall it
+/// would be on its own.
+fn row_ui(ui: &mut egui::Ui, w: usize, row: &Row, note: Option<&Note>, now: u64, stale_after: u64, height: f32) -> (Option<Event>, f32) {
+    let mut event = None;
+    let mut natural = 0.0;
     let v = ui.visuals().clone();
     let stale = !row.running && stale_after > 0 && now.saturating_sub(row.modified) >= stale_after;
-    let (fill, stroke) = if row.finished {
-        let [r, g, b, _] = pal.add_fg.to_array();
-        (Color32::from_rgba_unmultiplied(r, g, b, if v.dark_mode { 26 } else { 34 }), Stroke::new(1.5, pal.add_fg))
-    } else {
-        (v.faint_bg_color, Stroke::new(1.0, v.widgets.noninteractive.bg_stroke.color))
-    };
+    // Drawn like the sessions in the list: the same fill, grey border and roundness.
+    let stroke = v.widgets.noninteractive.bg_stroke;
+    let pal = theme::palette(&v);
+    let margin = egui::Margin { left: 10, right: 10, top: 7, bottom: 6 };
+    let id = ui.id().with(("overview-row", row.id));
+    let hovered: bool = ui.data(|d| d.get_temp(id)).unwrap_or(false);
+    let fill = if hovered { v.widgets.hovered.weak_bg_fill } else { v.faint_bg_color };
     // Sensing before its contents, so the button on it still gets its clicks.
     let shown = ui.scope_builder(egui::UiBuilder::new().id_salt(("overview-row", row.id)).sense(Sense::click()), |ui| {
         ui.style_mut().interaction.selectable_labels = false;
-        egui::Frame::new().fill(fill).stroke(stroke).corner_radius(7.0).inner_margin(egui::Margin { left: 10, right: 8, top: 6, bottom: 5 }).show(ui, |ui| {
+        egui::Frame::new().fill(fill).stroke(stroke).corner_radius(10.0).inner_margin(margin).show(ui, |ui| {
             ui.set_width(ui.available_width());
-            ui.horizontal(|ui| {
-                let badge = if row.finished { 80.0 } else { 0.0 };
-                ui.scope(|ui| {
-                    ui.set_max_width((ui.available_width() - badge).max(40.0));
-                    ui.add(egui::Label::new(RichText::new(row.title).strong()).truncate());
-                });
-                if row.finished {
-                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        ui.label(RichText::new("✓ Finished").small().strong().color(pal.add_fg))
-                            .on_hover_text("Its last run ended after you last opened it");
-                    });
-                }
-            });
+            let top = ui.min_rect().top();
+            ui.add(egui::Label::new(RichText::new(row.title).size(TITLE_SIZE)).truncate());
+            ui.add_space(2.0);
             if let Some(tool) = row.tool.filter(|_| row.running) {
                 ui.label(RichText::new(format!("⚙ {tool}…")).monospace().weak().small());
             }
             match note.filter(|n| !n.doing.is_empty()) {
                 Some(n) => {
-                    ui.add(egui::Label::new(&n.doing).wrap());
+                    ui.add(egui::Label::new(RichText::new(&n.doing).small()).wrap());
                 }
                 None => {
-                    ui.label(RichText::new(if row.running { "Working…" } else { "Not summarized yet." }).weak());
+                    ui.label(RichText::new(if row.running { "Working…" } else { "Not summarized yet." }).weak().small());
                 }
             }
             if let Some(needs) = note.map(|n| n.needs.as_str()).filter(|n| !n.is_empty()) {
-                ui.add(egui::Label::new(RichText::new(format!("⚠ {needs}")).color(needs_color(v.dark_mode))).wrap());
+                ui.add(egui::Label::new(RichText::new(format!("⚠ {needs}")).small().color(pal.note)).wrap());
             }
-            let line = egui::vec2(ui.available_width(), ui.spacing().interact_size.y);
+            // The bottom line sits at the bottom of the tile, level with its neighbours'.
+            let line_h = ui.spacing().interact_size.y;
+            let inner = height - (margin.top + margin.bottom) as f32 - 2.0 * stroke.width;
+            let filled = ui.cursor().top() - top;
+            natural = filled + line_h + (margin.top + margin.bottom) as f32 + 2.0 * stroke.width;
+            if inner - line_h > filled {
+                ui.add_space(inner - line_h - filled);
+            }
+            let line = egui::vec2(ui.available_width(), line_h);
             ui.allocate_ui_with_layout(line, egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 if row.running {
                     ui.label(RichText::new("working").weak().small());
                     ui.add(egui::Spinner::new().size(12.0));
                 } else {
-                    let when = RichText::new(last_interaction(row.modified, now)).small();
-                    ui.label(if stale { when.color(pal.error) } else { when.weak() });
-                    if stale && ui.small_button("Finish session").on_hover_text("Take it out of this workspace (the session itself is kept)").clicked() {
+                    ui.label(RichText::new(last_interaction(row.modified, now)).weak().size(10.0));
+                    if stale && ui.small_button("Finish session").on_hover_text("Take it out of this scope (the session itself is kept)").clicked() {
                         event = Some(Event::Finish(row.id.to_owned()));
                     }
                 }
                 if row.queued > 0 {
                     ui.label(RichText::new(format!("+{} queued", row.queued)).weak().small());
                 }
+                if row.finished {
+                    ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
+                        ui.label(RichText::new("✔ Finished").small().color(pal.add_fg))
+                            .on_hover_text("Its last run ended after you last opened it");
+                    });
+                }
             });
         })
     });
     let resp = shown.response.on_hover_cursor(egui::CursorIcon::PointingHand).on_hover_text("Open this session");
+    if resp.hovered() != hovered {
+        ui.data_mut(|d| d.insert_temp(id, resp.hovered()));
+        ui.ctx().request_repaint();
+    }
     if resp.clicked() && event.is_none() {
         event = Some(Event::OpenSession(w, row.id.to_owned()));
     }
-    event
+    (event, natural)
 }
 
-/// A ticket chip: the key, outlined in the workspace color, and its note. A link when a Jira
+/// A ticket chip: the key, outlined, and its note. A link when a Jira
 /// URL is set in Settings.
-fn ticket(ui: &mut egui::Ui, t: &Ticket, color: Color32, jira_url: &str) {
-    let text = RichText::new(&t.key).monospace().small().strong().color(color);
+fn ticket(ui: &mut egui::Ui, t: &Ticket, jira_url: &str) {
+    let text = RichText::new(&t.key).monospace().small().strong();
     let base = jira_url.trim().trim_end_matches('/');
     let resp = if base.is_empty() {
         ui.add(egui::Label::new(text))
@@ -662,7 +705,7 @@ fn ticket(ui: &mut egui::Ui, t: &Ticket, color: Color32, jira_url: &str) {
         }
         link
     };
-    ui.painter().rect_stroke(resp.rect.expand2(egui::vec2(4.0, 1.0)), 4.0, Stroke::new(1.0, color.gamma_multiply(0.6)), StrokeKind::Outside);
+    ui.painter().rect_stroke(resp.rect.expand2(egui::vec2(4.0, 1.0)), 4.0, ui.visuals().widgets.noninteractive.bg_stroke, StrokeKind::Outside);
     ui.add_space(4.0);
     if !t.note.is_empty() {
         ui.label(RichText::new(&t.note).weak().small());
@@ -731,9 +774,16 @@ mod tests {
     }
 
     #[test]
+    fn only_names_of_up_to_4_words_set_the_columns() {
+        assert!(is_short_name("Overview tile layout"));
+        assert!(is_short_name("Fix the login bug"));
+        assert!(!is_short_name("can you make the overview less colorful please"));
+    }
+
+    #[test]
     fn short_times() {
         assert_eq!(ago(100, 110), "just now");
         assert_eq!(ago(0, 7200), "2 h ago");
-        assert_eq!(last_interaction(0, 300), "last interaction 5 min ago");
+        assert!(last_interaction(0, 300).ends_with(" · 5 min ago"));
     }
 }

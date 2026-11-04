@@ -27,13 +27,13 @@ use eframe::egui::{self, Color32, Id, Key, Modifiers, RichText, Sense, Stroke, S
 use egui_commonmark::CommonMarkCache;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::sync::mpsc::{self, Receiver};
 use std::time::SystemTime;
 
 /// What the orchestrator is told to be, editable in Settings → Harness. The reply format and
 /// the sessions themselves are added after it.
-pub const DEFAULT_HARNESS: &str = "You are the orchestrator of a WORKSPACE: a group of related Claude Code \
+pub const DEFAULT_HARNESS: &str = "You are the orchestrator of a SCOPE: a group of related Claude Code \
 sessions in which a developer works with AI coding agents in parallel. Give the developer a clear sense of \
 progress and of what is happening across all of them: what each session is doing, which ones are blocked or \
 waiting for the developer, what is done, and what should happen next. Be concrete and brief, each sentence \
@@ -124,23 +124,13 @@ impl Orchestration {
 }
 
 /// Workspace name → its orchestration, saved as JSON.
-#[derive(Default, Debug)]
+#[derive(Default, Debug, Serialize, Deserialize)]
+#[serde(transparent)]
 pub struct Store(HashMap<String, Orchestration>);
 
 impl Store {
     pub fn path() -> PathBuf {
         crate::settings::config_dir().join("orchestration.json")
-    }
-
-    pub fn load(path: &Path) -> Self {
-        Self(std::fs::read_to_string(path).ok().and_then(|s| serde_json::from_str(&s).ok()).unwrap_or_default())
-    }
-
-    pub fn save(&self, path: &Path) -> std::io::Result<()> {
-        if let Some(dir) = path.parent() {
-            std::fs::create_dir_all(dir)?;
-        }
-        std::fs::write(path, serde_json::to_string_pretty(&self.0)?)
     }
 
     pub fn get(&self, name: &str) -> Option<&Orchestration> {
@@ -177,6 +167,9 @@ pub struct Jobs {
     pub question: String,
     /// A session card's name being edited.
     pub renaming: Option<Rename>,
+    /// The page shows its Processes tab (else the report), and what that tab samples.
+    pub show_processes: bool,
+    pub processes: crate::processes::Monitor,
 }
 
 /// A session's name being edited on the page, and whether the field was just opened.
@@ -318,12 +311,12 @@ pub fn request(harness: &str, members: &[Member], digests: &[Option<String>], pr
     let mut p = format!("{}\n\n", harness.trim());
     p.push_str(
         "Reply with JSON only, in this shape:\n\
-         {\"progress\": <0 to 100: how far the workspace as a whole is towards its goals>,\n \
+         {\"progress\": <0 to 100: how far the scope as a whole is towards its goals>,\n \
          \"summary\": \"2 to 4 sentences on the overall state\",\n \
          \"sessions\": [{\"n\": <session number>, \"state\": \"working|waiting|blocked|done|idle\", \
          \"now\": \"what it is doing, or last did\", \"next\": \"its next step, or empty\"}],\n \
          \"attention\": [\"what needs the developer now; [] if nothing\"],\n \
-         \"next\": [\"up to 4 next steps for the workspace as a whole\"]}\n\
+         \"next\": [\"up to 4 next steps for the scope as a whole\"]}\n\
          List every session below by its number. \"waiting\" means it needs the developer's input or \
          review; \"blocked\" means it hit a problem it could not solve; \"done\" means its goal is met.\n",
     );
@@ -420,14 +413,14 @@ pub struct Answer {
     pub actions: Vec<Command>,
 }
 
-const ACTIONS: &str = "You can also act on the workspace, but only when the developer asks you to: rename \
-sessions, move them in the bar, or start new sessions. To act, end your reply with a block like this:\n\
+const ACTIONS: &str = "You can also act on the scope, but only when the developer asks you to: rename \
+sessions, move their cards on the orchestration page, or start new sessions. To act, end your reply with a block like this:\n\
 ```actions\n\
 [{\"do\": \"rename\", \"session\": 2, \"name\": \"Auth fixes\"},\n \
 {\"do\": \"move\", \"session\": 2, \"to\": \"top\"},\n \
 {\"do\": \"new\", \"prompt\": \"the new session's first prompt, complete and self-contained\", \"name\": \"short name\"}]\n\
 ```\n\
-\"to\" is \"top\", \"bottom\", \"up\", \"down\" or a position in the bar from 1. They are done in order, \
+\"to\" is \"top\", \"bottom\", \"up\", \"down\" or a position among the cards from 1. They are done in order, \
 right after your reply; above the block, say briefly what you are doing. Without a request to act, add no block.";
 
 /// Answers a question about the workspace on a thread, from the report, recent questions and a
@@ -438,7 +431,7 @@ pub fn ask(ctx: egui::Context, harness: String, model: String, members: Vec<Memb
         let members: Vec<Member> = members.into_iter().take(MAX_SESSIONS).collect();
         let ids: Vec<String> = members.iter().map(|m| m.id.clone()).collect();
         let mut p = format!(
-            "{}\n\nAnswer the developer's QUESTION about this workspace, briefly, in Markdown. Use the \
+            "{}\n\nAnswer the developer's QUESTION about this scope, briefly, in Markdown. Use the \
              report and the sessions below; say so when they don't tell. {REFS}\n\n{ACTIONS}\n",
             harness.trim()
         );
@@ -454,7 +447,7 @@ pub fn ask(ctx: egui::Context, harness: String, model: String, members: Vec<Memb
             }
         }
         let order: Vec<String> = bar.iter().filter_map(|id| ids.iter().position(|x| x == id)).map(|n| format!("[[{}]]", n + 1)).collect();
-        p.push_str(&format!("\nTHE BAR lists the sessions in this order, top first: {}\n", order.join(", ")));
+        p.push_str(&format!("\nTHE CARDS on the orchestration page are in this order, top first: {}\n", order.join(", ")));
         p.push_str("\nSESSIONS, newest first:\n");
         for (n, m) in members.iter().enumerate() {
             p.push_str(&format!("\n## Session {}: {}\n", n + 1, m.title));
@@ -558,7 +551,7 @@ pub fn bubble(ui: &mut egui::Ui, selected: bool, line: &str, busy: bool) -> egui
         }
     }
     ui.add_space(4.0);
-    resp.on_hover_text("Workspace orchestration: progress and what is happening in all its sessions")
+    resp.on_hover_text("Scope orchestration: progress and what is happening in all its sessions")
 }
 
 /// One session as the page shows it: live facts from the app.
@@ -572,6 +565,9 @@ pub struct Live<'a> {
     pub modified: u64,
     /// Goal checklist (done, total), if summarized.
     pub checklist: Option<(usize, usize)>,
+    /// Whether its work looks finished, read from its newest change (verdict.rs); None while
+    /// running.
+    pub verdict: Option<&'a crate::verdict::Verdict>,
 }
 
 /// Everything the page shows.
@@ -628,7 +624,7 @@ pub fn ui(ui: &mut egui::Ui, page: &Page, question: &mut String, renaming: &mut 
             accent,
             Stroke::NONE,
         ));
-        ui.heading(page.name);
+        ui.heading(crate::workspaces::label(page.name));
         ui.label(RichText::new("orchestration").color(accent));
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
             let can = !page.busy && !page.sessions.is_empty();
@@ -659,7 +655,7 @@ pub fn ui(ui: &mut egui::Ui, page: &Page, question: &mut String, renaming: &mut 
 
     if page.sessions.is_empty() {
         ui.centered_and_justified(|ui| {
-            ui.label(RichText::new("No sessions in this workspace yet.\n\nStart one with + New session, or drag sessions onto its tab.\nThis page then shows how they are all doing.").weak());
+            ui.label(RichText::new("No sessions in this scope yet.\n\nStart one with + New session, or drag sessions onto its tab.\nThis page then shows how they are all doing.").weak());
         });
         return None;
     }
@@ -691,7 +687,7 @@ pub fn ui(ui: &mut egui::Ui, page: &Page, question: &mut String, renaming: &mut 
                 .show(ui, |ui| {
                     ui.horizontal(|ui| {
                         ui.label(RichText::new("?").monospace().strong().color(accent));
-                        let hint = "Ask the orchestrator about this workspace · Enter to send (Shift+Enter: new line)";
+                        let hint = "Ask the orchestrator about this scope · Enter to send (Shift+Enter: new line)";
                         let edit = egui::TextEdit::multiline(question)
                             .id(field_id)
                             .frame(egui::Frame::NONE)
@@ -790,7 +786,8 @@ pub fn ui(ui: &mut egui::Ui, page: &Page, question: &mut String, renaming: &mut 
         ui.columns(columns, |cols| {
             for (k, s) in page.sessions.iter().enumerate() {
                 let status = report.and_then(|r| r.sessions.iter().find(|x| x.id == s.id));
-                let card = Card { s, k, count: page.sessions.len(), sessions: page.sessions, status, now, accent };
+                let covered = page.orch.and_then(|o| o.covered.get(s.id)).copied().unwrap_or(0);
+                let card = Card { s, k, count: page.sessions.len(), sessions: page.sessions, status, covered, now, accent };
                 if let Some(e) = session_card(&mut cols[k % columns], &card, renaming) {
                     event = Some(e);
                 }
@@ -833,7 +830,7 @@ pub fn ui(ui: &mut egui::Ui, page: &Page, question: &mut String, renaming: &mut 
                             }
                             for d in &e.done {
                                 let color = if d.starts_with("Could not") { pal.error } else { pal.add_fg };
-                                ui.add(egui::Label::new(RichText::new(format!("✓ {d}")).small().color(color)).wrap());
+                                ui.add(egui::Label::new(RichText::new(format!("✔ {d}")).small().color(color)).wrap());
                             }
                             ui.label(RichText::new(ago(e.at, now)).weak().small());
                         });
@@ -894,6 +891,8 @@ struct Card<'a> {
     count: usize,
     sessions: &'a [Live<'a>],
     status: Option<&'a Status>,
+    /// The session's newest change the report has read.
+    covered: u64,
     now: u64,
     accent: Color32,
 }
@@ -901,10 +900,22 @@ struct Card<'a> {
 /// A session's card. Clicking opens the session, dragging it onto another card moves it there
 /// in the bar, the pencil renames it, and right-click has all of these.
 fn session_card(ui: &mut egui::Ui, card: &Card, renaming: &mut Option<Rename>) -> Option<Event> {
-    let Card { s, k, count, sessions, status, now, accent } = *card;
+    let Card { s, k, count, sessions, status, covered, now, accent } = *card;
     let mut event = None;
     let pal = theme::palette(ui.visuals());
-    let state = if s.running { "working" } else { status.map_or("", |x| x.state.as_str()) };
+    // Working is a live fact: a report's "working" on a session that has stopped is out of
+    // date. Its verdict, which has read its newest change, says how it ended instead.
+    let state = match (s.running, s.verdict) {
+        (true, _) => "working",
+        (false, Some(v)) => v.state.as_str(),
+        (false, None) => match status.map_or("", |x| x.state.as_str()) {
+            "working" => "idle",
+            st => st,
+        },
+    };
+    // What it did: the report's line, unless the verdict read activity the report hasn't.
+    let newer = s.verdict.filter(|v| !s.running && v.at > covered && !v.why.is_empty());
+    let status = if newer.is_some() { None } else { status };
     let state_color = match state {
         "working" => pal.user,
         "waiting" => pal.note,
@@ -967,6 +978,9 @@ fn session_card(ui: &mut egui::Ui, card: &Card, renaming: &mut Option<Rename>) -
                 });
                 if let Some(tool) = s.tool.filter(|_| s.running) {
                     ui.label(RichText::new(format!("⚙ {tool}…")).monospace().weak().small());
+                }
+                if let Some(v) = newer {
+                    ui.label(&v.why);
                 }
                 if let Some(st) = status {
                     let mut open = |id: Option<String>| {
@@ -1053,6 +1067,7 @@ fn plural(n: usize, word: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::shared::Shared;
 
     fn member(id: &str, modified: u64) -> Member {
         Member { id: id.into(), title: format!("T {id}"), goal: None, path: PathBuf::new(), modified, running: false, queued: 0 }
@@ -1157,10 +1172,9 @@ mod tests {
     #[test]
     fn store_roundtrips_and_clears() {
         let path = std::env::temp_dir().join(format!("scope-orch-{}.json", std::process::id()));
-        let mut s = Store::default();
-        s.entry("W").answered("q".into(), "a".into(), vec!["did".into()], 1);
-        s.save(&path).unwrap();
-        let mut back = Store::load(&path);
+        let mut s: Shared<Store> = Shared::load(path.clone());
+        s.change(|s| s.entry("W").answered("q".into(), "a".into(), vec!["did".into()], 1)).unwrap();
+        let mut back: Shared<Store> = Shared::load(path.clone());
         assert_eq!(back.get("W"), s.get("W"));
         back.clear("W");
         assert!(back.get("W").is_none());

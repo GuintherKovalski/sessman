@@ -8,7 +8,7 @@ fn work() -> Scope {
         .session(session("s-b", "beta prompt", 200))
         .workspaces(&[("Work", &["s-a", "s-b"])])
         .launch();
-    s.click_first("Work");
+    s.click_first("WORK");
     s
 }
 
@@ -39,8 +39,8 @@ fn the_workspace_bubble_opens_the_page_which_writes_its_first_report() {
 #[test]
 fn the_tab_reopens_on_the_page() {
     let mut s = on_page();
-    s.click("All sessions");
-    s.click_first("Work");
+    s.click("SCOPES");
+    s.click_first("WORK");
     assert!(s.sees("Fake summary of "));
     assert_eq!(s.env.config_json("workspaces.json")["list"][0]["last"], "@orchestration");
 }
@@ -87,7 +87,7 @@ fn the_orchestrator_can_act_when_asked() {
     s.type_in_id(Id::new(("orchestration-question", "Work")), "rename the old one");
     s.press(Key::Enter);
     s.wait_to_see("Renaming it.");
-    assert!(s.sees("✓ Renamed \"alpha prompt\" to \"Renamed by the orchestrator\""));
+    assert!(s.sees("✔ Renamed \"alpha prompt\" to \"Renamed by the orchestrator\""));
     assert_eq!(s.env.config_json("names.json")["s-a"], "Renamed by the orchestrator");
 }
 
@@ -102,6 +102,6 @@ fn a_report_it_cannot_read_shows_why() {
 #[test]
 fn an_empty_workspace_page_says_how_to_fill_it() {
     let mut s = setup().workspaces(&[("Empty", &[])]).launch();
-    s.click_first("Empty");
-    assert!(s.sees("No sessions in this workspace yet."));
+    s.click_first("EMPTY");
+    assert!(s.sees("No sessions in this scope yet."));
 }

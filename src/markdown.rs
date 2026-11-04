@@ -190,7 +190,9 @@ fn table(ui: &mut egui::Ui, t: &Table) {
                 painter.vline(x, rect.y_range(), border);
             }
             let at = egui::Rect::from_min_size(cell.min + CELL_PAD + egui::vec2(dx, 0.0), galley.size());
-            let mut resp = ui.put(at, egui::Label::new(galley.clone()).selectable(true));
+            // `place`, not `put`: `put` moves the cursor below the cell, so the next row would
+            // start under the last cell instead of under the row's tallest one.
+            let mut resp = ui.place(at, egui::Label::new(galley.clone()).selectable(true));
             if let Some(url) = link {
                 resp = resp.on_hover_text(url);
                 if resp.hovered() {
@@ -498,6 +500,37 @@ mod drag_tests {
         let all = copied.join("");
         for word in ["Before", "Name", "alpha", "2", "After"] {
             assert!(all.contains(word), "missing {word} in {all:?}");
+        }
+    }
+}
+
+#[cfg(test)]
+mod layout_tests {
+    use super::*;
+
+    /// A cell that wraps to several lines, in a row whose last cell is one line, pushes the
+    /// next row down: no cell's text overlaps another's.
+    #[test]
+    fn wrapped_cells_push_the_next_row_down() {
+        let ctx = egui::Context::default();
+        let mut cache = CommonMarkCache::default();
+        let long = "a helper model rewrites the prompt clearly, asking questions if it is ambiguous, and more words to wrap";
+        let text = format!("| A | B | C |\n|---|---|---|\n| x | {long} {long} | y |\n| x | short | y |\n| x | {long} | y |\n\nAfter\n");
+        let mut rects = Vec::new();
+        for _ in 0..2 {
+            let input = egui::RawInput { screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(1400.0, 900.0))), ..Default::default() };
+            let mut out = ctx.run_ui(input, |ui| show(ui, &mut cache, &text));
+            out.textures_delta.clear();
+            rects = out.shapes.iter().filter_map(|c| match &c.shape {
+                egui::Shape::Text(t) => Some((t.galley.job.text.clone(), egui::Rect::from_min_size(t.pos, t.galley.size()))),
+                _ => None,
+            }).collect();
+        }
+        assert!(rects.iter().any(|(_, r)| r.height() > 30.0), "expected a wrapped cell: {rects:?}");
+        for (i, (a, ra)) in rects.iter().enumerate() {
+            for (b, rb) in &rects[i + 1..] {
+                assert!(!ra.intersects(*rb), "{a:?} at {ra:?} overlaps {b:?} at {rb:?}");
+            }
         }
     }
 }

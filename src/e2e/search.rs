@@ -87,7 +87,7 @@ fn search_stays_within_the_open_workspace() {
         .session(session("s-b", "beta markdown", 100))
         .workspaces(&[("Work", &["s-a"])])
         .launch();
-    s.click_first("Work");
+    s.click_first("WORK");
     s.type_in("search", "markdown");
     assert!(s.sees("alpha markdown"));
     assert!(!s.sees("beta markdown"));

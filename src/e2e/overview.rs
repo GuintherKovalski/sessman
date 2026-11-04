@@ -19,13 +19,13 @@ fn summarized(s: &Scope, names: &[&str]) -> bool {
 #[test]
 fn each_workspace_shows_its_scope_and_what_each_session_does_and_needs() {
     let mut s = two_workspaces();
-    assert!(s.sees("3 workspaces · 2 sessions"));
+    assert!(s.sees("3 scopes · 2 sessions"));
     s.wait_to_see("Fake scope");
     s.wait_to_see("Fake doing");
     assert!(s.sees("⚠ Fake decision"), "what it needs from the developer");
-    assert!(s.sees("last interaction 5 min ago"));
+    assert!(s.sees("· 5 min ago"));
     assert!(s.sees("No sessions yet. Drag some onto its tab."), "an empty workspace's card");
-    assert!(s.sees("1 session not in a workspace."));
+    assert!(s.sees("1 session not in a scope."));
     assert!(!s.sees("Finish session"), "nothing is old enough");
     s.wait_until("both are summarized", |s| summarized(s, &["Work", "Play"]));
     let o = s.env.config_json("overview.json");
@@ -43,8 +43,8 @@ fn every_session_is_listed_newest_first() {
         .launch();
     s.frames(10);
     assert!(s.sees("3 sessions"));
-    assert!(s.shows_before("last interaction 1 min ago", "last interaction 8 min ago"));
-    assert!(s.shows_before("last interaction 8 min ago", "last interaction 15 min ago"));
+    assert!(s.shows_before("· 1 min ago", "· 8 min ago"));
+    assert!(s.shows_before("· 8 min ago", "· 15 min ago"));
 }
 
 #[test]
@@ -101,14 +101,14 @@ fn the_workspace_with_the_latest_idle_session_comes_first() {
         .launch();
     s.frames(10);
     assert!(s.shows_before("beta prompt", "alpha prompt"));
-    assert!(s.shows_before("last interaction 1 min ago", "last interaction 15 min ago"), "Play's card, though its tab is second");
+    assert!(s.shows_before("· 1 min ago", "· 15 min ago"), "Play's card, though its tab is second");
 }
 
 #[test]
 fn clicking_a_card_name_opens_its_workspace() {
     let mut s = two_workspaces();
-    s.click_last("Play");
-    assert!(s.is_selected("Play"));
+    s.click_last("PLAY");
+    assert!(s.is_selected("PLAY"));
     assert!(s.sees("beta prompt"));
     assert!(!s.sees("alpha prompt about ABC-123"));
 }
@@ -117,8 +117,8 @@ fn clicking_a_card_name_opens_its_workspace() {
 fn clicking_a_session_opens_it_in_its_workspace() {
     let mut s = two_workspaces();
     s.wait_to_see("Fake doing");
-    s.click("last interaction 3 min ago");
-    assert!(s.is_selected("Play"), "its workspace's tab");
+    s.click("· 3 min ago");
+    assert!(s.is_selected("PLAY"), "its workspace's tab");
     assert!(s.sees("Reply to beta prompt"), "the session itself");
     assert!(!s.sees("alpha prompt about ABC-123"));
 }
@@ -131,12 +131,12 @@ fn a_session_idle_too_long_is_red_and_can_be_finished() {
         .workspaces(&[("Work", &["s-old", "s-new"])])
         .launch();
     s.frames(10);
-    assert!(s.sees("last interaction 1 d ago"));
+    assert!(s.sees("· 1 d ago"));
     s.click("Finish session");
     s.wait_until("it left the workspace", |s| s.env.config_json("workspaces.json").to_string().contains("s-new") && !s.env.config_json("workspaces.json").to_string().contains("s-old"));
-    assert!(s.sees("1 session not in a workspace."), "the session itself is kept");
+    assert!(s.sees("1 session not in a scope."), "the session itself is kept");
     assert!(!s.sees("Finish session"));
-    assert!(!s.is_selected("Work"), "finishing doesn't open anything");
+    assert!(!s.is_selected("WORK"), "finishing doesn't open anything");
 }
 
 #[test]
@@ -161,21 +161,21 @@ fn a_session_whose_run_finished_unseen_is_highlighted_until_opened() {
         .workspaces(&[("Work", &["s-a", ID])])
         .launch();
     s.frames(10);
-    assert!(!s.sees("✓ Finished"), "nothing ran since scope started");
+    assert!(!s.sees("✔ Finished"), "nothing ran since scope started");
     s.env.hold("hold");
     s.env.run_outside(ID, "HOLD keep going");
     s.wait_to_see("working");
-    assert!(!s.sees("✓ Finished"), "not while it works");
+    assert!(!s.sees("✔ Finished"), "not while it works");
     s.env.release("hold");
-    s.wait_to_see("✓ Finished");
+    s.wait_to_see("✔ Finished");
     assert!(s.sees("1 finished"));
     assert!(s.shows_before("long task", "alpha prompt"), "it moved up as the newest, nothing else");
     s.click("long task");
     s.wait_to_see("Echo: HOLD keep going");
-    s.click("All sessions");
+    s.click("SCOPES");
     s.frames(10);
-    assert!(!s.sees("✓ Finished"), "seen now");
+    assert!(!s.sees("✔ Finished"), "seen now");
     let mut s = s.restart();
     s.frames(10);
-    assert!(!s.sees("✓ Finished"), "and still seen after a restart");
+    assert!(!s.sees("✔ Finished"), "and still seen after a restart");
 }

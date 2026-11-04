@@ -1,3 +1,4 @@
+use eframe::egui;
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 
@@ -206,12 +207,12 @@ impl Workspaces {
     pub fn rename(&mut self, ws: usize, name: &str) -> Result<(), String> {
         let name = name.trim();
         if name.is_empty() {
-            return Err("a workspace needs a name".into());
+            return Err("a scope needs a name".into());
         }
         if self.list.iter().enumerate().any(|(i, w)| i != ws && w.name.eq_ignore_ascii_case(name)) {
-            return Err(format!("there is already a workspace called \"{name}\""));
+            return Err(format!("there is already a scope called \"{name}\""));
         }
-        let w = self.list.get_mut(ws).ok_or("no such workspace")?;
+        let w = self.list.get_mut(ws).ok_or("no such scope")?;
         w.name = name.to_owned();
         Ok(())
     }
@@ -231,6 +232,26 @@ impl Workspaces {
 
 /// Which session to open when a tab is selected: the one last open there if it is still in
 /// the tab, else the most recent (`ids` is newest first). None for an empty tab.
+/// How a scope's name shows: upper case, whatever was typed (it is kept as typed, and found
+/// by it).
+pub fn label(name: &str) -> String {
+    name.to_uppercase()
+}
+
+/// A scope as a tab: its name in upper case on its color, outlined in it while selected. The
+/// tabs at the top left and the cards of the overview are drawn with it, so they look alike.
+pub fn tab(ui: &mut egui::Ui, name: &str, color: Option<[u8; 3]>, selected: bool) -> egui::Response {
+    let bg = ui.painter().add(egui::Shape::Noop);
+    let tab = ui.selectable_label(selected, label(name));
+    if let Some([r, g, b]) = color {
+        ui.painter().set(bg, egui::Shape::rect_filled(tab.rect, 3.0, egui::Color32::from_rgba_unmultiplied(r, g, b, 90)));
+        if selected {
+            ui.painter().rect_stroke(tab.rect, 3.0, egui::Stroke::new(1.5, egui::Color32::from_rgb(r, g, b)), egui::StrokeKind::Inside);
+        }
+    }
+    tab
+}
+
 pub fn pick_session(last: Option<&str>, ids: &[&str]) -> Option<usize> {
     last.and_then(|l| ids.iter().position(|id| *id == l)).or((!ids.is_empty()).then_some(0))
 }

@@ -6,6 +6,8 @@
 #   that commit. main is never pushed to by hand.
 # - A push to main that is not a commit stage already has fails the "guard" job, so a
 #   change that skipped the road shows up red on main.
+# - When a promotion changes the version in Cargo.toml (scripts/flow.sh release <version>),
+#   release.yml builds and publishes that version.
 name: ci
 
 on:
@@ -63,10 +65,24 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: write
+    outputs:
+      release: ${{ steps.version.outputs.release }}
     steps:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
+      # Before the push below, which moves origin/main.
+      - name: Release when the version changed
+        id: version
+        run: |
+          version() { git show "$1:Cargo.toml" | sed -n 's/^version = "\(.*\)"/\1/p' | head -n 1; }
+          new=$(version "$GITHUB_SHA")
+          git fetch origin main
+          old=$(version origin/main)
+          if [ "$new" != "$old" ] && ! git ls-remote --exit-code --tags origin "refs/tags/v$new" >/dev/null; then
+            echo "version $old -> $new: releasing v$new"
+            echo "release=$new" >> "$GITHUB_OUTPUT"
+          fi
       - name: Fast-forward main to the tested stage commit
         run: |
           git fetch origin main
@@ -75,3 +91,14 @@ jobs:
             exit 1
           fi
           git push origin "$GITHUB_SHA:refs/heads/main"
+
+  release:
+    needs: promote
+    if: needs.promote.outputs.release != ''
+    permissions:
+      contents: write
+    uses: ./.github/workflows/release.yml
+    with:
+      version: ${{ needs.promote.outputs.release }}
+      ref: ${{ github.sha }}
+    secrets: inherit

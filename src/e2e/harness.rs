@@ -264,6 +264,8 @@ pub fn setup() -> Setup {
     let mut settings = serde_json::Map::new();
     settings.insert("claude_path".into(), json!(fake_claude().display().to_string()));
     settings.insert("notify_when_done".into(), json!(false));
+    // Off, so the helper calls tests count stay theirs; verdicts.rs's tests turn it on.
+    settings.insert("tag_finished".into(), json!(false));
     settings.insert("theme".into(), json!("dark"));
     Setup { env, lock, settings }
 }
@@ -331,6 +333,8 @@ pub struct Scope {
     // Dropped first: the app (and the threads it started) before the folders go.
     h: Harness<'static, App>,
     pub env: Env,
+    /// The last text the app put on the clipboard.
+    pub copied: Option<String>,
     _lock: MutexGuard<'static, ()>,
 }
 
@@ -378,7 +382,7 @@ impl Scope {
             .with_step_dt(1.0 / 60.0)
             .with_max_steps(20)
             .build_eframe(|cc| App::new(&cc.egui_ctx));
-        let mut s = Scope { h, env, _lock: lock };
+        let mut s = Scope { h, env, copied: None, _lock: lock };
         s.frames(3);
         s
     }
@@ -416,6 +420,11 @@ impl Scope {
     pub fn frames(&mut self, n: usize) {
         for _ in 0..n {
             self.h.step();
+            for c in &self.h.output().platform_output.commands {
+                if let egui::OutputCommand::CopyText(t) = c {
+                    self.copied = Some(t.clone());
+                }
+            }
         }
     }
 
@@ -474,6 +483,11 @@ impl Scope {
         let nodes: Vec<_> = self.h.query_all_by_label(label).collect();
         assert!(!nodes.is_empty(), "nothing labelled \"{label}\" on screen:\n{}", self.screen());
         nodes.iter().all(|n| !n.accesskit_node().is_disabled())
+    }
+
+    /// The window's zoom factor.
+    pub fn zoom(&self) -> f32 {
+        self.h.ctx.zoom_factor()
     }
 
     /// Whether `text` shows anywhere (part of a label, a field's contents or its hint).
@@ -641,6 +655,12 @@ impl Scope {
         self.frames(4);
     }
 
+    /// Where the top of the widget labelled `label` is, from the window's top.
+    #[track_caller]
+    pub fn top_of(&self, label: &str) -> f32 {
+        self.node(label).rect().top()
+    }
+
     /// Whether the widget labelled `label` shows as selected (a session's bubble, a tab).
     #[track_caller]
     pub fn is_selected(&self, label: &str) -> bool {
@@ -734,6 +754,12 @@ impl Scope {
     /// Types into the prompt input.
     pub fn type_prompt(&mut self, text: &str) {
         self.type_in("prompt-input", text);
+    }
+
+    /// Types `text` wherever the keyboard is, without clicking a field first.
+    pub fn type_here(&mut self, text: &str) {
+        self.h.event(egui::Event::Text(text.to_owned()));
+        self.frames(3);
     }
 
     /// Drops a file on the window, as from Finder.

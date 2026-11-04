@@ -1,6 +1,6 @@
 use eframe::egui::{self, RichText, ThemePreference};
 use serde::{Deserialize, Serialize};
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 /// scope's own folder: `~/.config/scope`, or `$SCOPE_CONFIG` (used to run a test copy
 /// of the app next to the real one).
@@ -59,6 +59,9 @@ pub struct Settings {
     pub confirm_delete_message: bool,
     pub restore_state: bool,
     pub notify_when_done: bool,
+    /// After a run ends, the helper model reads the session's last messages and tags it done,
+    /// waiting for you or blocked (verdict.rs).
+    pub tag_finished: bool,
     /// Jira site the overview's ticket keys link to, e.g. https://acme.atlassian.net.
     pub jira_url: String,
     /// Harness: the instructions each helper starts from (Settings → Harness). Empty = default.
@@ -73,6 +76,8 @@ pub struct Settings {
     /// Hours without activity after which the overview shows a session in red and offers to
     /// finish it; 0 = never.
     pub stale_after_hours: u32,
+    /// Look for a newer scope on GitHub at start and twice a day (Settings → About).
+    pub check_for_updates: bool,
 }
 
 impl Default for Settings {
@@ -98,6 +103,7 @@ impl Default for Settings {
             confirm_delete_message: true,
             restore_state: true,
             notify_when_done: false,
+            tag_finished: true,
             jira_url: String::new(),
             orchestration_harness: crate::orchestration::DEFAULT_HARNESS.into(),
             question_harness: crate::goal::QUESTION_HARNESS.into(),
@@ -105,22 +111,12 @@ impl Default for Settings {
             orchestration_model: String::new(),
             orchestration_every: 10,
             stale_after_hours: 24,
+            check_for_updates: true,
         }
     }
 }
 
 impl Settings {
-    pub fn load(path: &Path) -> Self {
-        std::fs::read_to_string(path).ok().and_then(|s| serde_json::from_str(&s).ok()).unwrap_or_default()
-    }
-
-    pub fn save(&self, path: &Path) -> std::io::Result<()> {
-        if let Some(dir) = path.parent() {
-            std::fs::create_dir_all(dir)?;
-        }
-        std::fs::write(path, serde_json::to_string_pretty(self)?)
-    }
-
     /// The harness text, or `default` when it was emptied.
     pub fn harness<'a>(text: &'a str, default: &'a str) -> &'a str {
         if text.trim().is_empty() { default } else { text }
@@ -172,6 +168,7 @@ pub fn shortcuts(s: &Settings) -> Vec<(&'static str, String)> {
 /// What the Settings page shows besides the settings themselves.
 pub struct About<'a> {
     pub status_line: &'a str,
+    pub updater: &'a mut crate::update::Updater,
 }
 
 /// True if `query` matches a setting's label or section (case-insensitive, every word).
@@ -181,7 +178,7 @@ pub fn matches(query: &str, section: &str, label: &str) -> bool {
 }
 
 /// The Settings page. Returns true when a setting changed (to save and apply it).
-pub fn ui(ui: &mut egui::Ui, s: &mut Settings, filter: &mut String, about: &About) -> bool {
+pub fn ui(ui: &mut egui::Ui, s: &mut Settings, filter: &mut String, about: &mut About) -> bool {
     let before = s.clone();
     let defaults = Settings::default();
     ui.horizontal(|ui| {
@@ -298,7 +295,7 @@ pub fn ui(ui: &mut egui::Ui, s: &mut Settings, filter: &mut String, about: &Abou
         });
 
         page.section("Behaviour");
-        page.row("Confirm before deleting a workspace", "", s.confirm_delete_workspace != defaults.confirm_delete_workspace, |ui, reset| {
+        page.row("Confirm before deleting a scope", "", s.confirm_delete_workspace != defaults.confirm_delete_workspace, |ui, reset| {
             if reset {
                 s.confirm_delete_workspace = defaults.confirm_delete_workspace;
             }
@@ -322,15 +319,21 @@ pub fn ui(ui: &mut egui::Ui, s: &mut Settings, filter: &mut String, about: &Abou
             }
             ui.checkbox(&mut s.notify_when_done, "");
         });
+        page.row("Tag finished sessions", "After a run ends, the helper model reads the last messages and tags the session done, needs you or blocked", s.tag_finished != defaults.tag_finished, |ui, reset| {
+            if reset {
+                s.tag_finished = defaults.tag_finished;
+            }
+            ui.checkbox(&mut s.tag_finished, "");
+        });
 
         page.section("Overview");
-        page.row("Jira URL", "Ticket keys in the workspaces overview link here, e.g. https://acme.atlassian.net", s.jira_url != defaults.jira_url, |ui, reset| {
+        page.row("Jira URL", "Ticket keys in the scopes overview link here, e.g. https://acme.atlassian.net", s.jira_url != defaults.jira_url, |ui, reset| {
             if reset {
                 s.jira_url = defaults.jira_url.clone();
             }
             ui.add(egui::TextEdit::singleline(&mut s.jira_url).hint_text("https://…atlassian.net").desired_width(260.0));
         });
-        page.row("Offer to finish sessions idle for (hours)", "Their last interaction shows in red, with Finish session to take them out of the workspace; 0 = never", s.stale_after_hours != defaults.stale_after_hours, |ui, reset| {
+        page.row("Offer to finish sessions idle for (hours)", "They show Finish session, to take them out of the scope; 0 = never", s.stale_after_hours != defaults.stale_after_hours, |ui, reset| {
             if reset {
                 s.stale_after_hours = defaults.stale_after_hours;
             }
@@ -338,7 +341,7 @@ pub fn ui(ui: &mut egui::Ui, s: &mut Settings, filter: &mut String, about: &Abou
         });
 
         page.section("Harness");
-        page.row("Workspace orchestration", "What the orchestrator of each workspace is told to do; the reply format and the sessions are added after it", s.orchestration_harness != defaults.orchestration_harness, |ui, reset| {
+        page.row("Scope orchestration", "What the orchestrator of each scope is told to do; the reply format and the sessions are added after it", s.orchestration_harness != defaults.orchestration_harness, |ui, reset| {
             if reset {
                 s.orchestration_harness = defaults.orchestration_harness.clone();
             }
@@ -379,6 +382,13 @@ pub fn ui(ui: &mut egui::Ui, s: &mut Settings, filter: &mut String, about: &Abou
         page.section("About");
         page.row("Version", "", false, |ui, _| {
             ui.label(env!("CARGO_PKG_VERSION"));
+            update_status(ui, about.updater);
+        });
+        page.row("Check for updates automatically", "At start and twice a day, on GitHub; installing always waits for you", s.check_for_updates != defaults.check_for_updates, |ui, reset| {
+            if reset {
+                s.check_for_updates = defaults.check_for_updates;
+            }
+            ui.checkbox(&mut s.check_for_updates, "");
         });
         page.row("Config folder", "", false, |ui, _| {
             let dir = config_dir();
@@ -395,6 +405,55 @@ pub fn ui(ui: &mut egui::Ui, s: &mut Settings, filter: &mut String, about: &Abou
         }
     });
     *s != before
+}
+
+/// Where updates stand, with the button for the next step (check, install, retry).
+fn update_status(ui: &mut egui::Ui, u: &mut crate::update::Updater) {
+    use crate::update::State;
+    let ctx = ui.ctx().clone();
+    let page = |ui: &mut egui::Ui, url: &str| {
+        if !url.is_empty() && ui.small_button("What's new").clicked() {
+            let _ = std::process::Command::new("open").arg(url).spawn();
+        }
+    };
+    match &u.state {
+        State::Idle => {
+            if ui.small_button("Check for updates").clicked() {
+                u.check_now(&ctx);
+            }
+        }
+        State::Checking => {
+            ui.spinner();
+            ui.label(RichText::new("checking…").weak());
+        }
+        State::UpToDate => {
+            ui.label(RichText::new("up to date").weak());
+            if ui.small_button("Check again").clicked() {
+                u.check_now(&ctx);
+            }
+        }
+        State::Available(r) => {
+            let (version, url) = (r.version.clone(), r.page.clone());
+            ui.label(RichText::new(format!("{version} is available")).strong());
+            if ui.button(format!("Install {version} and restart")).clicked() {
+                u.install(&ctx);
+            }
+            page(ui, &url);
+        }
+        State::Installing(r) => {
+            ui.spinner();
+            ui.label(format!("installing {}…", r.version));
+        }
+        State::Ready(r) => {
+            ui.label(format!("{} installed, restarting…", r.version));
+        }
+        State::Failed(e) => {
+            ui.label(RichText::new(e).color(ui.visuals().error_fg_color));
+            if ui.small_button("Try again").clicked() {
+                u.check_now(&ctx);
+            }
+        }
+    }
 }
 
 /// A harness's text: several lines, wide enough to read and edit as a paragraph. Emptying it
@@ -457,16 +516,16 @@ mod tests {
     fn old_theme_only_file_loads_with_defaults() {
         let path = std::env::temp_dir().join(format!("scope-settings-{}.json", std::process::id()));
         std::fs::write(&path, r#"{"theme":"dark"}"#).unwrap();
-        let s = Settings::load(&path);
+        let load = || crate::shared::Shared::<Settings>::load(path.clone());
+        let mut s = load();
         assert_eq!(s.theme(), ThemePreference::Dark);
         assert_eq!(s.helper_model, "haiku");
         assert!(s.restore_state);
-        let mut s2 = s.clone();
-        s2.zoom = 1.25;
-        s2.save(&path).unwrap();
-        assert_eq!(Settings::load(&path), s2);
+        s.zoom = 1.25;
+        s.save().unwrap();
+        assert_eq!(*load(), *s);
         std::fs::write(&path, "not json").unwrap();
-        assert_eq!(Settings::load(&path), Settings::default());
+        assert_eq!(*load(), Settings::default());
         std::fs::remove_file(path).unwrap();
     }
 
@@ -476,7 +535,7 @@ mod tests {
         assert_eq!(s.search_harness, crate::search::DEFAULT_HARNESS);
         assert_eq!(Settings::harness("  \n", "D"), "D");
         assert_eq!(Settings::harness("mine", "D"), "mine");
-        assert!(matches("harness", "Harness", "Workspace orchestration"));
+        assert!(matches("harness", "Harness", "Scope orchestration"));
     }
 
     #[test]

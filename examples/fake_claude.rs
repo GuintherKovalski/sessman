@@ -7,12 +7,14 @@
 //!   `Echo: <first line of the prompt>`. Words in the prompt change that (plain words, so
 //!   the app's Markdown shows them as they are): `HOLD` waits (after writing "Partial reply")
 //!   while `$HOME/fake/hold` exists, `TOOL` starts a Bash tool call first, `EDIT` edits
-//!   `notes.txt` in the session's folder, `FAIL` ends with an error, `NOFILE` fails before
+//!   `notes.txt` in the session's folder, `SHELL` (with `HOLD`) runs `sleep 30` the way
+//!   Claude Code's Bash tool does (a shell that `eval`s it, its call in the session file)
+//!   while it waits, `FAIL` ends with an error, `NOFILE` fails before
 //!   writing anything (so a new session never gets a file). With `--input-format stream-json`
 //!   the prompt is the user message on stdin: its text, then `(N images)` when it has images,
 //!   and the session file gets its content blocks as they came.
 //! - A helper question (`--no-session-persistence`) gets a fixed reply in the format its
-//!   parser expects (goal, refine, search, overview, orchestration, ask, btw; an empty
+//!   parser expects (goal, refine, search, overview, orchestration, ask, btw, verdict; an empty
 //!   name), or the contents of `$HOME/fake/<kind>` when that file exists. It waits while
 //!   `$HOME/fake/<kind>.hold` exists.
 //!
@@ -140,9 +142,22 @@ fn run(home: &Path, fake: &Path, args: &[String], prompt: &str, content: Value) 
     if prompt.contains("TOOL") {
         emit(json!({"type": "stream_event", "event": {"type": "content_block_start", "content_block": {"type": "tool_use", "name": "Bash"}}}));
     }
+    let shell = prompt.contains("SHELL").then(|| {
+        let input = json!({"command": "sleep 30", "description": "Wait for the build", "timeout": 60000});
+        let call = json!({"type": "tool_use", "id": "toolu_fake_shell", "name": "Bash", "input": input});
+        append(&file, &json!({"type": "assistant", "sessionId": id, "cwd": cwd_s, "message": {"role": "assistant", "content": [call]}}));
+        let script = "test -f /nowhere/.claude/shell-snapshots/snapshot-sh-1.sh || true && eval 'sleep 30' < /dev/null && pwd -P > /dev/null";
+        std::process::Command::new("/bin/sh").args(["-c", script]).spawn().expect("a shell")
+    });
     if prompt.contains("HOLD") {
         emit(json!({"type": "stream_event", "event": {"type": "content_block_delta", "delta": {"type": "text_delta", "text": "Partial reply"}}}));
         wait_while(&fake.join("hold"));
+    }
+    if let Some(mut child) = shell {
+        // Its sleep goes with it: the shell is killed, then the sleep sees no one waiting.
+        let _ = std::process::Command::new("pkill").args(["-P", &child.id().to_string()]).status();
+        let _ = child.kill();
+        let _ = child.wait();
     }
     if prompt.contains("FAIL") {
         emit(json!({"type": "result", "subtype": "error", "is_error": true, "result": "fake failure"}));
@@ -179,12 +194,14 @@ fn helper(fake: &Path, args: &[String], prompt: &str) -> i32 {
         "refine"
     } else if prompt.contains("Looking for:") {
         "search"
-    } else if prompt.contains("overview card of a WORKSPACE") {
+    } else if prompt.contains("overview card of a SCOPE") {
         "overview"
     } else if prompt.contains("Answer the developer's QUESTION") {
         "ask"
     } else if prompt.contains("Name this coding session") {
         "name"
+    } else if prompt.contains("Has this Claude Code session finished") {
+        "verdict"
     } else if prompt.contains("\"progress\": <0 to 100") {
         "orchestration"
     } else {
@@ -213,6 +230,7 @@ fn helper(fake: &Path, args: &[String], prompt: &str) -> i32 {
         })
         .to_string(),
         "ask" => "Fake answer about [[1]]".to_owned(),
+        "verdict" => json!({"state": "done", "why": "Fake work shipped"}).to_string(),
         // Empty, so new sessions keep their first prompt as name unless a test sets one.
         "name" => String::new(),
         _ => {
