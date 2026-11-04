@@ -129,6 +129,8 @@ pub struct App {
     unlisted: Vec<(String, String, Option<PathBuf>)>,
     /// Folder of a new session that has no prompt yet (nothing exists on disk until then).
     new_session: Option<PathBuf>,
+    /// What the new session will start with, gathered once per folder.
+    new_info: Option<(PathBuf, crate::newinfo::NewInfo)>,
     /// Id given to the new session's first prompt, to select it once it exists.
     new_id: Option<String>,
     /// Set to move keyboard focus to the prompt input on the next frame.
@@ -391,6 +393,7 @@ impl App {
             renaming: None,
             unlisted: Vec::new(),
             new_session: None,
+            new_info: None,
             new_id: None,
             focus_prompt: false,
             right_tab: RightTab::Changes,
@@ -1499,6 +1502,7 @@ impl App {
         self.new_id = None;
         self.open = Some(Session { cwd: Some(dir.clone()), ..Default::default() });
         self.new_session = Some(dir);
+        self.new_info = None;
         self.history = History::default();
         self.pinned = None;
         self.picked_message = None;
@@ -2978,11 +2982,18 @@ impl App {
             }));
             return;
         };
-        if let Some(dir) = self.new_session.as_ref().filter(|_| s.messages.is_empty()) {
-            ui.centered_and_justified(|ui| {
-                let status = if self.open_running() { "Starting…" } else { "Type your first prompt below." };
-                ui.label(format!("New session in {}\n\n{status}", dir.display()));
-            });
+        if let Some(dir) = self.new_session.clone().filter(|_| s.messages.is_empty()) {
+            if self.new_info.as_ref().is_none_or(|(d, _)| *d != dir) {
+                let home = PathBuf::from(std::env::var("HOME").unwrap_or_default());
+                let extra: Vec<String> = self.settings.extra_args.split_whitespace().map(str::to_owned).collect();
+                let scope = crate::newinfo::Scope { model: &self.settings.model, extra: &extra };
+                let info = crate::newinfo::gather(&dir, &home, &scope, &|k| std::env::var(k).ok());
+                self.new_info = Some((dir.clone(), info));
+            }
+            let status = if self.open_running() { "Starting…" } else { "Type your first prompt below." };
+            if let Some((_, info)) = &self.new_info {
+                crate::newinfo::show(ui, &dir, info, status);
+            }
             return;
         }
         let pal = theme::palette(ui.visuals());
