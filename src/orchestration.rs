@@ -787,7 +787,7 @@ pub fn ui(ui: &mut egui::Ui, page: &Page, question: &mut String, renaming: &mut 
             for (k, s) in page.sessions.iter().enumerate() {
                 let status = report.and_then(|r| r.sessions.iter().find(|x| x.id == s.id));
                 let covered = page.orch.and_then(|o| o.covered.get(s.id)).copied().unwrap_or(0);
-                let card = Card { s, k, count: page.sessions.len(), sessions: page.sessions, status, covered, now, accent };
+                let card = Card { s, k, count: page.sessions.len(), columns, sessions: page.sessions, status, covered, now, accent };
                 if let Some(e) = session_card(&mut cols[k % columns], &card, renaming) {
                     event = Some(e);
                 }
@@ -889,6 +889,8 @@ struct Card<'a> {
     s: &'a Live<'a>,
     k: usize,
     count: usize,
+    /// Columns the cards are laid out in, row by row.
+    columns: usize,
     sessions: &'a [Live<'a>],
     status: Option<&'a Status>,
     /// The session's newest change the report has read.
@@ -897,10 +899,10 @@ struct Card<'a> {
     accent: Color32,
 }
 
-/// A session's card. Clicking opens the session, dragging it onto another card moves it there
-/// in the bar, the pencil renames it, and right-click has all of these.
+/// A session's card. Clicking opens the session, dragging it onto another card puts it before
+/// or after that one, the pencil renames it, and right-click has all of these.
 fn session_card(ui: &mut egui::Ui, card: &Card, renaming: &mut Option<Rename>) -> Option<Event> {
-    let Card { s, k, count, sessions, status, covered, now, accent } = *card;
+    let Card { s, k, count, columns, sessions, status, covered, now, accent } = *card;
     let mut event = None;
     let pal = theme::palette(ui.visuals());
     // Working is a live fact: a report's "working" on a session that has stopped is out of
@@ -1014,7 +1016,8 @@ fn session_card(ui: &mut egui::Ui, card: &Card, renaming: &mut Option<Rename>) -
     let stripe = egui::Rect::from_min_max(rect.min + egui::vec2(4.0, 8.0), egui::pos2(rect.min.x + 7.0, rect.max.y - 8.0));
     ui.painter().rect_filled(stripe, 1.5, state_color);
 
-    // Dragged onto another card: it takes that one's place.
+    // Dragged onto another card: a line shows which side of it the card goes (left or right
+    // when the cards run in rows, above or below in one column), letting go puts it there.
     if card.drag_started() && !editing {
         card.dnd_set_drag_payload(s.id.to_owned());
     }
@@ -1024,14 +1027,23 @@ fn session_card(ui: &mut egui::Ui, card: &Card, renaming: &mut Option<Rename>) -
         let painter = ui.ctx().layer_painter(egui::LayerId::new(egui::Order::Tooltip, Id::new("orchestration-drag")));
         painter.text(pos + egui::vec2(14.0, 0.0), egui::Align2::LEFT_CENTER, s.title, egui::FontId::proportional(14.0), pal.user);
     }
-    if card.dnd_hover_payload::<String>().is_some_and(|from| *from != s.id) {
-        ui.painter().rect_stroke(rect, 8.0, Stroke::new(2.0, accent), StrokeKind::Outside);
-    }
-    if let Some(from) = card.dnd_release_payload::<String>().filter(|from| **from != s.id) {
-        event = Some(Event::Move((*from).clone(), k));
+    if let Some(from) = card.dnd_hover_payload::<String>().filter(|from| **from != s.id) {
+        let pos = ui.ctx().pointer_interact_pos().unwrap_or(rect.center());
+        let after = if columns > 1 { pos.x > rect.center().x } else { pos.y > rect.center().y };
+        let line = Stroke::new(2.0, accent);
+        match (columns > 1, after) {
+            (true, false) => ui.painter().vline(rect.left() - 4.0, rect.y_range(), line),
+            (true, true) => ui.painter().vline(rect.right() + 4.0, rect.y_range(), line),
+            (false, false) => ui.painter().hline(rect.x_range(), rect.top() - 4.0, line),
+            (false, true) => ui.painter().hline(rect.x_range(), rect.bottom() + 4.0, line),
+        };
+        if card.dnd_release_payload::<String>().is_some() {
+            let from_k = sessions.iter().position(|x| x.id == from.as_str()).unwrap_or(k);
+            event = Some(Event::Move((*from).clone(), drop_place(from_k, k, after)));
+        }
     }
 
-    let card = card.on_hover_cursor(egui::CursorIcon::PointingHand).on_hover_text("Open this session · drag onto another to reorder");
+    let card = card.on_hover_cursor(egui::CursorIcon::PointingHand).on_hover_text("Open this session · drag it before or after another to reorder");
     if card.clicked() && !editing {
         event = Some(Event::Open(s.id.to_owned()));
     }
@@ -1060,12 +1072,28 @@ fn session_card(ui: &mut egui::Ui, card: &Card, renaming: &mut Option<Rename>) -
     event
 }
 
+/// Where a card at `from` lands, counted once it is taken out, when dropped before (or
+/// `after`) the card at `onto`.
+fn drop_place(from: usize, onto: usize, after: bool) -> usize {
+    let slot = onto + usize::from(after);
+    if from < slot { slot - 1 } else { slot }
+}
+
 fn plural(n: usize, word: &str) -> String {
     if n == 1 { format!("1 {word}") } else { format!("{n} {word}s") }
 }
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_dropped_card_goes_before_or_after_the_one_it_is_dropped_on() {
+        // Cards a b c d; the index is where it goes once taken out.
+        assert_eq!(drop_place(0, 2, false), 1, "a before c: b a c d");
+        assert_eq!(drop_place(0, 3, true), 3, "a after d: b c d a");
+        assert_eq!(drop_place(3, 0, false), 0, "d before a: d a b c");
+        assert_eq!(drop_place(3, 1, true), 2, "d after b: a b d c");
+    }
+
     use super::*;
     use crate::shared::Shared;
 

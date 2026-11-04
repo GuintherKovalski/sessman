@@ -67,6 +67,12 @@ it to zoom. At its right end, a dimmed **⚙** opens Settings.
   on the workspaces overview.
   - **+** asks for a name and creates a workspace tab.
   - Drag a session onto a workspace tab to put it there (the tab is outlined while you hover).
+  - Inside a workspace tab (with no search), drag highlighted sessions (the open one, or the
+    picked ones) up or down the list to reorder it: a line shows where they go. The order is
+    saved (`bar` in `workspaces.json`, `scope list` says "arranged by hand"); sessions not
+    placed yet, like new ones, go above the placed ones, newest first. Right-click a session →
+    **Sort newest first** goes back. A drag from a row that isn't highlighted still draws a box.
+  - Drag a workspace tab before or after another to reorder the tabs (a line shows where).
   - Or right-click a session → **Move to** → pick a workspace.
   - Inside a workspace tab, right-click a session → **Remove from workspace**.
   - Right-click a workspace tab → **Rename workspace**: the tab turns into a field with the
@@ -123,7 +129,9 @@ opened; clicking "All sessions" again comes back to it.
   workspace opens on it too): overall **progress**, a summary, **Needs you**, **Next**, then a
   card per session with its live state (working spinner and tool, queued prompts, last activity,
   goal checklist) and what the report says (working / waiting / blocked / done / idle, what it is
-  doing, its next step). Click a card to open the session. Working is a live fact: a stopped
+  doing, its next step). Click a card to open the session; drag it onto another to put it
+  before or after that one (a line shows which side). The cards' order is their own: the bar's
+  is arranged apart. Working is a live fact: a stopped
   session's card takes its state from its tag (and the tag's reason when the report hasn't read
   its last activity yet), never from a report written while it was still running.
 - The report is written by the orchestration model (the helper model unless set) from the
@@ -321,7 +329,6 @@ which sets `statusLine` in `~/.claude/settings.json` and nothing else.
 ### Current limitations
 - `claude -p` is non-interactive, so tools that need your approval are refused (Settings →
   Extra arguments can pass a permission mode).
-- You can't rename or reorder workspaces (sessions can be renamed).
 
 Known gaps in the newer features are listed in [README.md](README.md#gaps).
 Planned features for the next rounds are in [ROADMAP.md](ROADMAP.md).
