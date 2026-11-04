@@ -161,21 +161,21 @@ fn a_session_whose_run_finished_unseen_is_highlighted_until_opened() {
         .workspaces(&[("Work", &["s-a", ID])])
         .launch();
     s.frames(10);
-    assert!(!s.sees("✓ Finished"), "nothing ran since scope started");
+    assert!(!s.sees("✔ Finished"), "nothing ran since scope started");
     s.env.hold("hold");
     s.env.run_outside(ID, "HOLD keep going");
     s.wait_to_see("working");
-    assert!(!s.sees("✓ Finished"), "not while it works");
+    assert!(!s.sees("✔ Finished"), "not while it works");
     s.env.release("hold");
-    s.wait_to_see("✓ Finished");
+    s.wait_to_see("✔ Finished");
     assert!(s.sees("1 finished"));
     assert!(s.shows_before("long task", "alpha prompt"), "it moved up as the newest, nothing else");
     s.click("long task");
     s.wait_to_see("Echo: HOLD keep going");
     s.click("Scopes");
     s.frames(10);
-    assert!(!s.sees("✓ Finished"), "seen now");
+    assert!(!s.sees("✔ Finished"), "seen now");
     let mut s = s.restart();
     s.frames(10);
-    assert!(!s.sees("✓ Finished"), "and still seen after a restart");
+    assert!(!s.sees("✔ Finished"), "and still seen after a restart");
 }

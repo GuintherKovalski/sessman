@@ -616,7 +616,7 @@ fn rows_grid(ui: &mut egui::Ui, w: usize, card: &Card, columns: usize, now: u64,
 /// A session's tile: its name, then in small print what it is doing and what it needs from
 /// the developer (⚠, in the orchestration page's gold), and at the bottom right when it was
 /// last touched, small like the list's time (with **Finish session** once stale) or a spinner
-/// while it works. One whose run finished unseen is marked ✓ in green. Clicking it opens it. At least `height` tall; also returns how tall it
+/// while it works. One whose run finished unseen is marked ✔ in green. Clicking it opens it. At least `height` tall; also returns how tall it
 /// would be on its own.
 fn row_ui(ui: &mut egui::Ui, w: usize, row: &Row, note: Option<&Note>, now: u64, stale_after: u64, height: f32) -> (Option<Event>, f32) {
     let mut event = None;
@@ -676,7 +676,7 @@ fn row_ui(ui: &mut egui::Ui, w: usize, row: &Row, note: Option<&Note>, now: u64,
                 }
                 if row.finished {
                     ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
-                        ui.label(RichText::new("✓ Finished").small().color(pal.add_fg))
+                        ui.label(RichText::new("✔ Finished").small().color(pal.add_fg))
                             .on_hover_text("Its last run ended after you last opened it");
                     });
                 }

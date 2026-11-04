@@ -41,8 +41,8 @@ it to zoom. At its right end, a dimmed **⚙** opens Settings.
   generated title, or your first prompt) and its project folder. The list refreshes on its
   own (every 10 s and after each reply), so sessions started elsewhere show up by themselves.
   A session that is working shows ⏳, and `+N queued` when prompts are waiting for it.
-  One that has stopped shows how its work ended, beside its time: **✓ done**, **● needs you**
-  or **! blocked** (the reason on hover; `scope list` adds `[done]`, `[needs you]`,
+  One that has stopped shows how its work ended, beside its time: **✔ done**, **✋ needs you**
+  or **⚠ blocked** (the reason on hover; `scope list` adds `[done]`, `[needs you]`,
   `[blocked]`). After each run ends, the helper model reads the end of the conversation and
   decides; scope also checks, a couple at a time, the workspace sessions changed in the last 3
   days that no verdict has read (runs that ended while it was closed, or in a terminal). Any
@@ -102,10 +102,10 @@ opened; clicking "All sessions" again comes back to it.
 - A session with no activity for 24 hours (Settings → Overview, 0 = never) shows **Finish
   session**: it leaves the workspace (the session itself is kept).
 - A session whose run ended after you last had it open is marked
-  **✓ Finished** (it is not moved: the order stays newest first); opening it clears the mark.
+  **✔ Finished** (it is not moved: the order stays newest first); opening it clears the mark.
   What was last seen is kept in `state.json`.
 - Only two small marks are colored, in the colors the orchestration page uses for the same
-  states: what a session needs from you in its gold, **✓ Finished** in its green.
+  states: what a session needs from you in its gold, **✔ Finished** in its green.
 - Click a session to open it, in its workspace's tab.
 - What the helper model made of each workspace is kept in `~/.config/scope/overview.json`.
   It is written when missing, then again (a few minutes apart at most) for the sessions with

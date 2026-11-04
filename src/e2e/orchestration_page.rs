@@ -87,7 +87,7 @@ fn the_orchestrator_can_act_when_asked() {
     s.type_in_id(Id::new(("orchestration-question", "Work")), "rename the old one");
     s.press(Key::Enter);
     s.wait_to_see("Renaming it.");
-    assert!(s.sees("✓ Renamed \"alpha prompt\" to \"Renamed by the orchestrator\""));
+    assert!(s.sees("✔ Renamed \"alpha prompt\" to \"Renamed by the orchestrator\""));
     assert_eq!(s.env.config_json("names.json")["s-a"], "Renamed by the orchestrator");
 }
 

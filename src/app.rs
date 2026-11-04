@@ -1312,7 +1312,7 @@ impl App {
                 let state = match (self.runs.contains_key(&id), listed) {
                     (_, None) => "  [starting]".to_owned(),
                     (true, Some(_)) => "  [working]".to_owned(),
-                    (false, Some(i)) => self.verdict_of(i).map_or(String::new(), |v| format!("  [{}]", v.label().trim_start_matches(['✓', '!', '●', ' ']))),
+                    (false, Some(i)) => self.verdict_of(i).map_or(String::new(), |v| format!("  [{}]", v.label().split_once(' ').map_or("", |(_, word)| word))),
                 };
                 out.push_str(&format!("  {}. {}  {id}{state}\n", k + 1, self.name_of(&id)));
             }
