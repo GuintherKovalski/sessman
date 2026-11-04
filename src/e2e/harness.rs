@@ -631,6 +631,20 @@ impl Scope {
     pub fn drag(&mut self, from: &str, to: &str) {
         self.steady();
         let (a, b) = (self.node(from).rect().center(), self.node(to).rect().center());
+        self.drag_between(a, b);
+    }
+
+    /// Of several widgets labelled exactly `from` and `to`, drags the last of the first onto
+    /// the last of the second: an orchestration card's, below the sidebar's.
+    #[track_caller]
+    pub fn drag_last(&mut self, from: &str, to: &str) {
+        self.steady();
+        let last = |l: &str| self.h.query_all_by_label(l).last().unwrap_or_else(|| panic!("nothing labelled \"{l}\" on screen:\n{}", self.screen())).rect().center();
+        let (a, b) = (last(from), last(to));
+        self.drag_between(a, b);
+    }
+
+    fn drag_between(&mut self, a: egui::Pos2, b: egui::Pos2) {
         self.h.hover_at(a);
         self.frames(1);
         self.h.drag_at(a);

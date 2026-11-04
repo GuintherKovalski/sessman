@@ -19,6 +19,11 @@ pub struct Workspace {
     /// first.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub ordered: bool,
+    /// The bar's order, arranged by dragging its rows: those placed, top first. Sessions not
+    /// in it (new ones) go above them, newest first. Empty: the bar is newest first. Apart
+    /// from `ordered`, which orders the orchestration page's cards.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub bar: Vec<String>,
 }
 
 pub const PALETTE: [[u8; 3]; 10] = [
@@ -128,7 +133,7 @@ impl Workspaces {
             return None;
         }
         let color = Some(self.free_color());
-        self.list.push(Workspace { name: name.to_owned(), sessions: Vec::new(), color, last: None, folder: None, ordered: false });
+        self.list.push(Workspace { name: name.to_owned(), sessions: Vec::new(), color, last: None, folder: None, ordered: false, bar: Vec::new() });
         Some(self.list.len() - 1)
     }
 
@@ -164,9 +169,33 @@ impl Workspaces {
         }
     }
 
+    /// Lists workspace `ws`'s bar in `order` (ids not in it are ignored) from now on.
+    pub fn arrange_bar(&mut self, ws: usize, order: &[String]) {
+        let Some(w) = self.list.get_mut(ws) else { return };
+        w.bar = order.iter().filter(|id| w.sessions.contains(id)).cloned().collect();
+    }
+
+    /// Back to listing workspace `ws`'s bar newest first.
+    pub fn unarrange_bar(&mut self, ws: usize) {
+        if let Some(w) = self.list.get_mut(ws) {
+            w.bar.clear();
+        }
+    }
+
+    /// Moves the tab of workspace `from` to place `to` (counted before it is taken out).
+    pub fn reorder(&mut self, from: usize, to: usize) {
+        if from >= self.list.len() {
+            return;
+        }
+        let w = self.list.remove(from);
+        let to = if to > from { to - 1 } else { to };
+        self.list.insert(to.min(self.list.len()), w);
+    }
+
     pub fn remove(&mut self, session: &str) {
         for w in &mut self.list {
             w.sessions.retain(|s| s != session);
+            w.bar.retain(|s| s != session);
         }
     }
 
@@ -345,6 +374,35 @@ mod tests {
         assert!(!w.list[a].ordered);
         let old: Workspaces = serde_json::from_str(r#"{"list":[{"name":"x","sessions":[]}]}"#).unwrap();
         assert!(!old.list[0].ordered);
+    }
+
+    #[test]
+    fn the_bar_has_its_own_order_and_tabs_move() {
+        let mut w = Workspaces::default();
+        let a = w.add("a").unwrap();
+        let b = w.add("b").unwrap();
+        w.add("c");
+        for s in ["s1", "s2", "s3"] {
+            w.move_to(s, a);
+        }
+        w.arrange_bar(a, &["s3".into(), "gone".into(), "s1".into()]);
+        assert_eq!(w.list[a].bar, vec!["s3", "s1"]);
+        assert_eq!(w.list[a].sessions, vec!["s1", "s2", "s3"], "the cards' order is apart");
+        assert!(!w.list[a].ordered);
+        w.move_to("s3", b);
+        assert_eq!(w.list[a].bar, vec!["s1"], "moved out: out of the bar too");
+        w.unarrange_bar(a);
+        assert!(w.list[a].bar.is_empty());
+        let names = |w: &Workspaces| w.list.iter().map(|w| w.name.clone()).collect::<Vec<_>>();
+        w.reorder(0, 3);
+        assert_eq!(names(&w), ["b", "c", "a"], "to the end");
+        w.reorder(2, 0);
+        assert_eq!(names(&w), ["a", "b", "c"], "to the front");
+        w.reorder(0, 2);
+        assert_eq!(names(&w), ["b", "a", "c"], "before the third");
+        w.reorder(1, 1);
+        w.reorder(9, 0);
+        assert_eq!(names(&w), ["b", "a", "c"], "in place, or no such tab");
     }
 
     #[test]

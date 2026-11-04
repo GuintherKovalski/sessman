@@ -105,3 +105,12 @@ fn an_empty_workspace_page_says_how_to_fill_it() {
     s.click_first("EMPTY");
     assert!(s.sees("No sessions in this scope yet."));
 }
+
+#[test]
+fn a_card_dragged_onto_another_goes_before_it() {
+    let mut s = on_page();
+    // Cards in the bar's order: beta, then alpha.
+    s.drag_last("alpha prompt", "beta prompt");
+    assert_eq!(s.env.config_json("workspaces.json")["list"][0]["sessions"], serde_json::json!(["s-a", "s-b"]));
+    assert!(s.env.config_json("workspaces.json")["list"][0]["bar"].is_null(), "the bar's order is apart");
+}

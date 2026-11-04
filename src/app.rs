@@ -60,7 +60,16 @@ enum Action {
     OpenPending(String),
     /// The open workspace's orchestration page.
     Orchestrate,
+    /// The open workspace's bar in this order, dragged into it.
+    ArrangeBar(Vec<String>),
+    /// The open workspace's bar newest first again.
+    BarNewestFirst,
+    /// A workspace tab dragged to another place among the tabs.
+    MoveTab(usize, usize),
 }
+
+/// What a dragged workspace tab carries: its index.
+struct TabDrag(usize);
 
 #[derive(PartialEq)]
 enum RightTab {
@@ -612,6 +621,34 @@ impl App {
                 self.select(i);
             }
             Action::Tab(t) => self.switch_tab(t),
+            Action::ArrangeBar(order) => {
+                if let Some(w) = self.sync_workspaces(self.tab) {
+                    self.workspaces.arrange_bar(w, &order);
+                    self.save_workspaces();
+                }
+            }
+            Action::BarNewestFirst => {
+                if let Some(w) = self.sync_workspaces(self.tab) {
+                    self.workspaces.unarrange_bar(w);
+                    self.save_workspaces();
+                }
+            }
+            Action::MoveTab(from, to) => {
+                let names: Vec<String> = self.workspaces.list.iter().map(|w| w.name.clone()).collect();
+                let Some(name) = names.get(from) else { return };
+                // Indices from before another scope's changes, found again by name.
+                let at = |n: Option<&String>, list: &[workspaces::Workspace]| n.and_then(|n| list.iter().position(|w| w.name == *n));
+                let (to_name, tab_name) = (names.get(to).cloned(), self.tab.and_then(|t| names.get(t)).cloned());
+                self.sync_workspaces(None);
+                let list = &self.workspaces.list;
+                let Some(from) = at(Some(name), list) else { return };
+                let to = at(to_name.as_ref(), list).unwrap_or(list.len());
+                self.workspaces.reorder(from, to);
+                self.tab = at(tab_name.as_ref(), &self.workspaces.list);
+                self.workspace_rename = None;
+                self.confirm_delete = None;
+                self.save_workspaces();
+            }
             Action::MoveTo(ids, w) => {
                 if let Some(w) = self.sync_workspaces(Some(w)) {
                     for id in &ids {
@@ -1363,7 +1400,8 @@ impl App {
         };
         let mut out = String::new();
         for (w, ws) in self.workspaces.list.iter().enumerate().filter(|(w, _)| only.is_none_or(|o| o == *w)) {
-            out.push_str(&format!("{} (newest first)\n", ws.name));
+            let order = if ws.bar.is_empty() { "newest first" } else { "arranged by hand" };
+            out.push_str(&format!("{} ({order})\n", ws.name));
             for (k, id) in self.bar_ids(w).into_iter().enumerate() {
                 let listed = self.sessions.iter().position(|s| s.id == id);
                 let state = match (self.runs.contains_key(&id), listed) {
@@ -2097,10 +2135,14 @@ impl App {
     }
 
     /// Workspace `w`'s sessions (indices into `sessions`) in the order its bar lists them:
-    /// always newest first, by the time each row shows (an arrangement made on the
-    /// orchestration page orders only its cards).
-    fn bar_order(&self, _w: usize, mut sessions: Vec<usize>) -> Vec<usize> {
+    /// newest first, by the time each row shows, unless its rows were dragged into an order;
+    /// then as placed, below any not placed yet (an arrangement of the orchestration page's
+    /// cards orders only them).
+    fn bar_order(&self, w: usize, mut sessions: Vec<usize>) -> Vec<usize> {
         sessions.sort_by_key(|&i| std::cmp::Reverse(self.sessions[i].modified));
+        if let Some(bar) = self.workspaces.list.get(w).map(|ws| &ws.bar).filter(|b| !b.is_empty()) {
+            sessions.sort_by_key(|&i| bar.iter().position(|id| *id == self.sessions[i].id).map_or(0, |p| p + 1));
+        }
         sessions
     }
 
@@ -2300,8 +2342,11 @@ impl App {
                 self.type_into_prompt(ui.ctx(), &typed);
             }
         }
-        let (modifiers, press, pointer, primary_down) =
-            ui.input(|i| (i.modifiers, i.pointer.press_origin(), i.pointer.interact_pos(), i.pointer.primary_down()));
+        let (modifiers, press, pointer, primary_down, released) =
+            ui.input(|i| (i.modifiers, i.pointer.press_origin(), i.pointer.interact_pos(), i.pointer.primary_down(), i.pointer.any_released()));
+        // Inside a scope, with no search, dragging rows up or down reorders the bar.
+        let reorderable = self.tab.is_some() && self.search.trim().is_empty();
+        let arranged = self.tab.and_then(|w| self.workspaces.list.get(w)).is_some_and(|w| !w.bar.is_empty());
         egui::ScrollArea::vertical().show(ui, |ui| {
             // The list's top-left, which moves with the scroll.
             let top = ui.min_rect().min;
@@ -2420,12 +2465,44 @@ impl App {
                         let then = open_id.as_ref().filter(|id| dragging.contains(id)).and_then(|_| after_remove(&order, &dragging));
                         actions.push(Action::Remove(dragging.clone(), then));
                     }
+                    if arranged && ui.button("Sort newest first").on_hover_text("Undo the order the rows were dragged into").clicked() {
+                        actions.push(Action::BarNewestFirst);
+                    }
                     ui.separator();
                     let delete = if n > 1 { format!("Move {n} sessions to Trash…") } else { "Move to Trash…".to_owned() };
                     if ui.button(delete).clicked() {
                         actions.push(Action::Trash(dragging.clone()));
                     }
                 });
+            }
+            // Rows dragged within the list: a line shows where they go, letting go puts them there.
+            if reorderable
+                && let Some(pos) = pointer
+                && let Some(moving) = egui::DragAndDrop::payload::<Vec<String>>(ui.ctx())
+                && ui.clip_rect().contains(pos)
+                && !rects.is_empty()
+            {
+                let ids: Vec<String> = rects.iter().map(|(id, _)| id.clone()).collect();
+                let slot = rects.iter().filter(|(_, r)| r.center().y < pos.y).count();
+                let gap = ui.spacing().item_spacing.y / 2.0;
+                let y = rects.get(slot).map_or_else(|| rects[rects.len() - 1].1.bottom() + gap, |(_, r)| r.top() - gap);
+                let x = rects[0].1.x_range();
+                ui.painter().hline(x, y, Stroke::new(2.0, theme::palette(ui.visuals()).user));
+                if released {
+                    egui::DragAndDrop::clear_payload(ui.ctx());
+                    let order = dropped_order(&ids, &moving, slot);
+                    if order != ids {
+                        actions.push(Action::ArrangeBar(order));
+                    }
+                } else {
+                    // Near the top or bottom edge, the list scrolls to reach more rows.
+                    let clip = ui.clip_rect();
+                    let step = if pos.y < clip.top() + 16.0 { 8.0 } else if pos.y > clip.bottom() - 16.0 { -8.0 } else { 0.0 };
+                    if step != 0.0 {
+                        ui.scroll_with_delta(egui::vec2(0.0, step));
+                    }
+                    ui.ctx().request_repaint();
+                }
             }
             // The space under the rows: a drag there draws a box, a click drops the picks.
             let below = egui::Rect::from_min_max(ui.cursor().min, egui::pos2(ui.max_rect().right(), ui.clip_rect().bottom()));
@@ -2504,15 +2581,34 @@ impl App {
                     workspace_rename_field(ui, w, text, fresh, actions);
                     continue;
                 }
-                let tab = workspaces::tab(ui, &ws.name, ws.color, self.tab == Some(w));
+                let tab = workspaces::tab(ui, &ws.name, ws.color, self.tab == Some(w)).interact(Sense::drag());
                 if tab.clicked() {
                     actions.push(Action::Tab(Some(w)));
                 }
+                // (Taking a payload on release takes it whatever its type: each is looked at first.)
                 if tab.dnd_hover_payload::<Vec<String>>().is_some() {
                     ui.painter().rect_stroke(tab.rect, 3.0, Stroke::new(2.0, theme::palette(ui.visuals()).user), StrokeKind::Outside);
+                    if let Some(ids) = tab.dnd_release_payload::<Vec<String>>() {
+                        actions.push(Action::MoveTo((*ids).clone(), w));
+                    }
                 }
-                if let Some(ids) = tab.dnd_release_payload::<Vec<String>>() {
-                    actions.push(Action::MoveTo((*ids).clone(), w));
+                // Dragged among the tabs: a line on the side of this one it would go.
+                if tab.drag_started() {
+                    tab.dnd_set_drag_payload(TabDrag(w));
+                }
+                if tab.dragged()
+                    && let Some(pos) = ui.ctx().pointer_interact_pos()
+                {
+                    let painter = ui.ctx().layer_painter(LayerId::new(Order::Tooltip, Id::new("tab-drag-ghost")));
+                    painter.text(pos + egui::vec2(14.0, 0.0), Align2::LEFT_CENTER, workspaces::label(&ws.name), egui::FontId::proportional(14.0), theme::palette(ui.visuals()).user);
+                }
+                if let Some(from) = tab.dnd_hover_payload::<TabDrag>().map(|d| d.0).filter(|&from| from != w) {
+                    let after = ui.ctx().pointer_interact_pos().is_some_and(|p| p.x > tab.rect.center().x);
+                    let x = if after { tab.rect.right() + 2.0 } else { tab.rect.left() - 2.0 };
+                    ui.painter().vline(x, tab.rect.y_range(), Stroke::new(2.0, theme::palette(ui.visuals()).user));
+                    if tab.dnd_release_payload::<TabDrag>().is_some() {
+                        actions.push(Action::MoveTab(from, if after { w + 1 } else { w }));
+                    }
                 }
                 tab.context_menu(|ui| {
                     if ui.button("Rename scope").clicked() {
@@ -4416,6 +4512,16 @@ fn file_size(bytes: u64) -> String {
     }
 }
 
+/// `ids` (a list's order) with `moving` (some of them, in any order) taken out and put
+/// together, in `ids`' order, where the line before `ids[slot]` was.
+fn dropped_order(ids: &[String], moving: &[String], slot: usize) -> Vec<String> {
+    let moved = |id: &&String| moving.contains(id);
+    let mut order: Vec<String> = ids[..slot.min(ids.len())].iter().filter(|id| !moved(id)).cloned().collect();
+    order.extend(ids.iter().filter(moved).cloned());
+    order.extend(ids[slot.min(ids.len())..].iter().filter(|id| !moved(id)).cloned());
+    order
+}
+
 /// When a session row was last active, in local time: "14:32" today, "Nov 2 14:32" this
 /// year, "Nov 2 2025" before.
 pub(crate) fn row_time(t: SystemTime, now: SystemTime) -> String {
@@ -4620,6 +4726,18 @@ impl eframe::App for App {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn dropped_rows_go_together_where_the_line_was() {
+        let ids: Vec<String> = ["a", "b", "c", "d"].map(String::from).to_vec();
+        let drop = |moving: &[&str], slot| dropped_order(&ids, &moving.iter().map(|m| m.to_string()).collect::<Vec<_>>(), slot).join("");
+        assert_eq!(drop(&["d"], 0), "dabc");
+        assert_eq!(drop(&["a"], 4), "bcda", "below the last");
+        assert_eq!(drop(&["a"], 2), "bacd");
+        assert_eq!(drop(&["b"], 1), "abcd", "its own place");
+        assert_eq!(drop(&["d", "a"], 2), "badc", "together, in list order");
+        assert_eq!(drop(&["x"], 1), "abcd", "not in the list");
+    }
 
     #[test]
     fn row_time_shows_the_time_today_and_the_date_before() {
