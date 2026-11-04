@@ -83,7 +83,7 @@ fn model_and_effort_picked_for_a_new_session_go_with_all_its_prompts() {
     let s = setup().session(session("s-a", "alpha prompt", 100)).setting("model", json!("opus"));
     let folder = s.env().folder("newproj");
     let mut s = s.workspaces_json(json!({"list": [{"name": "Work", "sessions": ["s-a"], "folder": folder}]})).launch();
-    s.click_first("Work");
+    s.click_first("WORK");
     s.click("+  New session");
     assert!(s.sees("opus (as set)"), "Settings' model is what it would use");
     s.click("opus (as set)");
