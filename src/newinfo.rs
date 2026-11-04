@@ -223,7 +223,30 @@ pub fn gather(dir: &Path, home: &Path, scope: &Scope, env: &dyn Fn(&str) -> Opti
 }
 
 /// Shows `info` for a new session in `dir`, centred, with `status` under it.
-pub fn show(ui: &mut egui::Ui, dir: &Path, info: &NewInfo, status: &str) {
+/// Model aliases and effort levels offered on the new session page.
+pub const MODELS: [&str; 4] = ["opus", "sonnet", "haiku", "fable"];
+pub const EFFORTS: [&str; 5] = ["low", "medium", "high", "xhigh", "max"];
+
+/// A dropdown for `value` among `options`; empty = `default`, what it would be unpicked.
+fn picker(ui: &mut egui::Ui, id: &str, value: &mut String, options: &[&str], default: &str, enabled: bool) {
+    let shown = if value.is_empty() { default.to_owned() } else { value.clone() };
+    ui.add_enabled_ui(enabled, |ui| {
+        ui.push_id(id, |ui| {
+            ui.menu_button(egui::RichText::new(format!("{shown} ⏷")).monospace(), |ui| {
+                for (v, label) in std::iter::once(("", default)).chain(options.iter().map(|o| (*o, *o))) {
+                    if ui.selectable_label(value == v, label).clicked() {
+                        *value = v.to_owned();
+                        ui.close();
+                    }
+                }
+            });
+        });
+    });
+}
+
+/// Shows `info` for a new session in `dir`, centred, with `status` under it. Model and effort
+/// can be picked for this session (`choice`) while `editable`.
+pub fn show(ui: &mut egui::Ui, dir: &Path, info: &NewInfo, choice: &mut crate::runner::Choice, editable: bool, status: &str) {
     use egui::RichText;
     let default = |o: &Option<Sourced>, d: &str| match o {
         Some(s) => (s.value.clone(), s.from.clone()),
@@ -253,10 +276,19 @@ pub fn show(ui: &mut egui::Ui, dir: &Path, info: &NewInfo, status: &str) {
                             });
                             ui.end_row();
                         };
-                        let (m, f) = default(&info.model, "default");
-                        row(ui, "Model", m, Some(f));
-                        let (e, f) = default(&info.effort, "default");
-                        row(ui, "Effort", e, Some(f));
+                        // Model and effort: a dropdown each, defaulting to what would apply.
+                        let pick = |ui: &mut egui::Ui, key: &str, value: &mut String, resolved: &Option<Sourced>, options: &[&str]| {
+                            let (v, from) = default(resolved, "default");
+                            ui.label(RichText::new(key).weak());
+                            ui.horizontal_wrapped(|ui| {
+                                picker(ui, key, value, options, &format!("{v} (as set)"), editable);
+                                let note = if value.is_empty() { format!("({from})") } else { "(this session; later prompts keep it)".to_owned() };
+                                ui.label(RichText::new(note).weak().small());
+                            });
+                            ui.end_row();
+                        };
+                        pick(ui, "Model", &mut choice.model, &info.model, &MODELS);
+                        pick(ui, "Effort", &mut choice.effort, &info.effort, &EFFORTS);
                         let (p, f) = default(&info.permissions, "default (asks)");
                         row(ui, "Permissions", p, Some(f));
                         if let Some(t) = &info.thinking {

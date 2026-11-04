@@ -215,6 +215,10 @@ pub struct App {
     /// started keeping this (sessions it has never had open count as seen then). A session
     /// changed since is marked finished in the overview.
     seen: HashMap<String, u64>,
+    /// Session id → the model and effort picked for it on the new session page.
+    choices: HashMap<String, runner::Choice>,
+    /// What the new session page has picked so far.
+    new_choice: runner::Choice,
     seen_from: u64,
     /// Whether each session's work looks finished (verdict.rs), the checks under way, the
     /// checks that failed (id → the change they read; not retried until there is a newer one),
@@ -445,6 +449,8 @@ impl App {
             overview_jobs: HashMap::new(),
             overview_errors: HashMap::new(),
             seen: HashMap::new(),
+            choices: HashMap::new(),
+            new_choice: runner::Choice::default(),
             seen_from: 0,
             verdicts: Shared::load(Verdicts::path()),
             judging: Vec::new(),
@@ -462,6 +468,7 @@ impl App {
         }
         let mut st = State::load(&state::path());
         app.seen = std::mem::take(&mut st.seen);
+        app.choices = std::mem::take(&mut st.choices);
         app.seen_from = match st.seen_from {
             0 => overview::secs(SystemTime::now()),
             t => t,
@@ -511,6 +518,7 @@ impl App {
             prompt_collapsed: self.prompt_collapsed,
             seen: self.seen.iter().filter(|(id, _)| self.sessions.iter().any(|s| s.id == **id)).map(|(k, v)| (k.clone(), *v)).collect(),
             seen_from: self.seen_from,
+            choices: self.choices.clone(),
         }
     }
 
@@ -1503,6 +1511,7 @@ impl App {
         self.open = Some(Session { cwd: Some(dir.clone()), ..Default::default() });
         self.new_session = Some(dir);
         self.new_info = None;
+        self.new_choice = runner::Choice::default();
         self.history = History::default();
         self.pinned = None;
         self.picked_message = None;
@@ -1730,6 +1739,9 @@ impl App {
             _ => return,
         };
         if new {
+            if !self.new_choice.is_empty() {
+                self.choices.insert(id.clone(), self.new_choice.clone());
+            }
             self.new_id = Some(id.clone());
             self.sync_workspaces(None);
             if let Some(w) = self.tab {
@@ -1748,7 +1760,8 @@ impl App {
             s.push_prompt(prompt.clone());
             self.history = History::new(s.prompts.clone());
         }
-        let (rx, stop) = runner::send(self.ctx.clone(), id.clone(), cwd.clone(), prompt.clone(), new);
+        let choice = self.choices.get(&id).cloned().unwrap_or_default();
+        let (rx, stop) = runner::send(self.ctx.clone(), id.clone(), cwd.clone(), prompt.clone(), new, choice);
         self.runs.insert(id, Run { rx, live: String::new(), tool: None, new, cwd, prompt, stop, poked: false, answer: String::new() });
     }
 
@@ -2990,9 +3003,10 @@ impl App {
                 let info = crate::newinfo::gather(&dir, &home, &scope, &|k| std::env::var(k).ok());
                 self.new_info = Some((dir.clone(), info));
             }
-            let status = if self.open_running() { "Starting…" } else { "Type your first prompt below." };
+            let running = self.open_running();
+            let status = if running { "Starting…" } else { "Type your first prompt below." };
             if let Some((_, info)) = &self.new_info {
-                crate::newinfo::show(ui, &dir, info, status);
+                crate::newinfo::show(ui, &dir, info, &mut self.new_choice, !running, status);
             }
             return;
         }
