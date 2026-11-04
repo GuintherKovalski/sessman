@@ -46,3 +46,27 @@ fn a_working_session_shows_its_claude_and_bash_command_with_its_time_limit() {
     s.click("Processes");
     s.wait_to_see("Nothing is running in this scope's sessions.");
 }
+
+#[test]
+fn stop_ends_a_command_and_then_the_sessions_run() {
+    let mut s = work();
+    s.click_first("alpha prompt");
+    s.env.hold("hold");
+    s.send("SHELL HOLD build it");
+    s.wait_to_see("Partial reply");
+    s.click("Orchestration");
+    s.click("Processes");
+    s.wait_to_see("Wait for the build");
+    let sleeping = || std::process::Command::new("pgrep").args(["-fx", "sleep 30"]).status().unwrap().success();
+    assert!(sleeping());
+    // The last row is the sleep under the Bash command: it ends, and its shell with it.
+    s.click_last("⏹");
+    s.wait_until("the sleep ends", |_| !sleeping());
+    s.wait_not_to_see("Wait for the build");
+    assert!(s.sees("claude -p"), "the session itself keeps working");
+    s.click("⏹");
+    s.wait_to_see("Nothing is running in this scope's sessions.");
+    s.click_first("alpha prompt");
+    s.wait_to_see("⏹ Interrupted");
+    s.env.release("hold");
+}

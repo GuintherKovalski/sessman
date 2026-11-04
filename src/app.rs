@@ -1074,11 +1074,26 @@ impl App {
                 ui.heading(crate::workspaces::label(&name));
                 ui.label(RichText::new("processes").color(accent));
             });
-            if let Some(id) = crate::processes::ui(ui, sample, &names, accent) {
-                match self.sessions.iter().position(|s| s.id == id) {
+            match crate::processes::ui(ui, sample, &names, &self.orch.processes.stopping, accent) {
+                Some(crate::processes::Event::Open(id)) => match self.sessions.iter().position(|s| s.id == id) {
                     Some(i) => self.select(i),
                     None => self.open_pending(&id),
+                },
+                Some(crate::processes::Event::StopClaude(id, pid)) => {
+                    // Scope's own runs (and the ones it adopted) stop like Ctrl+C; Claude Code
+                    // in a terminal gets the same SIGINT (and keeps running, as after Ctrl+C).
+                    if self.runs.contains_key(&id) {
+                        self.orch.processes.stopping.insert(pid);
+                        self.end_run(&id, Err("stopped".into()), true);
+                    } else {
+                        runner::interrupt(pid);
+                    }
                 }
+                Some(crate::processes::Event::Stop(pids)) => {
+                    self.orch.processes.stopping.extend(pids.iter().copied());
+                    crate::processes::terminate(pids);
+                }
+                None => {}
             }
             return;
         }
