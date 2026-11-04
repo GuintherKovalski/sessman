@@ -107,8 +107,8 @@ fn the_workspace_with_the_latest_idle_session_comes_first() {
 #[test]
 fn clicking_a_card_name_opens_its_workspace() {
     let mut s = two_workspaces();
-    s.click_last("Play");
-    assert!(s.is_selected("Play"));
+    s.click_last("PLAY");
+    assert!(s.is_selected("PLAY"));
     assert!(s.sees("beta prompt"));
     assert!(!s.sees("alpha prompt about ABC-123"));
 }
@@ -118,7 +118,7 @@ fn clicking_a_session_opens_it_in_its_workspace() {
     let mut s = two_workspaces();
     s.wait_to_see("Fake doing");
     s.click("· 3 min ago");
-    assert!(s.is_selected("Play"), "its workspace's tab");
+    assert!(s.is_selected("PLAY"), "its workspace's tab");
     assert!(s.sees("Reply to beta prompt"), "the session itself");
     assert!(!s.sees("alpha prompt about ABC-123"));
 }
@@ -136,7 +136,7 @@ fn a_session_idle_too_long_is_red_and_can_be_finished() {
     s.wait_until("it left the workspace", |s| s.env.config_json("workspaces.json").to_string().contains("s-new") && !s.env.config_json("workspaces.json").to_string().contains("s-old"));
     assert!(s.sees("1 session not in a scope."), "the session itself is kept");
     assert!(!s.sees("Finish session"));
-    assert!(!s.is_selected("Work"), "finishing doesn't open anything");
+    assert!(!s.is_selected("WORK"), "finishing doesn't open anything");
 }
 
 #[test]
@@ -172,7 +172,7 @@ fn a_session_whose_run_finished_unseen_is_highlighted_until_opened() {
     assert!(s.shows_before("long task", "alpha prompt"), "it moved up as the newest, nothing else");
     s.click("long task");
     s.wait_to_see("Echo: HOLD keep going");
-    s.click("Scopes");
+    s.click("SCOPES");
     s.frames(10);
     assert!(!s.sees("✔ Finished"), "seen now");
     let mut s = s.restart();

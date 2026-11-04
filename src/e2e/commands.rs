@@ -74,7 +74,7 @@ fn move_places_a_card_and_the_bar_stays_newest_first() {
 fn the_bar_lists_newest_first_even_when_arranged() {
     let mut s = three_in_work();
     s.command(json!({"do": "move", "session": "alpha prompt", "to": "top"})).unwrap();
-    s.click_first("Work");
+    s.click_first("WORK");
     assert!(s.shows_before("gamma prompt", "beta prompt"));
     assert!(s.shows_before("beta prompt", "alpha prompt"));
 }

@@ -50,13 +50,13 @@ fn a_restart_brings_back_the_tab_session_draft_and_right_panel() {
         .session(session("s-b", "beta prompt", 50))
         .workspaces(&[("Work", &["s-a", "s-b"])])
         .launch();
-    s.click_first("Work");
+    s.click_first("WORK");
     s.click("alpha prompt");
     s.type_prompt("half-written thought");
     s.click("Info");
     let mut s = s.restart();
     s.frames(3);
-    assert!(s.is_selected("Work"), "the workspace tab is open again");
+    assert!(s.is_selected("WORK"), "the workspace tab is open again");
     assert!(s.is_selected("alpha prompt"), "and so is the session");
     assert_eq!(s.prompt(), "half-written thought");
     assert!(s.is_selected("Info"));
@@ -87,7 +87,7 @@ fn a_broken_state_file_is_moved_aside_and_the_app_starts_fresh() {
     let s = s.restart_without_saving();
     assert!(s.env.config.join("state.json.bad").exists());
     assert!(s.sees("alpha prompt"));
-    assert!(s.sees("Scopes") || s.sees("No scopes yet."), "it opens on the overview");
+    assert!(s.sees("SCOPES") || s.sees("No scopes yet."), "it opens on the overview");
 }
 
 #[test]
@@ -107,11 +107,11 @@ fn with_restore_off_the_app_starts_on_the_overview() {
         .workspaces(&[("Work", &["s-a"])])
         .setting("restore_state", json!(false))
         .launch();
-    s.click_first("Work");
+    s.click_first("WORK");
     s.click("alpha prompt");
     let s = s.restart();
-    assert!(s.is_selected("Scopes"));
-    assert!(s.sees("Scopes"));
+    assert!(s.is_selected("SCOPES"));
+    assert!(s.sees("SCOPES"));
 }
 
 #[test]

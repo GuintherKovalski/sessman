@@ -10,7 +10,7 @@ fn workspace_with_folder() -> Scope {
     let mut s = s
         .workspaces_json(json!({"list": [{"name": "Work", "sessions": ["s-a"], "folder": folder}]}))
         .launch();
-    s.click_first("Work");
+    s.click_first("WORK");
     s
 }
 
@@ -21,6 +21,7 @@ fn new_session_opens_an_empty_session_in_the_workspace_folder() {
     s.click("+  New session");
     assert!(s.sees(&format!("New session in {}", folder.display())));
     assert!(s.sees("Type your first prompt below."));
+    assert!(s.sees("Model") && s.sees("Effort") && s.sees("Permissions") && s.sees("MCP servers"), "what it will start with");
     assert!(s.env.runs().is_empty(), "nothing exists until the first prompt");
 }
 

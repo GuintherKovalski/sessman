@@ -622,7 +622,7 @@ pub fn ui(ui: &mut egui::Ui, page: &Page, question: &mut String, renaming: &mut 
     }
     ui.add_space(6.0);
     ui.horizontal(|ui| {
-        ui.heading(page.name);
+        ui.heading(crate::workspaces::label(page.name));
         ui.label(RichText::new(counts.join(" · ")).weak());
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
             let can = !page.busy && !page.sessions.is_empty();
@@ -774,7 +774,7 @@ pub fn ui(ui: &mut egui::Ui, page: &Page, question: &mut String, renaming: &mut 
             let shown = overview::card_frame(ui.visuals()).show(ui, |ui| {
                 ui.set_width(ui.available_width());
                 ui.horizontal(|ui| {
-                    ui.label(RichText::new("Questions").strong().size(18.0));
+                    ui.label(RichText::new("QUESTIONS").strong());
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         ui.label(RichText::new(plural(o.log.len(), "question")).weak().small());
                     });

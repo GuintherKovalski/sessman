@@ -44,7 +44,8 @@ enum Action {
     Select(usize),
     Tab(Option<usize>),
     MoveTo(Vec<String>, usize),
-    Remove(Vec<String>),
+    /// Take these sessions out of the open workspace, then open the one given (if any).
+    Remove(Vec<String>, Option<String>),
     /// The sessions picked for moving or deleting together (Shift/Cmd-click), replacing the
     /// picked ones; the session clicked becomes where a Shift-click range starts.
     Pick(HashSet<String>, String),
@@ -116,6 +117,10 @@ pub struct App {
     /// Whether the conversation has the keyboard (it was clicked last): Up/Down then move the
     /// pick a message at a time, bringing its start to the top.
     conversation_keys: bool,
+    /// Whether the session bar has the keyboard (a session in it was clicked last): Up/Down
+    /// then open the session above or below, Delete/Backspace take the highlighted ones out of
+    /// the open workspace.
+    bar_keys: bool,
     /// Set when the arrows moved the pick: the conversation scrolls to it on the next frame.
     scroll_to_pick: bool,
     /// The message at the top of the conversation last frame, where the arrows start without a pick.
@@ -129,6 +134,8 @@ pub struct App {
     unlisted: Vec<(String, String, Option<PathBuf>)>,
     /// Folder of a new session that has no prompt yet (nothing exists on disk until then).
     new_session: Option<PathBuf>,
+    /// What the new session will start with, gathered once per folder.
+    new_info: Option<(PathBuf, crate::newinfo::NewInfo)>,
     /// Id given to the new session's first prompt, to select it once it exists.
     new_id: Option<String>,
     /// Set to move keyboard focus to the prompt input on the next frame.
@@ -383,6 +390,7 @@ impl App {
             pinned: None,
             picked_message: None,
             conversation_keys: false,
+            bar_keys: false,
             scroll_to_pick: false,
             top_message: None,
             conversation_rect: None,
@@ -391,6 +399,7 @@ impl App {
             renaming: None,
             unlisted: Vec::new(),
             new_session: None,
+            new_info: None,
             new_id: None,
             focus_prompt: false,
             right_tab: RightTab::Changes,
@@ -611,12 +620,23 @@ impl App {
                     self.save_workspaces();
                 }
             }
-            Action::Remove(ids) => {
+            Action::Remove(ids, then) => {
                 self.sync_workspaces(None);
                 for id in &ids {
                     self.workspaces.remove(id);
                 }
                 self.save_workspaces();
+                self.picked.retain(|id| !ids.contains(id));
+                let open_removed = self.selected.is_some_and(|i| ids.contains(&self.sessions[i].id));
+                match then.and_then(|id| self.sessions.iter().position(|s| s.id == id)) {
+                    Some(i) => {
+                        self.pick_anchor = Some(self.sessions[i].id.clone());
+                        self.select(i);
+                    }
+                    // The open session left the workspace and none is left to open in its place.
+                    None if open_removed && self.tab.is_some() => self.open_tab(),
+                    None => {}
+                }
             }
             Action::Pick(ids, anchor) => {
                 self.picked = ids;
@@ -1455,7 +1475,7 @@ impl App {
                     self.apply(Action::Select(i));
                 }
             }
-            Some(overview::Event::Finish(id)) => self.apply(Action::Remove(vec![id])),
+            Some(overview::Event::Finish(id)) => self.apply(Action::Remove(vec![id], None)),
             Some(overview::Event::Refresh(w)) => self.summarize_workspace(w),
             Some(overview::Event::RefreshAll) => {
                 for w in 0..self.workspaces.list.len() {
@@ -1499,6 +1519,7 @@ impl App {
         self.new_id = None;
         self.open = Some(Session { cwd: Some(dir.clone()), ..Default::default() });
         self.new_session = Some(dir);
+        self.new_info = None;
         self.history = History::default();
         self.pinned = None;
         self.picked_message = None;
@@ -2204,6 +2225,44 @@ impl App {
         // Rows picked, in list order: what a drag or the context menu acts on.
         let picked: Vec<String> = order.iter().filter(|id| self.picked.contains(*id)).cloned().collect();
         let open_id = self.selected.map(|i| self.sessions[i].id.clone());
+        // Highlighted rows, what the keys act on: the picked ones, or else the open one.
+        let highlighted: Vec<String> = if picked.is_empty() { open_id.iter().filter(|id| order.contains(id)).cloned().collect() } else { picked.clone() };
+        // A press anywhere takes the keyboard from the bar; a click on a session gives it back.
+        if ui.input(|i| i.pointer.any_pressed()) {
+            self.bar_keys = false;
+        }
+        let mut bar_keys = false;
+        let modal = !self.confirm_trash.is_empty() || self.confirm_delete.is_some();
+        if self.bar_keys && !modal && ui.memory(|m| m.focused().is_none()) {
+            let (up, down, delete, esc, typed) = ui.input_mut(|i| {
+                let typed: String = i.events.iter().filter_map(|e| if let egui::Event::Text(t) = e { Some(t.as_str()) } else { None }).collect();
+                let up = i.consume_key(Modifiers::NONE, Key::ArrowUp);
+                let down = i.consume_key(Modifiers::NONE, Key::ArrowDown);
+                let delete = i.consume_key(Modifiers::NONE, Key::Delete) | i.consume_key(Modifiers::NONE, Key::Backspace);
+                (up, down, delete, i.key_pressed(Key::Escape), typed)
+            });
+            if up || down {
+                let at = open_id.as_ref().and_then(|id| order.iter().position(|o| o == id));
+                let next = match at {
+                    Some(k) if up => k.checked_sub(1),
+                    Some(k) => Some(k + 1).filter(|&n| n < order.len()),
+                    None => (!order.is_empty()).then_some(0),
+                };
+                if let Some(i) = next.and_then(|k| self.sessions.iter().position(|s| s.id == order[k])) {
+                    actions.push(Action::Select(i));
+                }
+            }
+            // Only a workspace's own sessions can leave it; All sessions has nothing to take them out of.
+            if delete && self.tab.is_some() && !highlighted.is_empty() {
+                actions.push(Action::Remove(highlighted.clone(), after_remove(&order, &highlighted)));
+            }
+            bar_keys = up || down || delete;
+            if esc || !typed.is_empty() {
+                self.bar_keys = false;
+                bar_keys = false;
+                self.type_into_prompt(ui.ctx(), &typed);
+            }
+        }
         let (modifiers, press, pointer, primary_down) =
             ui.input(|i| (i.modifiers, i.pointer.press_origin(), i.pointer.interact_pos(), i.pointer.primary_down()));
         egui::ScrollArea::vertical().show(ui, |ui| {
@@ -2280,6 +2339,7 @@ impl App {
                     }
                 }
                 if row.clicked() {
+                    bar_keys = true;
                     if modifiers.shift {
                         // A range from the session last clicked (or the open one) to this one.
                         let from = self.pick_anchor.as_ref().or(open_id.as_ref()).and_then(|a| order.iter().position(|id| id == a));
@@ -2313,13 +2373,15 @@ impl App {
                             ui.label("No scopes yet. Create one with +");
                         }
                         for (w, ws) in self.workspaces.list.iter().enumerate() {
-                            if ui.button(&ws.name).clicked() {
+                            if ui.button(workspaces::label(&ws.name)).clicked() {
                                 actions.push(Action::MoveTo(dragging.clone(), w));
                             }
                         }
                     });
                     if self.tab.is_some() && ui.button("Remove from scope").clicked() {
-                        actions.push(Action::Remove(dragging.clone()));
+                        // Taking the open session out opens its neighbor, as Delete does.
+                        let then = open_id.as_ref().filter(|id| dragging.contains(id)).and_then(|_| after_remove(&order, &dragging));
+                        actions.push(Action::Remove(dragging.clone(), then));
                     }
                     ui.separator();
                     let delete = if n > 1 { format!("Move {n} sessions to Trash…") } else { "Move to Trash…".to_owned() };
@@ -2372,11 +2434,31 @@ impl App {
         for a in actions {
             self.apply(a);
         }
+        // A session clicked, or the keys moved in the bar: it keeps the keyboard (opening a
+        // session would otherwise send it to the input).
+        if bar_keys {
+            self.bar_keys = true;
+            self.focus_prompt = false;
+            ui.memory_mut(|m| m.stop_text_input());
+        }
+    }
+
+    /// Gives the input the keyboard, adding `typed` (keys pressed elsewhere) at its end.
+    fn type_into_prompt(&mut self, ctx: &egui::Context, typed: &str) {
+        self.focus_prompt = true;
+        if typed.is_empty() {
+            return;
+        }
+        self.input.push_str(typed);
+        let id = Id::new("prompt-input");
+        let mut state = egui::TextEdit::load_state(ctx, id).unwrap_or_default();
+        state.cursor.set_char_range(Some(CCursorRange::one(CCursor::new(self.input.chars().count()))));
+        state.store(ctx, id);
     }
 
     fn tabs(&mut self, ui: &mut egui::Ui, actions: &mut Vec<Action>) {
         ui.horizontal_wrapped(|ui| {
-            let all = ui.selectable_label(self.tab.is_none(), "Scopes").on_hover_text("Every session, and an overview of the scopes");
+            let all = ui.selectable_label(self.tab.is_none(), "SCOPES").on_hover_text("Every session, and an overview of the scopes");
             if all.clicked() {
                 actions.push(Action::Tab(None));
             }
@@ -2385,14 +2467,7 @@ impl App {
                     workspace_rename_field(ui, w, text, fresh, actions);
                     continue;
                 }
-                let bg = ui.painter().add(egui::Shape::Noop);
-                let tab = ui.selectable_label(self.tab == Some(w), &ws.name);
-                if let Some(c) = ws.color {
-                    ui.painter().set(bg, egui::Shape::rect_filled(tab.rect, 3.0, tint(c, 90)));
-                    if self.tab == Some(w) {
-                        ui.painter().rect_stroke(tab.rect, 3.0, Stroke::new(1.5, rgb(c)), StrokeKind::Inside);
-                    }
-                }
+                let tab = workspaces::tab(ui, &ws.name, ws.color, self.tab == Some(w));
                 if tab.clicked() {
                     actions.push(Action::Tab(Some(w)));
                 }
@@ -2445,8 +2520,8 @@ impl App {
         let name = self.workspaces.list.get(w).map(|w| w.name.clone()).unwrap_or_default();
         let (mut delete, mut cancel) = (false, false);
         let modal = egui::Modal::new(Id::new("confirm-delete")).show(ctx, |ui| {
-            ui.label(RichText::new(format!("Delete scope \"{name}\"?")).strong());
-            ui.label("Its sessions are not deleted; they stay in Scopes.");
+            ui.label(RichText::new(format!("Delete scope \"{}\"?", workspaces::label(&name))).strong());
+            ui.label("Its sessions are not deleted; they stay in SCOPES.");
             ui.add_space(8.0);
             ui.horizontal(|ui| {
                 delete = ui.button("Delete").clicked();
@@ -2978,11 +3053,18 @@ impl App {
             }));
             return;
         };
-        if let Some(dir) = self.new_session.as_ref().filter(|_| s.messages.is_empty()) {
-            ui.centered_and_justified(|ui| {
-                let status = if self.open_running() { "Starting…" } else { "Type your first prompt below." };
-                ui.label(format!("New session in {}\n\n{status}", dir.display()));
-            });
+        if let Some(dir) = self.new_session.clone().filter(|_| s.messages.is_empty()) {
+            if self.new_info.as_ref().is_none_or(|(d, _)| *d != dir) {
+                let home = PathBuf::from(std::env::var("HOME").unwrap_or_default());
+                let extra: Vec<String> = self.settings.extra_args.split_whitespace().map(str::to_owned).collect();
+                let scope = crate::newinfo::Scope { model: &self.settings.model, extra: &extra };
+                let info = crate::newinfo::gather(&dir, &home, &scope, &|k| std::env::var(k).ok());
+                self.new_info = Some((dir.clone(), info));
+            }
+            let status = if self.open_running() { "Starting…" } else { "Type your first prompt below." };
+            if let Some((_, info)) = &self.new_info {
+                crate::newinfo::show(ui, &dir, info, status);
+            }
             return;
         }
         let pal = theme::palette(ui.visuals());
@@ -3786,6 +3868,14 @@ fn input_heights(row: f32, max_lines: usize, manual: Option<f32>, collapsed: boo
 }
 
 /// Active file tab after closing tab `closed`.
+/// The session to open once `removed` leave the bar listing `order`: the one just above the
+/// topmost of them, or, when that was the first, the one now on top.
+fn after_remove(order: &[String], removed: &[String]) -> Option<String> {
+    let first = order.iter().position(|id| removed.contains(id))?;
+    let above = first.checked_sub(1).map(|k| &order[k]);
+    above.or_else(|| order.iter().find(|id| !removed.contains(id))).cloned()
+}
+
 fn after_close(active: Option<usize>, closed: usize) -> Option<usize> {
     match active {
         Some(t) if t == closed => None,
@@ -4356,10 +4446,6 @@ fn short_tokens(n: u64) -> String {
 
 fn rgb([r, g, b]: [u8; 3]) -> Color32 {
     Color32::from_rgb(r, g, b)
-}
-
-fn tint([r, g, b]: [u8; 3], alpha: u8) -> Color32 {
-    Color32::from_rgba_unmultiplied(r, g, b, alpha)
 }
 
 /// "-Users-me-Desktop-foo-bar" → "Desktop-foo-bar"
