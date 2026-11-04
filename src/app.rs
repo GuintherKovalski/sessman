@@ -1154,7 +1154,7 @@ impl App {
             ui.add_space(6.0);
             ui.horizontal(|ui| {
                 ui.heading(crate::workspaces::label(&name));
-                ui.label(RichText::new("processes").color(accent));
+                ui.label(RichText::new("processes").weak());
             });
             if let Some(id) = crate::processes::ui(ui, sample, &names, accent) {
                 match self.sessions.iter().position(|s| s.id == id) {
