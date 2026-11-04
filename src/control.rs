@@ -123,7 +123,7 @@ impl From<Result<String, String>> for Reply {
 }
 
 pub const USAGE: &str = "usage:
-  scope list [--scope S]                 scopes and their sessions, newest first as the bar lists them
+  scope list [--scope S]                 scopes and their sessions, in the bar's order
   scope rename <session> <name>          an empty name gives back its own title
   scope move <session> <top|bottom|up|down|N>
                                          its card's place on its scope's orchestration page (N from 1)
