@@ -12,6 +12,7 @@ mod names;
 mod newinfo;
 mod orchestration;
 mod overview;
+mod processes;
 mod queue;
 mod refine;
 mod runner;
