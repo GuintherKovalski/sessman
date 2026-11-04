@@ -223,19 +223,24 @@ pub fn gather(dir: &Path, home: &Path, scope: &Scope, env: &dyn Fn(&str) -> Opti
 }
 
 /// Shows `info` for a new session in `dir`, centred, with `status` under it.
-/// Model aliases and effort levels offered on the new session page.
+/// Model aliases, effort levels and permission modes offered on the new session page.
 pub const MODELS: [&str; 4] = ["opus", "sonnet", "haiku", "fable"];
 pub const EFFORTS: [&str; 5] = ["low", "medium", "high", "xhigh", "max"];
+pub const PERMISSIONS: [&str; 4] = ["default", "acceptEdits", "plan", "bypassPermissions"];
 
-/// A dropdown for `value` among `options`; empty = `default`, what it would be unpicked.
-fn picker(ui: &mut egui::Ui, id: &str, value: &mut String, options: &[&str], default: &str, enabled: bool) {
-    let shown = if value.is_empty() { default.to_owned() } else { value.clone() };
+/// A dropdown for `value` among `options` (value, label); empty = `default`, what applies
+/// when nothing is picked.
+fn picker(ui: &mut egui::Ui, id: &str, value: &mut String, options: &[(String, String)], default: &str, enabled: bool) {
+    let shown = match options.iter().find(|(v, _)| v == value) {
+        Some((_, label)) if !value.is_empty() => label.clone(),
+        _ => default.to_owned(),
+    };
     ui.add_enabled_ui(enabled, |ui| {
         ui.push_id(id, |ui| {
             ui.menu_button(egui::RichText::new(format!("{shown} ⏷")).monospace(), |ui| {
-                for (v, label) in std::iter::once(("", default)).chain(options.iter().map(|o| (*o, *o))) {
-                    if ui.selectable_label(value == v, label).clicked() {
-                        *value = v.to_owned();
+                for (v, label) in std::iter::once((String::new(), default.to_owned())).chain(options.iter().cloned()) {
+                    if ui.selectable_label(*value == v, label).clicked() {
+                        *value = v;
                         ui.close();
                     }
                 }
@@ -244,8 +249,16 @@ fn picker(ui: &mut egui::Ui, id: &str, value: &mut String, options: &[&str], def
     });
 }
 
-/// Shows `info` for a new session in `dir`, centred, with `status` under it. Model and effort
-/// can be picked for this session (`choice`) while `editable`.
+fn same(v: &[&str]) -> Vec<(String, String)> {
+    v.iter().map(|o| ((*o).to_owned(), (*o).to_owned())).collect()
+}
+
+fn count(n: usize, one: &str, many: &str) -> String {
+    format!("{n} {}", if n == 1 { one } else { many })
+}
+
+/// Shows `info` for a new session in `dir`, centred, with `status` under it. What can be
+/// changed for this session has a dropdown (`choice`), usable while `editable`.
 pub fn show(ui: &mut egui::Ui, dir: &Path, info: &NewInfo, choice: &mut crate::runner::Choice, editable: bool, status: &str) {
     use egui::RichText;
     let default = |o: &Option<Sourced>, d: &str| match o {
@@ -276,37 +289,67 @@ pub fn show(ui: &mut egui::Ui, dir: &Path, info: &NewInfo, choice: &mut crate::r
                             });
                             ui.end_row();
                         };
-                        // Model and effort: a dropdown each, defaulting to what would apply.
-                        let pick = |ui: &mut egui::Ui, key: &str, value: &mut String, resolved: &Option<Sourced>, options: &[&str]| {
-                            let (v, from) = default(resolved, "default");
+                        // A dropdown, defaulting to what applies (`shown`), with `note` beside
+                        // it until something else is picked.
+                        let pick = |ui: &mut egui::Ui, key: &str, value: &mut String, options: &[(String, String)], shown: String, note: String| {
                             ui.label(RichText::new(key).weak());
                             ui.horizontal_wrapped(|ui| {
-                                picker(ui, key, value, options, &format!("{v} (as set)"), editable);
-                                let note = if value.is_empty() { format!("({from})") } else { "(this session; later prompts keep it)".to_owned() };
+                                picker(ui, key, value, options, &format!("{shown} (as set)"), editable);
+                                let note = if value.is_empty() { note } else { "(this session; later prompts keep it)".to_owned() };
                                 ui.label(RichText::new(note).weak().small());
                             });
                             ui.end_row();
                         };
-                        pick(ui, "Model", &mut choice.model, &info.model, &MODELS);
-                        pick(ui, "Effort", &mut choice.effort, &info.effort, &EFFORTS);
-                        let (p, f) = default(&info.permissions, "default (asks)");
-                        row(ui, "Permissions", p, Some(f));
-                        if let Some(t) = &info.thinking {
-                            row(ui, "Thinking", t.value.clone(), Some(t.from.clone()));
-                        }
+                        let sourced = |o: &Option<Sourced>, d: &str| {
+                            let (v, from) = default(o, d);
+                            (v, format!("({from})"))
+                        };
+                        let (v, n) = sourced(&info.model, "default");
+                        pick(ui, "Model", &mut choice.model, &same(&MODELS), v, n);
+                        let (v, n) = sourced(&info.effort, "default");
+                        pick(ui, "Effort", &mut choice.effort, &same(&EFFORTS), v, n);
+                        let (v, n) = sourced(&info.permissions, "default (asks)");
+                        pick(ui, "Permissions", &mut choice.permissions, &same(&PERMISSIONS), v, n);
+                        let (v, n) = sourced(&info.thinking, "off");
+                        let think = vec![("on".to_owned(), "thinking on".to_owned()), ("off".to_owned(), "thinking off".to_owned())];
+                        pick(ui, "Thinking", &mut choice.thinking, &think, format!("thinking {v}"), n);
                         if !info.extra_args.is_empty() {
                             row(ui, "Extra arguments", info.extra_args.clone(), None);
                         }
                         row(ui, "Instructions", if info.instructions.is_empty() { "no CLAUDE.md".into() } else { info.instructions.join("\n") }, None);
-                        row(ui, "Settings files", if info.settings_files.is_empty() { "none".into() } else { info.settings_files.join("\n") }, None);
-                        let mcp: Vec<String> = info.mcp.iter().map(|(n, s)| format!("{n} ({s})")).collect();
-                        row(ui, "MCP servers", list(&mcp), None);
-                        row(ui, "Skills", list(&info.skills), None);
-                        row(ui, "Agents", list(&info.agents), None);
-                        row(ui, "Commands", list(&info.commands), None);
-                        row(ui, "Hooks", list(&info.hooks), None);
+                        let sources = [("user", "your settings only"), ("project,local", "the project's only"), ("user,project", "yours and the project's (no local)")];
+                        let sources: Vec<(String, String)> = sources.iter().map(|(v, l)| ((*v).to_owned(), (*l).to_owned())).collect();
+                        let files = if info.settings_files.is_empty() { "none found".into() } else { info.settings_files.join("\n") };
+                        pick(ui, "Settings files", &mut choice.sources, &sources, "all of them".into(), files);
+                        let off = |what: &str| vec![("off".to_owned(), format!("no {what}"))];
+                        if info.mcp.is_empty() {
+                            row(ui, "MCP servers", "none".into(), None);
+                        } else {
+                            let mcp: Vec<String> = info.mcp.iter().map(|(n, s)| format!("{n} ({s})")).collect();
+                            let none = vec![("none".to_owned(), "no MCP servers".to_owned())];
+                            pick(ui, "MCP servers", &mut choice.mcp, &none, count(mcp.len(), "server", "servers"), list(&mcp));
+                        }
+                        // Skills and commands go on and off together (one flag).
+                        if info.skills.is_empty() && info.commands.is_empty() {
+                            row(ui, "Skills", "none".into(), None);
+                            row(ui, "Commands", "none".into(), None);
+                        } else {
+                            pick(ui, "Skills", &mut choice.slash, &off("skills or commands"), count(info.skills.len(), "skill", "skills"), list(&info.skills));
+                            pick(ui, "Commands", &mut choice.slash, &off("skills or commands"), count(info.commands.len(), "command", "commands"), list(&info.commands));
+                        }
+                        if info.agents.is_empty() {
+                            row(ui, "Agent", "main (no custom agents)".into(), None);
+                        } else {
+                            pick(ui, "Agent", &mut choice.agent, &same(&info.agents.iter().map(String::as_str).collect::<Vec<_>>()), "main".into(), format!("available: {}", list(&info.agents)));
+                        }
+                        if info.hooks.is_empty() {
+                            row(ui, "Hooks", "none".into(), None);
+                        } else {
+                            pick(ui, "Hooks", &mut choice.hooks, &off("hooks"), count(info.hooks.len(), "hook event", "hook events"), list(&info.hooks));
+                        }
                         if !info.plugins.is_empty() {
-                            row(ui, "Plugins", list(&info.plugins), None);
+                            let all = vec![(info.plugins.join(","), "no plugins".to_owned())];
+                            pick(ui, "Plugins", &mut choice.plugins, &all, count(info.plugins.len(), "plugin", "plugins"), list(&info.plugins));
                         }
                     });
                 });
