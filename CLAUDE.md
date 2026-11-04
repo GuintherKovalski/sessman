@@ -32,7 +32,7 @@ middle of a test does end them. Until scope can take changes live (ROADMAP item 
 every change in a separate instance, one per test:
 
 ```sh
-scripts/test-instance.sh start [name]   # builds, then runs target/debug/scope with a copy of the config
+scripts/test-instance.sh start [name] [label]   # builds, then runs target/debug/scope with a copy of the config
 export SCOPE_CONFIG=/tmp/scope-test-<name>/config
 target/debug/scope list --workspace E2E        # drive it through its commands
 scripts/test-instance.sh stop [name]    # quits it; removes its folder and the sessions made in it
@@ -41,6 +41,9 @@ scripts/test-instance.sh stop [name]    # quits it; removes its folder and the s
 - The instance has its own config (`SCOPE_CONFIG`), so renames, moves, workspaces and state
   you change there never reach the developer's. Commands (`scope list|rename|move|new|ask`)
   reach the instance whose `SCOPE_CONFIG` they run with.
+- Its Dock icon is named `scope: <label>` (hover it): the branch, without `feature/`, plus
+  the instance name if given. That is how the developer tells instances apart, so keep branch
+  names short and saying what they test, or pass a label.
 - It opens on an **E2E** workspace whose new sessions start in `/tmp/scope-test-<name>/proj`.
   Sessions made there are real Claude Code sessions; `stop` deletes them.
 - Check results through what the app itself reports: command replies, `scope list` (the
