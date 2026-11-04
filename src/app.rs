@@ -4291,7 +4291,7 @@ fn file_size(bytes: u64) -> String {
 
 /// When a session row was last active, in local time: "14:32" today, "Nov 2 14:32" this
 /// year, "Nov 2 2025" before.
-fn row_time(t: SystemTime, now: SystemTime) -> String {
+pub(crate) fn row_time(t: SystemTime, now: SystemTime) -> String {
     fn local(t: SystemTime) -> (i32, u32, u32, u32, u32) {
         let secs = t.duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs()) as libc::time_t;
         // SAFETY: localtime_r only writes the tm it is given.

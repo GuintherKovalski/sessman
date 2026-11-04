@@ -325,7 +325,7 @@ pub fn ui(ui: &mut egui::Ui, s: &mut Settings, filter: &mut String, about: &mut 
             }
             ui.add(egui::TextEdit::singleline(&mut s.jira_url).hint_text("https://…atlassian.net").desired_width(260.0));
         });
-        page.row("Offer to finish sessions idle for (hours)", "Their last interaction shows in red, with Finish session to take them out of the scope; 0 = never", s.stale_after_hours != defaults.stale_after_hours, |ui, reset| {
+        page.row("Offer to finish sessions idle for (hours)", "They show Finish session, to take them out of the scope; 0 = never", s.stale_after_hours != defaults.stale_after_hours, |ui, reset| {
             if reset {
                 s.stale_after_hours = defaults.stale_after_hours;
             }
