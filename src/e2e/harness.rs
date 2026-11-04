@@ -260,6 +260,8 @@ pub fn setup() -> Setup {
     let mut settings = serde_json::Map::new();
     settings.insert("claude_path".into(), json!(fake_claude().display().to_string()));
     settings.insert("notify_when_done".into(), json!(false));
+    // Off, so the helper calls tests count stay theirs; verdicts.rs's tests turn it on.
+    settings.insert("tag_finished".into(), json!(false));
     settings.insert("theme".into(), json!("dark"));
     Setup { env, lock, settings }
 }
@@ -471,6 +473,11 @@ impl Scope {
         out.join("\n")
     }
 
+    /// The window's zoom factor.
+    pub fn zoom(&self) -> f32 {
+        self.h.ctx.zoom_factor()
+    }
+
     /// Whether `text` shows anywhere (part of a label, a field's contents or its hint).
     pub fn sees(&self, text: &str) -> bool {
         self.h.query_all_by(|_| true).any(|n| {
@@ -645,6 +652,12 @@ impl Scope {
         self.frames(4);
     }
 
+    /// Where the top of the widget labelled `label` is, from the window's top.
+    #[track_caller]
+    pub fn top_of(&self, label: &str) -> f32 {
+        self.node(label).rect().top()
+    }
+
     /// Whether the widget labelled `label` shows as selected (a session's bubble, a tab).
     #[track_caller]
     pub fn is_selected(&self, label: &str) -> bool {
@@ -738,6 +751,12 @@ impl Scope {
     /// Types into the prompt input.
     pub fn type_prompt(&mut self, text: &str) {
         self.type_in("prompt-input", text);
+    }
+
+    /// Types `text` wherever the keyboard is, without clicking a field first.
+    pub fn type_here(&mut self, text: &str) {
+        self.h.event(egui::Event::Text(text.to_owned()));
+        self.frames(3);
     }
 
     /// Drops a file on the window, as from Finder.
