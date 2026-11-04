@@ -239,3 +239,75 @@ fn a_workspace_is_renamed_from_its_tab_and_keeps_its_overview() {
     s.press(Key::Enter);
     assert_eq!(names(&s), vec!["Job", "Other"], "a name already taken is refused");
 }
+
+/// Work holds alpha, beta and gamma, listed newest first; Work is open.
+fn three_in_work() -> Scope {
+    let mut s = setup()
+        .session(session("s-a", "alpha prompt", 300))
+        .session(session("s-b", "beta prompt", 200))
+        .session(session("s-c", "gamma prompt", 100))
+        .workspaces(&[("Work", &["s-a", "s-b", "s-c"])])
+        .launch();
+    s.click_first("Work");
+    s
+}
+
+#[test]
+fn delete_on_a_clicked_session_takes_it_out_and_opens_the_one_above() {
+    let mut s = three_in_work();
+    s.click("beta prompt");
+    s.press(Key::Delete);
+    assert_eq!(members(&s, "Work"), vec!["s-a", "s-c"]);
+    assert!(!s.sees("beta prompt"));
+    assert!(s.is_selected("gamma prompt"), "the session above it opens:\n{}", s.screen());
+    assert!(s.env.session_file("s-b").is_some(), "the session itself stays");
+    // The bar keeps the keyboard: Backspace (the Mac's delete key) takes the next one out.
+    s.press(Key::Backspace);
+    assert_eq!(members(&s, "Work"), vec!["s-a"]);
+    assert!(s.is_selected("alpha prompt"), "with nothing above, the one on top opens");
+}
+
+#[test]
+fn deleting_the_top_session_opens_the_new_top() {
+    let mut s = three_in_work();
+    s.click("gamma prompt");
+    s.press(Key::Backspace);
+    assert_eq!(members(&s, "Work"), vec!["s-a", "s-b"]);
+    assert!(s.is_selected("beta prompt"));
+}
+
+#[test]
+fn up_and_down_move_through_the_bar_once_a_session_is_clicked() {
+    let mut s = three_in_work();
+    s.click("gamma prompt");
+    s.press(Key::ArrowDown);
+    assert!(s.is_selected("beta prompt"));
+    s.press(Key::ArrowDown);
+    s.press(Key::ArrowDown);
+    assert!(s.is_selected("alpha prompt"), "it stops at the bottom");
+    s.press(Key::ArrowUp);
+    assert!(s.is_selected("beta prompt"));
+    assert_eq!(s.prompt(), "");
+}
+
+#[test]
+fn typing_after_clicking_a_session_goes_to_the_input_and_delete_stays_there() {
+    let mut s = three_in_work();
+    s.click("beta prompt");
+    s.type_here("h");
+    s.type_here("i");
+    assert_eq!(s.prompt(), "hi");
+    s.press(Key::Backspace);
+    assert_eq!(s.prompt(), "h", "Backspace in the input edits it");
+    assert_eq!(members(&s, "Work").len(), 3);
+}
+
+#[test]
+fn delete_does_nothing_in_all_sessions() {
+    let mut s = three_in_work();
+    s.click("Scopes");
+    s.click("beta prompt");
+    s.press(Key::Delete);
+    assert_eq!(members(&s, "Work").len(), 3);
+    assert!(s.sees("beta prompt"));
+}
