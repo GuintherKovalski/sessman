@@ -248,7 +248,7 @@ fn three_in_work() -> Scope {
         .session(session("s-c", "gamma prompt", 100))
         .workspaces(&[("Work", &["s-a", "s-b", "s-c"])])
         .launch();
-    s.click_first("Work");
+    s.click_first("WORK");
     s
 }
 
@@ -305,7 +305,7 @@ fn typing_after_clicking_a_session_goes_to_the_input_and_delete_stays_there() {
 #[test]
 fn delete_does_nothing_in_all_sessions() {
     let mut s = three_in_work();
-    s.click("Scopes");
+    s.click("SCOPES");
     s.click("beta prompt");
     s.press(Key::Delete);
     assert_eq!(members(&s, "Work").len(), 3);
