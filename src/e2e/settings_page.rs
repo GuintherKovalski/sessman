@@ -37,6 +37,22 @@ fn a_change_applies_and_saves_at_once_and_resets() {
 }
 
 #[test]
+fn the_model_for_prompts_is_chosen_and_goes_to_the_next_prompt() {
+    let mut s = opened();
+    s.type_in_hint("🔍 Search settings", "model for prompts");
+    s.click("Fable");
+    assert_eq!(s.env.config_json("settings.json")["model"], "fable");
+    s.click("Opus");
+    assert_eq!(s.env.config_json("settings.json")["model"], "opus");
+    s.click("Main");
+    s.send("go");
+    s.wait_to_see("Echo: go");
+    let call = s.env.calls().into_iter().rfind(|c| c["args"].as_array().unwrap().iter().any(|a| a == "--resume")).unwrap();
+    let args: Vec<&str> = call["args"].as_array().unwrap().iter().map(|a| a.as_str().unwrap()).collect();
+    assert!(args.windows(2).any(|w| w == ["--model", "opus"]));
+}
+
+#[test]
 fn the_search_field_filters_the_settings() {
     let mut s = opened();
     s.type_in_hint("🔍 Search settings", "jira");

@@ -269,11 +269,13 @@ pub fn ui(ui: &mut egui::Ui, s: &mut Settings, filter: &mut String, about: &mut 
             }
             ui.add(egui::TextEdit::singleline(&mut s.claude_path).desired_width(260.0));
         });
-        page.row("Model for prompts", "e.g. opus, sonnet; empty = Claude Code's default", s.model != defaults.model, |ui, reset| {
+        page.row("Model for prompts", "Default = Claude Code's default", s.model != defaults.model, |ui, reset| {
             if reset {
                 s.model = defaults.model.clone();
             }
-            ui.add(egui::TextEdit::singleline(&mut s.model).hint_text("default").desired_width(260.0));
+            for (v, label) in [("", "Default"), ("opus", "Opus"), ("fable", "Fable")] {
+                ui.selectable_value(&mut s.model, v.to_owned(), label);
+            }
         });
         page.row("Helper model", "Search, goals and Refine", s.helper_model != defaults.helper_model, |ui, reset| {
             if reset {

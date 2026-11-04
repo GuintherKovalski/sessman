@@ -1,6 +1,6 @@
 //! + New session: an empty session whose first prompt creates it.
 use super::harness::*;
-use serde_json::json;
+use serde_json::{Value, json};
 
 /// A workspace whose new sessions go to `folder` without asking (the native folder picker
 /// can't be driven from a test, so these start where the workspace already has a folder).
@@ -77,3 +77,29 @@ fn a_starting_session_can_be_left_and_opened_again() {
     s.wait_to_see("Echo: HOLD slow start");
 }
 
+
+#[test]
+fn model_and_effort_picked_for_a_new_session_go_with_all_its_prompts() {
+    let s = setup().session(session("s-a", "alpha prompt", 100)).setting("model", json!("opus"));
+    let folder = s.env().folder("newproj");
+    let mut s = s.workspaces_json(json!({"list": [{"name": "Work", "sessions": ["s-a"], "folder": folder}]})).launch();
+    s.click_first("WORK");
+    s.click("+  New session");
+    assert!(s.sees("opus (as set)"), "Settings' model is what it would use");
+    s.click("opus (as set)");
+    s.click("fable");
+    s.click("default (as set)");
+    s.click("high");
+    assert!(s.sees("fable") && s.sees("high"));
+    s.send("first");
+    s.wait_to_see("Echo: first");
+    s.wait_until("it is a normal session", |s| !s.list().contains("[starting]"));
+    s.send("second");
+    s.wait_to_see("Echo: second");
+    let runs: Vec<Vec<Value>> = s.env.calls().into_iter().map(|c| c["args"].as_array().unwrap().clone()).filter(|a| a.iter().any(|x| x == "--session-id" || x == "--resume")).collect();
+    assert_eq!(runs.len(), 2);
+    for args in runs {
+        assert!(args.windows(2).any(|w| w[0] == "--model" && w[1] == "fable"), "{args:?}");
+        assert!(args.windows(2).any(|w| w[0] == "--effort" && w[1] == "high"), "{args:?}");
+    }
+}
