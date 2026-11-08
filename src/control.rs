@@ -37,6 +37,11 @@ pub enum Command {
         #[serde(default)]
         workspace: Option<String>,
     },
+    /// Shows or changes how scope looks: `scope style` and its arguments (style.rs).
+    Style {
+        #[serde(default)]
+        args: Vec<String>,
+    },
 }
 
 /// A command and who sent it: the session it came from (`SCOPE_SESSION`) and its folder.
@@ -130,17 +135,22 @@ pub const USAGE: &str = "usage:
   scope new [--scope S] [--folder DIR] [--name NAME] <prompt>
                                          starts a session with that first prompt
   scope ask [--scope S] <question>       asks the scope's orchestrator (it may act)
+  scope style [<preset> | set <key> <value>... | reset [key...]]
+                                         shows or changes how scope looks, live
 <session> is an id, an id prefix, the session's name, or . for the session running this.
 The scope defaults to the calling session's (--workspace/-w still work for --scope/-s).";
 
 /// Whether `arg` is one of the commands, run from the command line.
 pub fn is_command(arg: &str) -> bool {
-    matches!(arg, "list" | "rename" | "move" | "new" | "ask")
+    matches!(arg, "list" | "rename" | "move" | "new" | "ask" | "style")
 }
 
 /// Parses command-line arguments (after the program name) into a command.
 pub fn parse_args(args: &[String]) -> Result<Command, String> {
     let (verb, rest) = args.split_first().ok_or_else(|| USAGE.to_owned())?;
+    if verb == "style" {
+        return Ok(Command::Style { args: rest.to_vec() });
+    }
     let mut workspace = None;
     let mut folder = None;
     let mut name = None;
@@ -242,7 +252,10 @@ pub fn system_prompt(exe: &str) -> String {
          \"{exe}\" move <session> <top|bottom|up|down|N>\n\
          \"{exe}\" new [--scope S] [--folder DIR] [--name NAME] <first prompt>\n\
          \"{exe}\" ask [--scope S] <question>\n\
-         <session> is an id, an id prefix, a session's name, or . for this session. The scope defaults to this session's."
+         <session> is an id, an id prefix, a session's name, or . for this session. The scope defaults to this session's.\n\
+         When the developer asks to change how scope looks (theme, colors, accent, roundness, spacing, text size), \
+         run \"{exe}\" style to see the current style, its presets and keys, then \"{exe}\" style <preset> or \
+         \"{exe}\" style set <key> <value>... (or reset [key...]); it changes live in their window."
     )
 }
 
@@ -284,6 +297,8 @@ mod tests {
         assert!(parse_args(&args(&["new"])).is_err());
         assert!(parse_args(&args(&["rename"])).is_err());
         assert!(parse_args(&args(&["frobnicate"])).is_err());
+        assert_eq!(parse_args(&args(&["style", "set", "radius", "6"])), Ok(Command::Style { args: args(&["set", "radius", "6"]) }));
+        assert!(is_command("style"));
     }
 
     #[test]

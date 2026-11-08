@@ -490,6 +490,11 @@ impl Scope {
         self.h.ctx.zoom_factor()
     }
 
+    /// The window's style as egui draws it now (colors, corners, spacing, text sizes).
+    pub fn style(&self) -> std::sync::Arc<egui::Style> {
+        self.h.ctx.global_style()
+    }
+
     /// Whether `text` shows anywhere (part of a label, a field's contents or its hint).
     pub fn sees(&self, text: &str) -> bool {
         self.h.query_all_by(|_| true).any(|n| {

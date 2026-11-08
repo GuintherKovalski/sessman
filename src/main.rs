@@ -23,6 +23,7 @@ mod settings;
 mod shared;
 mod state;
 mod status;
+mod style;
 mod theme;
 mod update;
 mod verdict;
