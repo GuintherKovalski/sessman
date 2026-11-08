@@ -111,34 +111,50 @@ fn git_branch(dir: &Path) -> Option<String> {
     })
 }
 
-pub fn gather(dir: &Path, home: &Path, scope: &Scope, env: &dyn Fn(&str) -> Option<String>) -> NewInfo {
-    let mut info = NewInfo { extra_args: scope.extra.join(" "), branch: git_branch(dir), ..Default::default() };
-    let user_dir = home.join(".claude");
-    // The project root: the repository's top, else the folder itself.
+/// Settings files that apply in `dir`, most specific first (that is their precedence).
+fn settings_files(dir: &Path, home: &Path) -> Vec<(PathBuf, Value)> {
     let root = dir.ancestors().find(|d| d.join(".git").exists()).unwrap_or(dir).to_path_buf();
+    [root.join(".claude/settings.local.json"), root.join(".claude/settings.json"), home.join(".claude/settings.json")]
+        .into_iter()
+        .filter_map(|p| read_json(&p).map(|v| (p, v)))
+        .collect()
+}
 
-    // Settings files, most specific first (that is their precedence).
-    let mut files: Vec<(PathBuf, Value)> = Vec::new();
-    for p in [root.join(".claude/settings.local.json"), root.join(".claude/settings.json"), user_dir.join("settings.json")] {
-        if let Some(v) = read_json(&p) {
-            info.settings_files.push(tilde(&p, home));
-            files.push((p, v));
-        }
-    }
-    let from_files = |get: &dyn Fn(&Value) -> Option<String>| {
-        files.iter().find_map(|(p, v)| get(v).map(|value| Sourced { value, from: tilde(p, home) }))
-    };
-    let s = |v: &Value| v.as_str().map(str::to_owned).filter(|s| !s.trim().is_empty());
-
-    info.model = if !scope.model.trim().is_empty() {
+/// The model a run in `dir` gets when its session picked none, and where that comes from;
+/// `None` = Claude Code's own default.
+fn model_from(scope: &Scope, env: &dyn Fn(&str) -> Option<String>, files: &[(PathBuf, Value)], home: &Path) -> Option<Sourced> {
+    if !scope.model.trim().is_empty() {
         Some(Sourced { value: scope.model.trim().to_owned(), from: "scope settings".into() })
     } else if let Some(m) = flag(scope.extra, "--model") {
         Some(Sourced { value: m, from: "extra arguments".into() })
     } else if let Some(m) = env("ANTHROPIC_MODEL").filter(|m| !m.is_empty()) {
         Some(Sourced { value: m, from: "ANTHROPIC_MODEL".into() })
     } else {
-        from_files(&|v| v.get("model").and_then(s))
+        files.iter().find_map(|(p, v)| {
+            let m = v.get("model")?.as_str()?.trim();
+            (!m.is_empty()).then(|| Sourced { value: m.to_owned(), from: tilde(p, home) })
+        })
+    }
+}
+
+/// [`model_from`] for `dir`, reading its settings files.
+pub fn default_model(dir: &Path, home: &Path, scope: &Scope, env: &dyn Fn(&str) -> Option<String>) -> Option<Sourced> {
+    model_from(scope, env, &settings_files(dir, home), home)
+}
+
+pub fn gather(dir: &Path, home: &Path, scope: &Scope, env: &dyn Fn(&str) -> Option<String>) -> NewInfo {
+    let mut info = NewInfo { extra_args: scope.extra.join(" "), branch: git_branch(dir), ..Default::default() };
+    let user_dir = home.join(".claude");
+    // The project root: the repository's top, else the folder itself.
+    let root = dir.ancestors().find(|d| d.join(".git").exists()).unwrap_or(dir).to_path_buf();
+    let files = settings_files(dir, home);
+    info.settings_files = files.iter().map(|(p, _)| tilde(p, home)).collect();
+    let from_files = |get: &dyn Fn(&Value) -> Option<String>| {
+        files.iter().find_map(|(p, v)| get(v).map(|value| Sourced { value, from: tilde(p, home) }))
     };
+    let s = |v: &Value| v.as_str().map(str::to_owned).filter(|s| !s.trim().is_empty());
+
+    info.model = model_from(scope, env, &files, home);
     info.effort = flag(scope.extra, "--effort")
         .map(|e| Sourced { value: e, from: "extra arguments".into() })
         .or_else(|| env("CLAUDE_CODE_EFFORT_LEVEL").filter(|e| !e.is_empty()).map(|e| Sourced { value: e, from: "CLAUDE_CODE_EFFORT_LEVEL".into() }))
@@ -230,7 +246,7 @@ pub const PERMISSIONS: [&str; 4] = ["default", "acceptEdits", "plan", "bypassPer
 
 /// A dropdown for `value` among `options` (value, label); empty = `default`, what applies
 /// when nothing is picked.
-fn picker(ui: &mut egui::Ui, id: &str, value: &mut String, options: &[(String, String)], default: &str, enabled: bool) {
+pub fn picker(ui: &mut egui::Ui, id: &str, value: &mut String, options: &[(String, String)], default: &str, enabled: bool) {
     let shown = match options.iter().find(|(v, _)| v == value) {
         Some((_, label)) if !value.is_empty() => label.clone(),
         _ => default.to_owned(),
