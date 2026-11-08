@@ -484,7 +484,12 @@ pub fn btw(ctx: eframe::egui::Context, id: String, cwd: Option<PathBuf>, questio
 /// Asks a small model for the session goal and a checklist of subgoals (format in goal.rs).
 /// Uses --no-session-persistence so the summary itself doesn't become a session.
 pub fn summarize_goal(ctx: eframe::egui::Context, digest: String) -> Receiver<Result<String, String>> {
-    let prompt = format!(
+    ask_haiku(ctx, goal_request(&digest))
+}
+
+/// The goal request, from a digest of the session.
+pub fn goal_request(digest: &str) -> String {
+    format!(
         "Below is a digest of a coding session between a USER and CLAUDE (an AI coding assistant).\n\
          Write the session's overall goal and a checklist of 3 to 7 concrete subgoals.\n\
          Mark a subgoal [x] when CLAUDE reported it done (e.g. it built, committed, verified or \
@@ -494,22 +499,25 @@ pub fn summarize_goal(ctx: eframe::egui::Context, digest: String) -> Receiver<Re
          - [x] <completed subgoal>\n\
          - [ ] <open subgoal>\n\n\
          Session digest:\n{digest}"
-    );
-    ask_haiku(ctx, prompt)
+    )
 }
 
 /// Asks the helper model for a short name for a new session, from its first prompt and answer.
 pub fn name_session(ctx: eframe::egui::Context, prompt: &str, answer: &str) -> Receiver<Result<String, String>> {
+    ask_haiku(ctx, name_request(prompt, answer))
+}
+
+/// The naming request, from the session's first prompt and answer.
+pub fn name_request(prompt: &str, answer: &str) -> String {
     let cut = |t: &str, n: usize| t.chars().take(n).collect::<String>();
-    let prompt = format!(
+    format!(
         "Name this coding session in at most 4 words: concise, simple and direct about the thing \
          it addresses (e.g. \"Fix login redirect\", \"Usage limits bar\"). No quotes, no \
          punctuation at the end. Reply with the name only.\n\n\
          USER:\n{}\n\nCLAUDE:\n{}",
         cut(prompt, 2000),
         cut(answer, 2000)
-    );
-    ask_haiku(ctx, prompt)
+    )
 }
 
 /// A one-off question to the helper model (Haiku by default), outside any session.

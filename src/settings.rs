@@ -183,6 +183,23 @@ pub fn matches(query: &str, section: &str, label: &str) -> bool {
     query.split_whitespace().all(|w| hay.contains(&w.to_lowercase()))
 }
 
+/// A group of settings, drawn as a card like a scope's: its title, what it is about, and a
+/// stripe in its color.
+struct Group {
+    title: &'static str,
+    about: &'static str,
+    color: egui::Color32,
+}
+
+const APPEARANCE: Group = Group { title: "Appearance", about: "How scope looks", color: egui::Color32::from_rgb(170, 120, 220) };
+const PROMPT: Group = Group { title: "Prompt input", about: "The field at the bottom of a session", color: egui::Color32::from_rgb(90, 155, 230) };
+const READING: Group = Group { title: "Conversation and files", about: "What the middle area shows", color: egui::Color32::from_rgb(80, 185, 170) };
+const CLAUDE: Group = Group { title: "Claude Code", about: "How scope runs claude for your prompts", color: egui::Color32::from_rgb(225, 145, 85) };
+const SESSIONS: Group = Group { title: "Sessions and scopes", about: "The session list, its tags, and the scopes overview", color: egui::Color32::from_rgb(105, 190, 115) };
+const HELPERS: Group = Group { title: "AI helpers and harnesses", about: "What runs, and what it is told, when you ask something", color: egui::Color32::from_rgb(215, 175, 65) };
+const SHORTCUTS: Group = Group { title: "Keyboard shortcuts", about: "", color: egui::Color32::from_rgb(140, 140, 150) };
+const ABOUT: Group = Group { title: "About", about: "Version, updates, config folder", color: egui::Color32::from_rgb(140, 140, 150) };
+
 /// The Settings page. Returns true when a setting changed (to save and apply it).
 pub fn ui(ui: &mut egui::Ui, s: &mut Settings, filter: &mut String, about: &mut About) -> bool {
     let before = s.clone();
@@ -193,272 +210,402 @@ pub fn ui(ui: &mut egui::Ui, s: &mut Settings, filter: &mut String, about: &mut 
         ui.add(egui::TextEdit::singleline(filter).hint_text("🔍 Search settings").desired_width(260.0));
     });
     ui.label(RichText::new(format!("Saved to {}", path().display())).weak().small());
-    ui.separator();
+    ui.add_space(4.0);
     let q = filter.trim().to_owned();
     egui::ScrollArea::vertical().id_salt("settings").auto_shrink(false).show(ui, |ui| {
-        let mut page = Page { ui, q: &q, section: "", headed: "", shown: false };
+        let mut page = Page { ui, q: &q, context: String::new(), probe: false, hits: 0, label_width: 300.0 };
 
-        page.section("Appearance");
-        page.row("Theme", "Dark, light, or follow the system", s.theme != defaults.theme, |ui, reset| {
-            if reset {
-                s.theme = defaults.theme.clone();
-            }
-            for (v, label) in [("dark", "🌙 Dark"), ("light", "☀ Light"), ("system", "💻 System")] {
-                ui.selectable_value(&mut s.theme, v.to_owned(), label);
-            }
-        });
-        let ds = &defaults.style;
-        page.row("Style", "Colors for both themes. Or ask Claude in any session to restyle scope: it applies at once", s.style.preset != ds.preset, |ui, reset| {
-            if reset {
-                s.style.preset = ds.preset.clone();
-            }
-            for (name, what) in crate::style::PRESETS {
-                let label = format!("{}{}", name[..1].to_uppercase(), &name[1..]);
-                ui.selectable_value(&mut s.style.preset, (*name).to_owned(), label).on_hover_text(*what);
-            }
-        });
-        page.row("Accent color", "Selection, links and the open tab's marks", !s.style.accent.is_empty(), |ui, reset| {
-            if reset {
-                s.style.accent.clear();
-            }
-            let mut c = s.style.accent_shown(ui.visuals().dark_mode);
-            if egui::color_picker::color_edit_button_srgba(ui, &mut c, egui::color_picker::Alpha::Opaque).changed() {
-                s.style.accent = crate::style::to_hex(c);
-            }
-        });
-        page.row("Corner roundness", "Buttons, fields and menus", s.style.radius != ds.radius, |ui, reset| {
-            if reset {
-                s.style.radius = ds.radius;
-            }
-            ui.add(egui::Slider::new(&mut s.style.radius, 0.0..=16.0).step_by(1.0));
-        });
-        page.row("Spacing", "Room between and inside widgets", s.style.spacing != ds.spacing, |ui, reset| {
-            if reset {
-                s.style.spacing = ds.spacing;
-            }
-            ui.add(egui::Slider::new(&mut s.style.spacing, 0.5..=2.5).step_by(0.1));
-        });
-        page.row("Text size", "Labels, buttons and messages (headings follow)", s.style.text_size != ds.text_size, |ui, reset| {
-            if reset {
-                s.style.text_size = ds.text_size;
-            }
-            ui.add(egui::Slider::new(&mut s.style.text_size, 9.0..=22.0).step_by(0.5));
-        });
-        if !s.style.colors.is_empty() {
-            page.row("Single colors", "Set with scope style; see them all with scope style", true, |ui, reset| {
+        page.group(&APPEARANCE, |page| {
+            page.row("Theme", "Dark, light, or follow the system", s.theme != defaults.theme, |ui, reset| {
                 if reset {
-                    s.style.colors.clear();
+                    s.theme = defaults.theme.clone();
                 }
-                let list: Vec<String> = s.style.colors.iter().map(|(k, v)| format!("{k} {v}")).collect();
-                ui.label(RichText::new(list.join(", ")).monospace().small());
+                for (v, label) in [("dark", "🌙 Dark"), ("light", "☀ Light"), ("system", "💻 System")] {
+                    ui.selectable_value(&mut s.theme, v.to_owned(), label);
+                }
             });
-        }
-        page.row("Monospace font size", "Prompt input, code and files", s.mono_size != defaults.mono_size, |ui, reset| {
-            if reset {
-                s.mono_size = defaults.mono_size;
-            }
-            ui.add(egui::Slider::new(&mut s.mono_size, 9.0..=20.0).step_by(0.5));
-        });
-
-        page.section("Prompt input");
-        page.row("Send with Cmd/Ctrl+Enter", "Off: Enter sends. On: Enter adds a new line", s.send_with_modifier != defaults.send_with_modifier, |ui, reset| {
-            if reset {
-                s.send_with_modifier = defaults.send_with_modifier;
-            }
-            ui.checkbox(&mut s.send_with_modifier, "");
-        });
-        page.row("Maximum height (lines)", "The input grows up to this, then scrolls", s.input_max_lines != defaults.input_max_lines, |ui, reset| {
-            if reset {
-                s.input_max_lines = defaults.input_max_lines;
-            }
-            ui.add(egui::Slider::new(&mut s.input_max_lines, 2..=40));
-        });
-        page.row("Keep a draft per session", "What you type stays with its session when you switch", s.drafts_per_session != defaults.drafts_per_session, |ui, reset| {
-            if reset {
-                s.drafts_per_session = defaults.drafts_per_session;
-            }
-            ui.checkbox(&mut s.drafts_per_session, "");
-        });
-
-        page.section("Conversation");
-        page.row("Show tool lines", "The dimmed ⚙ Read · Edit lines between messages", s.show_tool_lines != defaults.show_tool_lines, |ui, reset| {
-            if reset {
-                s.show_tool_lines = defaults.show_tool_lines;
-            }
-            ui.checkbox(&mut s.show_tool_lines, "");
-        });
-
-        page.section("Files");
-        page.row("Line numbers", "In open files", s.line_numbers != defaults.line_numbers, |ui, reset| {
-            if reset {
-                s.line_numbers = defaults.line_numbers;
-            }
-            ui.checkbox(&mut s.line_numbers, "");
-        });
-        page.row("Wrap long lines", "Off: scroll sideways", s.wrap_file_lines != defaults.wrap_file_lines, |ui, reset| {
-            if reset {
-                s.wrap_file_lines = defaults.wrap_file_lines;
-            }
-            ui.checkbox(&mut s.wrap_file_lines, "");
-        });
-        page.row("Tab width", "Spaces shown for a tab character", s.tab_width != defaults.tab_width, |ui, reset| {
-            if reset {
-                s.tab_width = defaults.tab_width;
-            }
-            ui.add(egui::Slider::new(&mut s.tab_width, 1..=8));
-        });
-        page.row("Open Markdown rendered", "Off: .md files open as source", s.markdown_rendered != defaults.markdown_rendered, |ui, reset| {
-            if reset {
-                s.markdown_rendered = defaults.markdown_rendered;
-            }
-            ui.checkbox(&mut s.markdown_rendered, "");
-        });
-
-        page.section("Claude");
-        page.row("claude command", "Path to the Claude Code CLI", s.claude_path != defaults.claude_path, |ui, reset| {
-            if reset {
-                s.claude_path = defaults.claude_path.clone();
-            }
-            ui.add(egui::TextEdit::singleline(&mut s.claude_path).desired_width(260.0));
-        });
-        page.row("Model for prompts", "Default = Claude Code's default", s.model != defaults.model, |ui, reset| {
-            if reset {
-                s.model = defaults.model.clone();
-            }
-            for (v, label) in [("", "Default"), ("opus", "Opus"), ("fable", "Fable")] {
-                ui.selectable_value(&mut s.model, v.to_owned(), label);
-            }
-        });
-        page.row("Helper model", "Search, goals and Refine", s.helper_model != defaults.helper_model, |ui, reset| {
-            if reset {
-                s.helper_model = defaults.helper_model.clone();
-            }
-            ui.add(egui::TextEdit::singleline(&mut s.helper_model).desired_width(260.0));
-        });
-        page.row("Extra arguments", "Added to every claude -p, e.g. --permission-mode acceptEdits", s.extra_args != defaults.extra_args, |ui, reset| {
-            if reset {
-                s.extra_args = defaults.extra_args.clone();
-            }
-            ui.add(egui::TextEdit::singleline(&mut s.extra_args).desired_width(260.0));
-        });
-        page.row("Default folder for new sessions", "Where the folder picker starts before any folder has been chosen; empty = the open session's folder", s.default_folder != defaults.default_folder, |ui, reset| {
-            if reset {
-                s.default_folder = defaults.default_folder.clone();
-            }
-            ui.add(egui::TextEdit::singleline(&mut s.default_folder).desired_width(260.0));
-        });
-
-        page.section("Behaviour");
-        page.row("Confirm before deleting a scope", "", s.confirm_delete_workspace != defaults.confirm_delete_workspace, |ui, reset| {
-            if reset {
-                s.confirm_delete_workspace = defaults.confirm_delete_workspace;
-            }
-            ui.checkbox(&mut s.confirm_delete_workspace, "");
-        });
-        page.row("Confirm before deleting a message", "From a session's context, with 🗑 on the message", s.confirm_delete_message != defaults.confirm_delete_message, |ui, reset| {
-            if reset {
-                s.confirm_delete_message = defaults.confirm_delete_message;
-            }
-            ui.checkbox(&mut s.confirm_delete_message, "");
-        });
-        page.row("Restore the previous state at start", "Open session, tabs, drafts and queues", s.restore_state != defaults.restore_state, |ui, reset| {
-            if reset {
-                s.restore_state = defaults.restore_state;
-            }
-            ui.checkbox(&mut s.restore_state, "");
-        });
-        page.row("Notify when a run finishes", "A system notification, while scope is in the background", s.notify_when_done != defaults.notify_when_done, |ui, reset| {
-            if reset {
-                s.notify_when_done = defaults.notify_when_done;
-            }
-            ui.checkbox(&mut s.notify_when_done, "");
-        });
-        page.row("Tag finished sessions", "After a run ends, the helper model reads the last messages and tags the session done, needs you or blocked", s.tag_finished != defaults.tag_finished, |ui, reset| {
-            if reset {
-                s.tag_finished = defaults.tag_finished;
-            }
-            ui.checkbox(&mut s.tag_finished, "");
-        });
-
-        page.section("Overview");
-        page.row("Jira URL", "Ticket keys in the scopes overview link here, e.g. https://acme.atlassian.net", s.jira_url != defaults.jira_url, |ui, reset| {
-            if reset {
-                s.jira_url = defaults.jira_url.clone();
-            }
-            ui.add(egui::TextEdit::singleline(&mut s.jira_url).hint_text("https://…atlassian.net").desired_width(260.0));
-        });
-        page.row("Offer to finish sessions idle for (hours)", "They show Finish session, to take them out of the scope; 0 = never", s.stale_after_hours != defaults.stale_after_hours, |ui, reset| {
-            if reset {
-                s.stale_after_hours = defaults.stale_after_hours;
-            }
-            ui.add(egui::Slider::new(&mut s.stale_after_hours, 0..=168));
-        });
-
-        page.section("Harness");
-        page.row("Scope orchestration", "What the orchestrator of each scope is told to do; the reply format and the sessions are added after it", s.orchestration_harness != defaults.orchestration_harness, |ui, reset| {
-            if reset {
-                s.orchestration_harness = defaults.orchestration_harness.clone();
-            }
-            harness_field(ui, &mut s.orchestration_harness);
-        });
-        page.row("Orchestration model", "e.g. sonnet, opus; empty = the helper model", s.orchestration_model != defaults.orchestration_model, |ui, reset| {
-            if reset {
-                s.orchestration_model = defaults.orchestration_model.clone();
-            }
-            ui.add(egui::TextEdit::singleline(&mut s.orchestration_model).hint_text("helper model").desired_width(260.0));
-        });
-        page.row("Update orchestration every (minutes)", "While its sessions have new activity and its page is open; 0 = only when asked", s.orchestration_every != defaults.orchestration_every, |ui, reset| {
-            if reset {
-                s.orchestration_every = defaults.orchestration_every;
-            }
-            ui.add(egui::Slider::new(&mut s.orchestration_every, 0..=120));
-        });
-        page.row("Questions (right panel)", "How a question in Info → Ask about this goal starts; the goal, its checklist and the question follow", s.question_harness != defaults.question_harness, |ui, reset| {
-            if reset {
-                s.question_harness = defaults.question_harness.clone();
-            }
-            harness_field(ui, &mut s.question_harness);
-        });
-        page.row("Finding sessions (left panel)", "What the helper model is told when Enter in the search asks it; the query, reply format and session list follow", s.search_harness != defaults.search_harness, |ui, reset| {
-            if reset {
-                s.search_harness = defaults.search_harness.clone();
-            }
-            harness_field(ui, &mut s.search_harness);
-        });
-
-        page.section("Keyboard shortcuts");
-        for (what, keys) in shortcuts(s) {
-            page.row(what, "", false, |ui, _| {
-                ui.label(RichText::new(&keys).monospace());
+            let ds = &defaults.style;
+            page.row("Style", "Colors for both themes. Or ask Claude in any session to restyle scope: it applies at once", s.style.preset != ds.preset, |ui, reset| {
+                if reset {
+                    s.style.preset = ds.preset.clone();
+                }
+                for (name, what) in crate::style::PRESETS {
+                    let label = format!("{}{}", name[..1].to_uppercase(), &name[1..]);
+                    ui.selectable_value(&mut s.style.preset, (*name).to_owned(), label).on_hover_text(*what);
+                }
             });
-        }
+            page.row("Accent color", "Selection, links and the open tab's marks", !s.style.accent.is_empty(), |ui, reset| {
+                if reset {
+                    s.style.accent.clear();
+                }
+                let mut c = s.style.accent_shown(ui.visuals().dark_mode);
+                if egui::color_picker::color_edit_button_srgba(ui, &mut c, egui::color_picker::Alpha::Opaque).changed() {
+                    s.style.accent = crate::style::to_hex(c);
+                }
+            });
+            page.row("Corner roundness", "Buttons, fields and menus", s.style.radius != ds.radius, |ui, reset| {
+                if reset {
+                    s.style.radius = ds.radius;
+                }
+                ui.add(egui::Slider::new(&mut s.style.radius, 0.0..=16.0).step_by(1.0));
+            });
+            page.row("Spacing", "Room between and inside widgets", s.style.spacing != ds.spacing, |ui, reset| {
+                if reset {
+                    s.style.spacing = ds.spacing;
+                }
+                ui.add(egui::Slider::new(&mut s.style.spacing, 0.5..=2.5).step_by(0.1));
+            });
+            page.row("Text size", "Labels, buttons and messages (headings follow)", s.style.text_size != ds.text_size, |ui, reset| {
+                if reset {
+                    s.style.text_size = ds.text_size;
+                }
+                ui.add(egui::Slider::new(&mut s.style.text_size, 9.0..=22.0).step_by(0.5));
+            });
+            if !s.style.colors.is_empty() {
+                page.row("Single colors", "Set with scope style; see them all with scope style", true, |ui, reset| {
+                    if reset {
+                        s.style.colors.clear();
+                    }
+                    let list: Vec<String> = s.style.colors.iter().map(|(k, v)| format!("{k} {v}")).collect();
+                    ui.label(RichText::new(list.join(", ")).monospace().small());
+                });
+            }
+            page.row("Zoom", "Also Cmd+Plus, Cmd+Minus and Cmd+0", (s.zoom - defaults.zoom).abs() > 0.001, |ui, reset| {
+                if reset {
+                    s.zoom = defaults.zoom;
+                }
+                if ui.small_button("−").on_hover_text("Zoom out").clicked() {
+                    s.zoom = ((s.zoom - 0.1) * 10.0).round() / 10.0;
+                }
+                ui.label(RichText::new(format!("{:.0}%", s.zoom * 100.0)).monospace());
+                if ui.small_button("+").on_hover_text("Zoom in").clicked() {
+                    s.zoom = ((s.zoom + 0.1) * 10.0).round() / 10.0;
+                }
+                s.zoom = s.zoom.clamp(0.5, 3.0);
+            });
+            page.row("Monospace font size", "Prompt input, code and files", s.mono_size != defaults.mono_size, |ui, reset| {
+                if reset {
+                    s.mono_size = defaults.mono_size;
+                }
+                ui.add(egui::Slider::new(&mut s.mono_size, 9.0..=20.0).step_by(0.5));
+            });
+        });
 
-        page.section("About");
-        page.row("Version", "", false, |ui, _| {
-            ui.label(env!("CARGO_PKG_VERSION"));
-            update_status(ui, about.updater);
+        page.group(&PROMPT, |page| {
+            page.row("Send with Cmd/Ctrl+Enter", "Off: Enter sends. On: Enter adds a new line", s.send_with_modifier != defaults.send_with_modifier, |ui, reset| {
+                if reset {
+                    s.send_with_modifier = defaults.send_with_modifier;
+                }
+                ui.checkbox(&mut s.send_with_modifier, "");
+            });
+            page.row("Maximum height (lines)", "The input grows up to this, then scrolls", s.input_max_lines != defaults.input_max_lines, |ui, reset| {
+                if reset {
+                    s.input_max_lines = defaults.input_max_lines;
+                }
+                ui.add(egui::Slider::new(&mut s.input_max_lines, 2..=40));
+            });
+            page.row("Keep a draft per session", "What you type stays with its session when you switch", s.drafts_per_session != defaults.drafts_per_session, |ui, reset| {
+                if reset {
+                    s.drafts_per_session = defaults.drafts_per_session;
+                }
+                ui.checkbox(&mut s.drafts_per_session, "");
+            });
         });
-        page.row("Check for updates automatically", "At start and twice a day, on GitHub; installing always waits for you", s.check_for_updates != defaults.check_for_updates, |ui, reset| {
-            if reset {
-                s.check_for_updates = defaults.check_for_updates;
+
+        page.group(&READING, |page| {
+            page.row("Show tool lines", "The dimmed ⚙ Read · Edit lines between messages", s.show_tool_lines != defaults.show_tool_lines, |ui, reset| {
+                if reset {
+                    s.show_tool_lines = defaults.show_tool_lines;
+                }
+                ui.checkbox(&mut s.show_tool_lines, "");
+            });
+            page.row("Line numbers", "In open files", s.line_numbers != defaults.line_numbers, |ui, reset| {
+                if reset {
+                    s.line_numbers = defaults.line_numbers;
+                }
+                ui.checkbox(&mut s.line_numbers, "");
+            });
+            page.row("Wrap long lines", "In open files; off: scroll sideways", s.wrap_file_lines != defaults.wrap_file_lines, |ui, reset| {
+                if reset {
+                    s.wrap_file_lines = defaults.wrap_file_lines;
+                }
+                ui.checkbox(&mut s.wrap_file_lines, "");
+            });
+            page.row("Tab width", "Spaces shown for a tab character", s.tab_width != defaults.tab_width, |ui, reset| {
+                if reset {
+                    s.tab_width = defaults.tab_width;
+                }
+                ui.add(egui::Slider::new(&mut s.tab_width, 1..=8));
+            });
+            page.row("Open Markdown rendered", "Off: .md files open as source", s.markdown_rendered != defaults.markdown_rendered, |ui, reset| {
+                if reset {
+                    s.markdown_rendered = defaults.markdown_rendered;
+                }
+                ui.checkbox(&mut s.markdown_rendered, "");
+            });
+        });
+
+        page.group(&CLAUDE, |page| {
+            page.row("claude command", "Path to the Claude Code CLI", s.claude_path != defaults.claude_path, |ui, reset| {
+                if reset {
+                    s.claude_path = defaults.claude_path.clone();
+                }
+                ui.add(egui::TextEdit::singleline(&mut s.claude_path).desired_width(260.0));
+            });
+            page.row("Model for prompts", "Default = Claude Code's default", s.model != defaults.model, |ui, reset| {
+                if reset {
+                    s.model = defaults.model.clone();
+                }
+                for (v, label) in [("", "Default"), ("opus", "Opus"), ("fable", "Fable")] {
+                    ui.selectable_value(&mut s.model, v.to_owned(), label);
+                }
+            });
+            page.row("Extra arguments", "Added to every claude -p, e.g. --permission-mode acceptEdits", s.extra_args != defaults.extra_args, |ui, reset| {
+                if reset {
+                    s.extra_args = defaults.extra_args.clone();
+                }
+                ui.add(egui::TextEdit::singleline(&mut s.extra_args).desired_width(260.0));
+            });
+            page.row("Default folder for new sessions", "Where the folder picker starts before any folder has been chosen; empty = the open session's folder", s.default_folder != defaults.default_folder, |ui, reset| {
+                if reset {
+                    s.default_folder = defaults.default_folder.clone();
+                }
+                ui.add(egui::TextEdit::singleline(&mut s.default_folder).desired_width(260.0));
+            });
+        });
+
+        page.group(&SESSIONS, |page| {
+            page.row("Tag finished sessions", "After a run ends, the helper model reads the last messages and tags the session done, needs you or blocked", s.tag_finished != defaults.tag_finished, |ui, reset| {
+                if reset {
+                    s.tag_finished = defaults.tag_finished;
+                }
+                ui.checkbox(&mut s.tag_finished, "");
+            });
+            page.row("Notify when a run finishes", "A system notification, while scope is in the background", s.notify_when_done != defaults.notify_when_done, |ui, reset| {
+                if reset {
+                    s.notify_when_done = defaults.notify_when_done;
+                }
+                ui.checkbox(&mut s.notify_when_done, "");
+            });
+            page.row("Restore the previous state at start", "Open session, tabs, drafts and queues", s.restore_state != defaults.restore_state, |ui, reset| {
+                if reset {
+                    s.restore_state = defaults.restore_state;
+                }
+                ui.checkbox(&mut s.restore_state, "");
+            });
+            page.row("Confirm before deleting a scope", "The sessions themselves are kept", s.confirm_delete_workspace != defaults.confirm_delete_workspace, |ui, reset| {
+                if reset {
+                    s.confirm_delete_workspace = defaults.confirm_delete_workspace;
+                }
+                ui.checkbox(&mut s.confirm_delete_workspace, "");
+            });
+            page.row("Confirm before deleting a message", "From a session's context, with 🗑 on the message", s.confirm_delete_message != defaults.confirm_delete_message, |ui, reset| {
+                if reset {
+                    s.confirm_delete_message = defaults.confirm_delete_message;
+                }
+                ui.checkbox(&mut s.confirm_delete_message, "");
+            });
+            page.row("Offer to finish sessions idle for (hours)", "In the scopes overview: Finish session takes them out of the scope; 0 = never", s.stale_after_hours != defaults.stale_after_hours, |ui, reset| {
+                if reset {
+                    s.stale_after_hours = defaults.stale_after_hours;
+                }
+                ui.add(egui::Slider::new(&mut s.stale_after_hours, 0..=168));
+            });
+            page.row("Jira URL", "Ticket keys in the scopes overview link here, e.g. https://acme.atlassian.net", s.jira_url != defaults.jira_url, |ui, reset| {
+                if reset {
+                    s.jira_url = defaults.jira_url.clone();
+                }
+                ui.add(egui::TextEdit::singleline(&mut s.jira_url).hint_text("https://…atlassian.net").desired_width(260.0));
+            });
+        });
+
+        page.group(&HELPERS, |page| {
+            page.note(
+                "Each place below asks a model a one-off question (claude -p). The harness is \
+                 your part of what it is told: edit it here, ↺ or empty it to get the default \
+                 back. scope adds the rest (the data, and the reply format it reads), shown \
+                 under Full prompt.",
+            );
+            page.row("Helper model", "Answers the search, the built-in helpers, and the orchestrator unless set there", s.helper_model != defaults.helper_model, |ui, reset| {
+                if reset {
+                    s.helper_model = defaults.helper_model.clone();
+                }
+                ui.add(egui::TextEdit::singleline(&mut s.helper_model).desired_width(160.0));
+            });
+            let helper = model_name(&s.helper_model, "haiku");
+            let orchestrator = if s.orchestration_model.trim().is_empty() { format!("{helper} (the helper model)") } else { s.orchestration_model.trim().to_owned() };
+
+            page.card("🔍 Search bar", "Bottom of the session list: press Enter in the search field", |page| {
+                page.facts(&[
+                    ("Answered by", format!("{helper} (the helper model)")),
+                    ("It sees", "the name, goal and first prompts of the 40 newest sessions in the open tab".into()),
+                    ("It gives back", "up to 8 matching sessions, best first, with a reason each".into()),
+                ]);
+                page.harness("Harness", s.search_harness != defaults.search_harness, &mut s.search_harness, &defaults.search_harness);
+                page.preview("Full prompt", &preview::search(&s.search_harness));
+            });
+
+            page.card("◆ Orchestrator", "A scope's orchestration page: its report, and the Ask field at the bottom (also scope ask)", |page| {
+                page.facts(&[
+                    ("Answered by", orchestrator.clone()),
+                    ("The report sees", "its previous report, then each session's status, goal and new activity".into()),
+                    ("A question sees", "the report, the last 3 questions, and a short digest of each session".into()),
+                    ("It can act", "rename sessions, reorder the cards, start sessions: only when you ask it to".into()),
+                ]);
+                page.harness("Harness (report and questions)", s.orchestration_harness != defaults.orchestration_harness, &mut s.orchestration_harness, &defaults.orchestration_harness);
+                page.row("Orchestration model", "e.g. sonnet, opus; empty = the helper model", s.orchestration_model != defaults.orchestration_model, |ui, reset| {
+                    if reset {
+                        s.orchestration_model = defaults.orchestration_model.clone();
+                    }
+                    ui.add(egui::TextEdit::singleline(&mut s.orchestration_model).hint_text("helper model").desired_width(160.0));
+                });
+                page.row("Update the report every (minutes)", "While its sessions have new activity and its page is open; 0 = only when asked", s.orchestration_every != defaults.orchestration_every, |ui, reset| {
+                    if reset {
+                        s.orchestration_every = defaults.orchestration_every;
+                    }
+                    ui.add(egui::Slider::new(&mut s.orchestration_every, 0..=120));
+                });
+                page.preview("Full prompt: a question", &preview::orchestrator_question(&s.orchestration_harness));
+                page.preview("Full prompt: a report update", &preview::orchestrator_report(&s.orchestration_harness));
+            });
+
+            page.card("💬 Ask about this goal", "Right panel: Info → Ask about this goal", |page| {
+                page.facts(&[
+                    ("Answered by", "Claude Code's default model, in a throwaway copy of the session (like /btw)".into()),
+                    ("It sees", "the whole conversation, plus the session's goal and checklist".into()),
+                    ("It changes", "nothing: the copy isn't kept, and the session gets no new message".into()),
+                ]);
+                page.harness("Harness", s.question_harness != defaults.question_harness, &mut s.question_harness, &defaults.question_harness);
+                page.preview("Full prompt", &preview::question(&s.question_harness));
+            });
+
+            page.card("Built-in helpers", "Fixed: scope reads their replies in these exact formats", |page| {
+                let fixed = [
+                    ("Names a new session", "after its first reply", preview::name()),
+                    ("Goal and checklist", "Info → Summarize", preview::goal()),
+                    ("Tags a finished session", "after a run ends, with Tag finished sessions on", preview::tag()),
+                    ("Refine", "Cmd+Enter in the prompt input", preview::refine()),
+                    ("Scopes overview cards", "All sessions, when a scope has new activity", preview::overview()),
+                ];
+                for (what, when, text) in fixed {
+                    page.preview_row(what, &format!("{when} · {helper}"), &text);
+                }
+                page.preview_row("Every session you run", "added to its system prompt, so Claude can manage scope's sessions", &preview::every_session());
+            });
+        });
+
+        page.group(&SHORTCUTS, |page| {
+            for (what, keys) in shortcuts(s) {
+                page.row(what, "", false, |ui, _| {
+                    ui.label(RichText::new(&keys).monospace());
+                });
             }
-            ui.checkbox(&mut s.check_for_updates, "");
         });
-        page.row("Config folder", "", false, |ui, _| {
-            let dir = config_dir();
-            ui.label(RichText::new(dir.display().to_string()).monospace());
-            if ui.small_button("Open in Finder").clicked() {
-                let _ = std::process::Command::new("open").arg(&dir).spawn();
-            }
+
+        page.group(&ABOUT, |page| {
+            page.row("Version", "", false, |ui, _| {
+                ui.label(env!("CARGO_PKG_VERSION"));
+                update_status(ui, about.updater);
+            });
+            page.row("Check for updates automatically", "At start and twice a day, on GitHub; installing always waits for you", s.check_for_updates != defaults.check_for_updates, |ui, reset| {
+                if reset {
+                    s.check_for_updates = defaults.check_for_updates;
+                }
+                ui.checkbox(&mut s.check_for_updates, "");
+            });
+            page.row("Config folder", "", false, |ui, _| {
+                let dir = config_dir();
+                ui.label(RichText::new(dir.display().to_string()).monospace());
+                if ui.small_button("Open in Finder").clicked() {
+                    let _ = std::process::Command::new("open").arg(&dir).spawn();
+                }
+            });
+            page.row("Status line (usage limits)", "", false, |ui, _| {
+                ui.label(about.status_line);
+            });
         });
-        page.row("Status line (usage limits)", "", false, |ui, _| {
-            ui.label(about.status_line);
-        });
-        if !page.shown {
+        if page.hits == 0 {
             page.ui.label("No setting matches.");
         }
     });
     *s != before
+}
+
+/// A model setting as it is used: `fallback` when empty.
+fn model_name(model: &str, fallback: &str) -> String {
+    let m = model.trim();
+    if m.is_empty() { fallback.to_owned() } else { m.to_owned() }
+}
+
+/// The prompts each helper sends, built by the same functions as the real ones, with
+/// placeholders in angle brackets for what scope fills in.
+pub mod preview {
+    use super::Settings;
+    use crate::{goal, orchestration, search};
+
+    fn member() -> orchestration::Member {
+        orchestration::Member {
+            id: "s1".into(),
+            title: "<session name>".into(),
+            goal: Some("<its goal and checklist>".into()),
+            path: Default::default(),
+            modified: 1_000,
+            running: false,
+            queued: 0,
+        }
+    }
+
+    fn report() -> orchestration::Report {
+        orchestration::Report { progress: 40, summary: "<the report's summary>".into(), ..Default::default() }
+    }
+
+    pub fn search(harness: &str) -> String {
+        let harness = Settings::harness(harness, search::DEFAULT_HARNESS);
+        let one = ("<session name>".to_owned(), Some("<its goal>".to_owned()), vec!["<its first prompts>".to_owned()]);
+        format!("{}… one line for each of the 40 newest sessions in the open tab\n", search::ai_prompt(harness, "<what you typed>", &[one]))
+    }
+
+    pub fn orchestrator_question(harness: &str) -> String {
+        let harness = Settings::harness(harness, orchestration::DEFAULT_HARNESS);
+        let orch = orchestration::Orchestration { report: Some(report()), ..Default::default() };
+        let digest = ["<a short digest of its conversation>\n".to_owned()];
+        orchestration::ask_request(harness, &[member()], &digest, &["s1".into()], Some(&orch), "<your question>")
+            .replace("\n## Session 1:", "\n(… every session of the scope, newest first)\n## Session 1:")
+    }
+
+    pub fn orchestrator_report(harness: &str) -> String {
+        let harness = Settings::harness(harness, orchestration::DEFAULT_HARNESS);
+        orchestration::request(harness, &[member()], &[Some("<what happened since the last report>\n".into())], Some(&report()), 1_300)
+            .replace("\n## Session 1:", "\n(… every session of the scope, newest first)\n## Session 1:")
+    }
+
+    pub fn question(harness: &str) -> String {
+        goal::question_prompt(Settings::harness(harness, goal::QUESTION_HARNESS), Some("<the session's goal and checklist>"), "<your question>")
+    }
+
+    pub fn name() -> String {
+        crate::runner::name_request("<the first prompt>", "<Claude's first reply>")
+    }
+
+    pub fn goal() -> String {
+        crate::runner::goal_request("<a digest of the conversation>")
+    }
+
+    pub fn tag() -> String {
+        crate::verdict::request("<session name>", "<the end of the conversation>")
+    }
+
+    pub fn refine() -> String {
+        crate::refine::request("<what you typed>", Some("<the session's goal>"), &["<your previous prompts>".into()], None)
+    }
+
+    pub fn overview() -> String {
+        crate::overview::request("<each session: what was said of it, or its new conversation>", Some("<the scope as written before>"), Some("<git branch>"), &["<Jira keys>".into()], &[1])
+    }
+
+    pub fn every_session() -> String {
+        crate::control::system_prompt("<scope>")
+    }
 }
 
 /// Where updates stand, with the button for the next step (check, install, retry).
@@ -509,46 +656,169 @@ fn update_status(ui: &mut egui::Ui, u: &mut crate::update::Updater) {
         }
     }
 }
-
 /// A harness's text: several lines, wide enough to read and edit as a paragraph. Emptying it
 /// brings back the default (shown as the hint).
 fn harness_field(ui: &mut egui::Ui, text: &mut String) {
-    let width = ui.available_width().clamp(260.0, 640.0);
+    let width = ui.available_width().clamp(260.0, 760.0);
     ui.add(egui::TextEdit::multiline(text).desired_rows(4).desired_width(width).hint_text("empty = the default"));
 }
 
-/// Lays out sections and rows, skipping the ones the search filters out.
+/// Lays out groups, cards and rows, skipping the ones the search filters out. A group or card
+/// is drawn only when something in it matches: its body runs once to count (`probe`), then
+/// again to draw.
 struct Page<'a, 'q> {
     ui: &'a mut egui::Ui,
     q: &'q str,
-    section: &'static str,
-    /// Section whose heading was drawn last.
-    headed: &'static str,
-    shown: bool,
+    /// The titles and blurbs of the group and card the rows are in: they match too.
+    context: String,
+    probe: bool,
+    /// Rows (and other searchable items) shown, or that would be.
+    hits: usize,
+    label_width: f32,
 }
 
-impl Page<'_, '_> {
-    fn section(&mut self, name: &'static str) {
-        self.section = name;
+impl<'q> Page<'_, 'q> {
+    /// True (and counted) when an item with this text is shown; false in the counting pass.
+    fn visible(&mut self, text: &str) -> bool {
+        if !matches(self.q, &self.context, text) {
+            return false;
+        }
+        self.hits += 1;
+        !self.probe
+    }
+
+    /// Runs `body` to count its matches; when there are some (and this is not a counting
+    /// pass), draws it inside the frame `show`, which draws its header and calls back.
+    fn nest(&mut self, words: &str, label_width: f32, mut body: impl FnMut(&mut Page<'_, 'q>), show: impl FnOnce(&mut egui::Ui, &mut dyn FnMut(&mut egui::Ui))) {
+        let context = format!("{} {words}", self.context);
+        let mut probe = Page { ui: &mut *self.ui, q: self.q, context: context.clone(), probe: true, hits: 0, label_width };
+        body(&mut probe);
+        let hits = probe.hits;
+        self.hits += hits;
+        if hits == 0 || self.probe {
+            return;
+        }
+        let q = self.q;
+        show(self.ui, &mut |ui| {
+            let mut inner = Page { ui, q, context: context.clone(), probe: false, hits: 0, label_width };
+            body(&mut inner);
+        });
+    }
+
+    /// A group: a card like a scope's, with its color as a stripe down the left edge.
+    fn group(&mut self, g: &Group, body: impl FnMut(&mut Page<'_, 'q>)) {
+        self.nest(&format!("{} {}", g.title, g.about), 300.0, body, |ui, inner| {
+            ui.add_space(6.0);
+            let shown = crate::overview::card_frame(ui.visuals()).show(ui, |ui| {
+                ui.set_width(ui.available_width());
+                ui.horizontal(|ui| {
+                    ui.label(RichText::new(g.title.to_uppercase()).strong().size(15.0).color(g.color));
+                    if !g.about.is_empty() {
+                        ui.label(RichText::new(g.about).weak());
+                    }
+                });
+                ui.add_space(4.0);
+                inner(ui);
+            });
+            crate::overview::stripe(ui, shown.response.rect, g.color);
+            ui.add_space(4.0);
+        });
+    }
+
+    /// A card inside a group, for settings that belong to one place in the app: a filled
+    /// bubble, like a session's, headed by its name and where it is.
+    fn card(&mut self, title: &str, place: &str, body: impl FnMut(&mut Page<'_, 'q>)) {
+        self.nest(&format!("{title} {place}"), 240.0, body, |ui, inner| {
+            ui.add_space(6.0);
+            crate::overview::tile_frame(ui.visuals(), false).show(ui, |ui| {
+                ui.set_width(ui.available_width());
+                ui.horizontal_wrapped(|ui| {
+                    ui.label(RichText::new(title).strong().size(14.0));
+                    ui.label(RichText::new(place).weak().small());
+                });
+                ui.add_space(4.0);
+                inner(ui);
+            });
+            ui.add_space(2.0);
+        });
+    }
+
+    /// Explanatory text, shown with its group (it is found by the group's words only).
+    fn note(&mut self, text: &str) {
+        if self.probe {
+            return;
+        }
+        self.ui.label(RichText::new(text).weak());
+        self.ui.add_space(4.0);
+    }
+
+    /// What a card's helper is, in short lines: what → value.
+    fn facts(&mut self, facts: &[(&str, String)]) {
+        if self.probe {
+            return;
+        }
+        egui::Grid::new(self.ui.next_auto_id()).num_columns(2).spacing([12.0, 2.0]).show(self.ui, |ui| {
+            for (what, value) in facts {
+                ui.label(RichText::new(*what).weak().small());
+                ui.label(RichText::new(value).small());
+                ui.end_row();
+            }
+        });
+        self.ui.add_space(6.0);
+    }
+
+    /// A harness: its label (and ↺ when edited), then its text, full width.
+    fn harness(&mut self, label: &str, changed: bool, text: &mut String, default: &str) {
+        if !self.visible(&format!("{label} harness instructions")) {
+            return;
+        }
+        self.ui.horizontal(|ui| {
+            ui.label(label);
+            if changed {
+                ui.label(RichText::new("edited").weak().small());
+                if ui.small_button("↺").on_hover_text("Reset to default").clicked() {
+                    *text = default.to_owned();
+                }
+            } else {
+                ui.label(RichText::new("default").weak().small());
+            }
+        });
+        harness_field(self.ui, text);
+        self.ui.add_space(4.0);
+    }
+
+    /// The whole prompt a helper sends, folded away until opened, with a Copy button.
+    fn preview(&mut self, label: &str, text: &str) {
+        if !self.visible(label) {
+            return;
+        }
+        let id = self.ui.make_persistent_id(("prompt", &self.context, label));
+        egui::CollapsingHeader::new(RichText::new(label).small()).id_salt(id).show(self.ui, |ui| prompt_text(ui, text));
+    }
+
+    /// A fixed helper: what it is and when it runs, with its prompt folded under it.
+    fn preview_row(&mut self, what: &str, when: &str, text: &str) {
+        if !self.visible(&format!("{what} {when}")) {
+            return;
+        }
+        let id = self.ui.make_persistent_id(("prompt", what));
+        egui::CollapsingHeader::new(what).id_salt(id).show(self.ui, |ui| {
+            ui.label(RichText::new(when).weak().small());
+            prompt_text(ui, text);
+        });
     }
 
     /// One setting: label, its control, a reset button when it differs from the default, help.
     /// `add` is called again with `true` when reset is clicked.
     fn row(&mut self, label: &str, help: &str, changed: bool, mut add: impl FnMut(&mut egui::Ui, bool)) {
-        if !matches(self.q, self.section, &format!("{label} {help}")) {
+        if !self.visible(&format!("{label} {help}")) {
             return;
         }
-        if self.headed != self.section {
-            self.headed = self.section;
-            self.ui.add_space(12.0);
-            self.ui.label(RichText::new(self.section).strong().size(15.0));
-            self.ui.add_space(2.0);
-        }
-        self.shown = true;
+        let width = self.label_width;
         // Wraps when the main area is narrow (side panels wide, or a big zoom).
         self.ui.horizontal_wrapped(|ui| {
-            ui.allocate_ui_with_layout(egui::vec2(300.0, 20.0), egui::Layout::left_to_right(egui::Align::Center), |ui| {
-                ui.set_min_width(300.0);
+            ui.allocate_ui_with_layout(egui::vec2(width, 20.0), egui::Layout::left_to_right(egui::Align::Center), |ui| {
+                ui.set_min_width(width);
                 ui.add(egui::Label::new(label).truncate());
             });
             add(ui, false);
@@ -560,6 +830,19 @@ impl Page<'_, '_> {
             }
         });
     }
+}
+
+/// A prompt as it is sent: monospace, selectable, scrolling when long, with Copy.
+fn prompt_text(ui: &mut egui::Ui, text: &str) {
+    egui::Frame::new().fill(ui.visuals().extreme_bg_color).corner_radius(6.0).inner_margin(8.0).show(ui, |ui| {
+        ui.set_width(ui.available_width());
+        if ui.small_button("Copy").clicked() {
+            ui.ctx().copy_text(text.to_owned());
+        }
+        egui::ScrollArea::vertical().id_salt(("prompt-text", text.len())).max_height(280.0).show(ui, |ui| {
+            ui.add(egui::Label::new(RichText::new(text).monospace().small()).selectable(true).wrap());
+        });
+    });
 }
 
 #[cfg(test)]
