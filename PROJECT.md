@@ -268,8 +268,8 @@ Settings are grouped in cards drawn like a scope's (grey border, round, the grou
 stripe down the left edge and on its upper-case title, with a line on what it is about). A
 search shows only the groups (and cards) with a match; a group's or card's title matches all
 of it.
-- **Appearance**: theme (dark / light / system), zoom (− / + buttons; Cmd +/−/0 too),
-  monospace font size.
+- **Appearance**: theme (dark / light / system), style preset, accent color, corner
+  roundness, spacing, text size, zoom (− / + buttons; Cmd +/−/0 too), monospace font size.
 - **Prompt input**: send with Cmd/Ctrl+Enter instead of Enter (Refine then moves to
   Cmd+Shift+Enter), maximum height in lines, keep a draft per session.
 - **Conversation and files**: show or hide the `⚙ Read · Edit` tool lines; line numbers, wrap
@@ -307,6 +307,21 @@ the input's size, the workspace tab and open session, every session's file tabs,
 positions, drafts and queued prompts (queues come back paused), the right panel tab and the
 search text. Sessions or files that no longer exist are skipped; a damaged state file is
 moved aside (`state.json.bad`) and the app starts fresh.
+
+### Styling scope by asking Claude
+How scope looks is a `style` block in settings.json: a **preset** (classic, midnight, forest,
+ember, paper, violet, slate, contrast; each with a dark and a light variant, the theme picks
+which), an **accent**, **radius** (corners), **spacing**, **text_size**, and single
+**colors** overridden by key (`background`, `text`, `accent`, `user`, `assistant`,
+`prompt_bg`, diff colors and more; `dark.<key>` / `light.<key>` for one theme only). The
+other surfaces are mixed from a preset's background, text and accent; classic keeps egui's
+own look. Every session scope runs is told about `scope style` in its system prompt, so
+"make it warmer", "rounder buttons" or "a darker input" just works: Claude runs
+`scope style` (the current style, presets, keys and every color in both themes), then
+`scope style <preset>`, `scope style set <key> <value>...` (or `key=value`) or
+`scope style reset [key...]`. A bad value is refused and changes nothing. The change is
+saved to settings.json and shows at once, in every window on the config folder; editing the
+file by hand does the same.
 
 ### Several windows
 Every scope running on the same config folder (two windows, or one started while another
@@ -372,7 +387,8 @@ src/
 ├── goal.rs        goal + subgoal checklist format
 ├── diffview.rs    changes grouped by file, diff cards, read-only file viewer
 ├── markdown.rs    Markdown rendering: tables and tool lines drawn by scope, the rest by egui_commonmark
-├── theme.rs       the colors for dark and light
+├── theme.rs       the colors for dark and light (classic), and the style's palette in use
+├── style.rs       presets, accent, corners, spacing, text size, single colors; `scope style`
 ├── settings.rs    the Settings page, its file, and the config folder
 ├── shared.rs      config files every scope on one config folder shares: refresh, save, watch
 ├── state.rs       what is restored after a restart; per-session views (file tabs, draft)

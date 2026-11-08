@@ -78,6 +78,8 @@ pub struct Settings {
     pub stale_after_hours: u32,
     /// Look for a newer scope on GitHub at start and twice a day (Settings → About).
     pub check_for_updates: bool,
+    /// Preset, accent, roundness, spacing, text size and single colors (style.rs).
+    pub style: crate::style::Style,
 }
 
 impl Default for Settings {
@@ -112,6 +114,7 @@ impl Default for Settings {
             orchestration_every: 10,
             stale_after_hours: 24,
             check_for_updates: true,
+            style: crate::style::Style::default(),
         }
     }
 }
@@ -130,9 +133,10 @@ impl Settings {
         }
     }
 
-    /// Zoom, font size and theme, applied to egui.
+    /// Zoom, font size, theme and style, applied to egui.
     pub fn apply(&self, ctx: &egui::Context) {
         ctx.set_theme(self.theme());
+        self.style.apply(ctx);
         ctx.set_zoom_factor(self.zoom.clamp(0.5, 3.0));
         ctx.all_styles_mut(|style| {
             if let Some(font) = style.text_styles.get_mut(&egui::TextStyle::Monospace) {
@@ -220,6 +224,52 @@ pub fn ui(ui: &mut egui::Ui, s: &mut Settings, filter: &mut String, about: &mut 
                     ui.selectable_value(&mut s.theme, v.to_owned(), label);
                 }
             });
+            let ds = &defaults.style;
+            page.row("Style", "Colors for both themes. Or ask Claude in any session to restyle scope: it applies at once", s.style.preset != ds.preset, |ui, reset| {
+                if reset {
+                    s.style.preset = ds.preset.clone();
+                }
+                for (name, what) in crate::style::PRESETS {
+                    let label = format!("{}{}", name[..1].to_uppercase(), &name[1..]);
+                    ui.selectable_value(&mut s.style.preset, (*name).to_owned(), label).on_hover_text(*what);
+                }
+            });
+            page.row("Accent color", "Selection, links and the open tab's marks", !s.style.accent.is_empty(), |ui, reset| {
+                if reset {
+                    s.style.accent.clear();
+                }
+                let mut c = s.style.accent_shown(ui.visuals().dark_mode);
+                if egui::color_picker::color_edit_button_srgba(ui, &mut c, egui::color_picker::Alpha::Opaque).changed() {
+                    s.style.accent = crate::style::to_hex(c);
+                }
+            });
+            page.row("Corner roundness", "Buttons, fields and menus", s.style.radius != ds.radius, |ui, reset| {
+                if reset {
+                    s.style.radius = ds.radius;
+                }
+                ui.add(egui::Slider::new(&mut s.style.radius, 0.0..=16.0).step_by(1.0));
+            });
+            page.row("Spacing", "Room between and inside widgets", s.style.spacing != ds.spacing, |ui, reset| {
+                if reset {
+                    s.style.spacing = ds.spacing;
+                }
+                ui.add(egui::Slider::new(&mut s.style.spacing, 0.5..=2.5).step_by(0.1));
+            });
+            page.row("Text size", "Labels, buttons and messages (headings follow)", s.style.text_size != ds.text_size, |ui, reset| {
+                if reset {
+                    s.style.text_size = ds.text_size;
+                }
+                ui.add(egui::Slider::new(&mut s.style.text_size, 9.0..=22.0).step_by(0.5));
+            });
+            if !s.style.colors.is_empty() {
+                page.row("Single colors", "Set with scope style; see them all with scope style", true, |ui, reset| {
+                    if reset {
+                        s.style.colors.clear();
+                    }
+                    let list: Vec<String> = s.style.colors.iter().map(|(k, v)| format!("{k} {v}")).collect();
+                    ui.label(RichText::new(list.join(", ")).monospace().small());
+                });
+            }
             page.row("Zoom", "Also Cmd+Plus, Cmd+Minus and Cmd+0", (s.zoom - defaults.zoom).abs() > 0.001, |ui, reset| {
                 if reset {
                     s.zoom = defaults.zoom;
