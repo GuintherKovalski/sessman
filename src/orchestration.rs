@@ -317,9 +317,10 @@ pub fn request(harness: &str, members: &[Member], digests: &[Option<String>], pr
          \"now\": \"what it is doing, or last did\", \"next\": \"its next step, or empty\"}],\n \
          \"attention\": [\"what needs the developer now; [] if nothing\"],\n \
          \"next\": [\"up to 4 next steps for the scope as a whole\"]}\n\
-         List every session below by its number. \"waiting\" means it needs the developer's input or \
-         review; \"blocked\" means it hit a problem it could not solve; \"done\" means its goal is met.\n",
+         List every session below by its number. \"working\" means it is running now; \"idle\" \
+         means it stopped with nothing pending. The others:\n",
     );
+    p.push_str(crate::verdict::MEANING);
     p.push_str(REFS);
     p.push('\n');
     if let Some(prev) = previous {
@@ -892,7 +893,7 @@ struct Card<'a> {
 
 /// A session's tile, drawn like its tile on the Scopes overview: its name, then in small
 /// print what it is doing and what comes next, and at the bottom how it stands (✔ done,
-/// ✋ waiting, ⚠ blocked) on the left and when it was last touched, or a spinner while it
+/// ✋ needs you, ⚠ blocked) on the left and when it was last touched, or a spinner while it
 /// works, on the right. Clicking opens the session, dragging it onto another tile puts it
 /// before or after that one, the pencil renames it, and right-click has all of these. At least
 /// `height` tall; also returns how tall it would be on its own.
@@ -916,7 +917,7 @@ fn session_tile(ui: &mut egui::Ui, card: &Card, renaming: &mut Option<Rename>, h
     let newer = s.verdict.filter(|v| !s.running && v.at > covered && !v.why.is_empty());
     let status = if newer.is_some() { None } else { status };
     let mark = match state {
-        "waiting" => Some(("✋ waiting", pal.note)),
+        "waiting" => Some(("✋ needs you", pal.note)),
         "blocked" => Some(("⚠ blocked", pal.error)),
         "done" => Some(("✔ done", pal.add_fg)),
         "idle" => Some(("idle", v.weak_text_color())),
@@ -1016,7 +1017,17 @@ fn session_tile(ui: &mut egui::Ui, card: &Card, renaming: &mut Option<Rename>, h
                 }
                 if let Some((text, color)) = mark {
                     ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
-                        ui.label(RichText::new(text).small().color(color));
+                        // Only the icon takes the state's color; its word reads as ordinary text.
+                        let font = egui::TextStyle::Small.resolve(ui.style());
+                        let mut job = egui::text::LayoutJob::default();
+                        match text.split_once(' ') {
+                            Some((icon, word)) => {
+                                job.append(icon, 0.0, egui::TextFormat::simple(font.clone(), color));
+                                job.append(&format!(" {word}"), 0.0, egui::TextFormat::simple(font, ui.visuals().text_color()));
+                            }
+                            None => job.append(text, 0.0, egui::TextFormat::simple(font, color)),
+                        }
+                        ui.label(job);
                     });
                 }
             });

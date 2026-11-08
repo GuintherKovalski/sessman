@@ -79,17 +79,30 @@ pub fn candidates(sessions: &[(String, u64, bool)], verdicts: &Verdicts, failed:
     out
 }
 
+/// What each state means, shared by this check and the orchestration report, so a session
+/// reads the same in the bar and on its tile. Red (blocked) is for what takes real attention;
+/// yellow (waiting) for a decision, answer or quick look.
+pub const MEANING: &str = "\
+- \"done\": what the user asked for is complete (built, committed, merged, answered, \
+delivered). A closing offer of optional extras or cleanup (\"want me to stop the test \
+instance?\") still counts as done.\n\
+- \"waiting\": nothing went wrong and the next step is a decision: the user has to answer a \
+question, choose between options, approve a step (ship, delete, merge), or glance at a result; \
+or Claude paused on something still running (e.g. \"watching CI\") with nothing failed.\n\
+- \"blocked\": it needs more of the user's attention than a decision: something failed that \
+Claude could not get past (errors, failing tests it could not fix, a broken tool), it lacks \
+access, credentials or setup only the user can provide, it is confused or going in circles, or \
+the user has to investigate, fix or redo something before work can go on.\n\
+If something failed and Claude cannot continue, it is \"blocked\" even when it ends by asking \
+the user to do something; if nothing failed and only a choice or answer is needed, it is \
+\"waiting\".\n";
+
 pub fn request(title: &str, digest: &str) -> String {
     format!(
         "Has this Claude Code session finished its work? Below is the end of a conversation \
          between a USER (a developer) and CLAUDE (an AI coding assistant). Claude is not running \
          now: it ended its turn. Judge from its last messages:\n\
-         - \"done\": what the user asked for is complete (built, committed, merged, answered, \
-         delivered). A closing offer of optional extras or cleanup (\"want me to stop the test \
-         instance?\") still counts as done.\n\
-         - \"waiting\": the user has to decide, answer, review or try something before the work \
-         can be complete, or Claude stopped partway (e.g. \"watching CI\" with no result yet).\n\
-         - \"blocked\": Claude hit a problem it could not solve.\n\
+         {MEANING}\
          Reply with JSON only: {{\"state\": \"done|waiting|blocked\", \"why\": \"one sentence under \
          15 words: what was achieved, or what is needed\"}}\n\n\
          SESSION: {title}\n\n{digest}"
