@@ -92,3 +92,47 @@ fn search_stays_within_the_open_workspace() {
     assert!(s.sees("alpha markdown"));
     assert!(!s.sees("beta markdown"));
 }
+
+#[test]
+fn clicking_a_result_keeps_the_search() {
+    let mut s = three();
+    s.type_in("search", "markdown");
+    s.click("Markdown rendering and theming");
+    assert_eq!(s.field_text("search"), "markdown");
+    assert!(!s.sees("Unrelated chores"));
+}
+
+#[test]
+fn clicking_outside_the_results_clears_the_search() {
+    let mut s = three();
+    s.type_in("search", "markdown");
+    s.click("Markdown rendering and theming");
+    s.click("Info");
+    assert_eq!(s.field_text("search"), "");
+    assert!(s.sees("Unrelated chores"));
+}
+
+#[test]
+fn changing_scope_clears_the_search() {
+    let mut s = setup()
+        .session(session("s-a", "alpha markdown", 200))
+        .session(session("s-b", "beta markdown", 100))
+        .session(session("s-c", "gamma chores", 50))
+        .workspaces(&[("Work", &["s-a"]), ("Play", &["s-b", "s-c"])])
+        .launch();
+    s.click_first("WORK");
+    s.type_in("search", "markdown");
+    s.click_first("PLAY");
+    assert_eq!(s.field_text("search"), "");
+    assert!(s.sees("beta markdown"));
+    assert!(s.sees("gamma chores"));
+}
+
+#[test]
+fn a_menu_opened_on_a_result_keeps_the_search() {
+    let mut s = three();
+    s.type_in("search", "markdown");
+    s.right_click("Markdown rendering and theming");
+    s.open_submenu("Move to");
+    assert_eq!(s.field_text("search"), "markdown");
+}

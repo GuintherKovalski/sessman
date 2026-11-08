@@ -912,6 +912,8 @@ impl App {
         }
         self.tab = t;
         self.picked.clear();
+        // A search belongs to the scope it was typed in.
+        self.search.clear();
         self.open_tab();
     }
 
@@ -1622,6 +1624,9 @@ impl App {
             Some(overview::Event::Open(w)) => self.switch_tab(Some(w)),
             Some(overview::Event::OpenSession(w, id)) => {
                 if let Some(i) = self.sessions.iter().position(|s| s.id == id) {
+                    if self.tab != Some(w) {
+                        self.search.clear();
+                    }
                     self.tab = Some(w);
                     self.apply(Action::Select(i));
                 }
@@ -2363,10 +2368,12 @@ impl App {
             self.choose_new_session_folder();
         }
         ui.separator();
-        egui::Panel::bottom("search")
+        let search_rect = egui::Panel::bottom("search")
             .frame(egui::Frame::new().inner_margin(egui::Margin::symmetric(0, 6)))
             .resizable(false)
-            .show(ui, |ui| self.search_bar(ui));
+            .show(ui, |ui| self.search_bar(ui))
+            .response
+            .rect;
 
         let rows = self.rows();
         let members = self.tab.and_then(|w| self.workspaces.list.get(w)).map(|w| w.sessions.as_slice());
@@ -2428,6 +2435,8 @@ impl App {
         // Inside a scope, with no search, dragging rows up or down reorders the bar.
         let reorderable = self.tab.is_some() && self.search.trim().is_empty();
         let arranged = self.tab.and_then(|w| self.workspaces.list.get(w)).is_some_and(|w| !w.bar.is_empty());
+        // Where a press keeps the search: its rows, as far as they show.
+        let mut results = Vec::new();
         egui::ScrollArea::vertical().show(ui, |ui| {
             // The list's top-left, which moves with the scroll.
             let top = ui.min_rect().min;
@@ -2468,7 +2477,8 @@ impl App {
                 let s = &self.sessions[i];
                 let title = self.names.get(&s.id).unwrap_or(&s.title);
                 if let Some(r) = self.renaming.as_mut().filter(|r| r.id == s.id) {
-                    rename_field(ui, r, &s.project, &mut actions);
+                    let field = ui.scope(|ui| rename_field(ui, r, &s.project, &mut actions)).response.rect;
+                    results.push(field.intersect(ui.clip_rect()));
                     continue;
                 }
                 let queued = match self.queues.get(&s.id).map(|q| q.items.len()) {
@@ -2483,6 +2493,7 @@ impl App {
                 let tag = self.verdict_of(i);
                 let row = session_bubble(ui, highlighted, &label, note.as_deref(), Some(&when), self.runs.contains_key(&s.id), color, tag);
                 rects.push((s.id.clone(), row.rect));
+                results.push(row.rect.intersect(ui.clip_rect()));
                 // Dragging highlighted rows moves them; a drag from any other row draws a box.
                 let dragging = if is_picked { picked.clone() } else { vec![s.id.clone()] };
                 if row.drag_started() {
@@ -2626,6 +2637,17 @@ impl App {
                 }
             }
         });
+        // A press anywhere but the search field and its results ends the search, back to the
+        // sessions the bar shows without one. A menu opened from a result keeps it.
+        if !self.search.trim().is_empty()
+            && ui.input(|i| i.pointer.any_pressed())
+            && !egui::Popup::is_any_open(ui.ctx())
+            && let Some(p) = press
+            && !search_rect.contains(p)
+            && !results.iter().any(|r| r.contains(p))
+        {
+            self.search.clear();
+        }
         for a in actions {
             self.apply(a);
         }
