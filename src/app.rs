@@ -246,6 +246,9 @@ pub struct App {
     choices: HashMap<String, runner::Choice>,
     /// What the new session page has picked so far.
     new_choice: runner::Choice,
+    /// The model a session's runs get when it picked none, for the folder, Settings model and
+    /// extra arguments it was read with, and when (read again after a few seconds).
+    default_model: Option<((PathBuf, String, String), std::time::Instant, Option<crate::newinfo::Sourced>)>,
     seen_from: u64,
     /// Whether each session's work looks finished (verdict.rs), the checks under way, the
     /// checks that failed (id → the change they read; not retried until there is a newer one),
@@ -494,6 +497,7 @@ impl App {
             seen: HashMap::new(),
             choices: HashMap::new(),
             new_choice: runner::Choice::default(),
+            default_model: None,
             seen_from: 0,
             verdicts: Shared::load(Verdicts::path()),
             judging: Vec::new(),
@@ -3702,7 +3706,53 @@ impl App {
         }
     }
 
+    /// The model a run in `dir` gets when its session picked none (Settings, extra arguments,
+    /// `ANTHROPIC_MODEL`, then Claude Code's settings files); `None` = Claude Code's default.
+    fn default_model(&mut self, dir: &std::path::Path) -> Option<crate::newinfo::Sourced> {
+        let key = (dir.to_path_buf(), self.settings.model.clone(), self.settings.extra_args.clone());
+        if let Some((k, at, m)) = &self.default_model
+            && *k == key
+            && at.elapsed() < std::time::Duration::from_secs(5)
+        {
+            return m.clone();
+        }
+        let home = PathBuf::from(std::env::var("HOME").unwrap_or_default());
+        let extra: Vec<String> = key.2.split_whitespace().map(str::to_owned).collect();
+        let scope = crate::newinfo::Scope { model: &key.1, extra: &extra };
+        let m = crate::newinfo::default_model(dir, &home, &scope, &|k| std::env::var(k).ok());
+        self.default_model = Some((key, std::time::Instant::now(), m.clone()));
+        m
+    }
+
+    /// The model picked for the open session (empty = the default): the new session page's
+    /// pick until its first prompt, then the session's own.
+    fn open_model_choice(&self) -> String {
+        match self.open_id() {
+            Some(id) => self.choices.get(&id).map(|c| c.model.clone()).unwrap_or_default(),
+            None => self.new_choice.model.clone(),
+        }
+    }
+
+    /// Picks `model` for the open session (empty = the default); its next runs use it.
+    fn set_open_model(&mut self, model: String) {
+        let Some(id) = self.open_id() else {
+            self.new_choice.model = model;
+            return;
+        };
+        let c = self.choices.entry(id.clone()).or_default();
+        c.model = model;
+        if c.is_empty() {
+            self.choices.remove(&id);
+        }
+        self.save_state();
+    }
+
     fn info(&mut self, ui: &mut egui::Ui) {
+        let dir = self.new_session.clone().or_else(|| self.open.as_ref().and_then(|s| s.cwd.clone()));
+        let default_model = dir.map(|d| self.default_model(&d));
+        let mut model_pick = self.open_model_choice();
+        let picked_before = model_pick.clone();
+        let model_editable = !self.open_running();
         let Some(s) = &self.open else {
             ui.label("Select a session to see its info");
             return;
@@ -3853,7 +3903,24 @@ impl App {
             }
 
             section(ui, "Model");
-            ui.label(RichText::new(s.model.as_deref().unwrap_or("unknown yet")).monospace());
+            // What the next prompt runs with: the session's own pick, else the default. Runs
+            // resume the same session, so switching keeps the conversation.
+            let (default, from) = match default_model.flatten() {
+                Some(m) => (m.value, m.from),
+                None => ("default".to_owned(), "Claude Code's default".to_owned()),
+            };
+            let options: Vec<(String, String)> = crate::newinfo::MODELS.iter().map(|m| ((*m).to_owned(), (*m).to_owned())).collect();
+            ui.horizontal_wrapped(|ui| {
+                crate::newinfo::picker(ui, "info-model", &mut model_pick, &options, &format!("{default} (as set)"), model_editable);
+                let note = if model_pick.is_empty() { format!("({from})") } else { "(this session; later prompts keep it)".to_owned() };
+                ui.label(RichText::new(note).weak().small());
+            });
+            if !model_editable {
+                ui.label(RichText::new("Can be changed once this run ends").weak().small());
+            }
+            if let Some(m) = &s.model {
+                ui.label(RichText::new(format!("Latest reply: {m}")).weak().small().monospace());
+            }
 
             section(ui, "Context");
             let exact = id.as_ref().and_then(|id| status::load(&status::dir().join(format!("{id}.json"))));
@@ -3915,6 +3982,9 @@ impl App {
         if let (true, Some(id)) = (start_summary, id) {
             let rx = runner::summarize_goal(ui.ctx().clone(), session::digest(&s.messages, 400, 12_000));
             self.summarizing.push((id, rx));
+        }
+        if model_pick != picked_before {
+            self.set_open_model(model_pick);
         }
     }
 
