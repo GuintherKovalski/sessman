@@ -136,3 +136,24 @@ fn the_rest_of_the_setup_can_be_changed_for_a_new_session_too() {
     assert!(has("--settings", r#"{"alwaysThinkingEnabled":true,"disableAllHooks":true}"#), "{args:?}");
     assert!(args.contains(&"--strict-mcp-config".to_owned()) && args.contains(&"--disable-slash-commands".to_owned()), "{args:?}");
 }
+
+#[test]
+fn the_goal_is_summarized_after_the_first_answer() {
+    let mut s = workspace_with_folder();
+    s.click("+  New session");
+    s.env.hold("hold");
+    s.env.hold("goal.hold");
+    s.send("HOLD build the goal thing");
+    s.wait_to_see("Partial reply");
+    s.click("Info");
+    assert!(s.sees("Goal will be summarized here after the first answer is generated on the session"));
+    assert!(!s.sees("Summarize goal"), "nothing to summarize before an answer");
+    s.env.release("hold");
+    s.wait_to_see("Summarizing…");
+    assert!(!s.sees("Goal will be summarized here after the first answer is generated on the session"));
+    s.env.release("goal.hold");
+    s.wait_to_see("Ship the fake feature");
+    assert!(!s.sees("Summarizing…"));
+    let (id, _) = s.env.runs().pop().unwrap();
+    assert_eq!(s.env.config_json("goals.json")[id.as_str()], "GOAL: Ship the fake feature\n- [x] Write the parser\n- [ ] Add the tests");
+}

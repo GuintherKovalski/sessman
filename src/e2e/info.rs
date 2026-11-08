@@ -59,10 +59,11 @@ fn a_question_about_the_goal_is_answered_without_touching_the_session() {
 }
 
 #[test]
-fn a_new_session_has_no_goal_yet() {
+fn a_session_without_a_goal_can_ask_for_one() {
     let mut s = setup().session(session("s-a", "alpha prompt", 100)).launch();
     s.click("alpha prompt");
     s.click("Info");
-    assert!(s.sees("First prompt: alpha prompt…"));
+    assert!(s.sees("No goal summarized yet"));
+    assert!(!s.sees("First prompt: alpha prompt…"), "the first prompt isn't shown as a goal");
     assert!(s.sees("Summarize goal"));
 }
