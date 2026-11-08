@@ -490,10 +490,27 @@ pub fn summarize_goal(ctx: eframe::egui::Context, digest: String) -> Receiver<Re
          Mark a subgoal [x] when CLAUDE reported it done (e.g. it built, committed, verified or \
          shipped it) or the USER moved on to build on it; mark [ ] only if it is still open.\n\
          Keep each subgoal under 12 words. Reply in exactly this format and nothing else:\n\n\
-         GOAL: <one or two short sentences>\n\
+         GOAL: <one or two short sentences, at most 50 words>\n\
          - [x] <completed subgoal>\n\
          - [ ] <open subgoal>\n\n\
          Session digest:\n{digest}"
+    );
+    ask_haiku(ctx, prompt)
+}
+
+/// Asks the helper model for a new session's goal from its first prompt and answer: a summary
+/// of the context in at most `goal::FIRST_GOAL_WORDS` words, no checklist (that comes with
+/// Info → Summarize again, once there is more to go on).
+pub fn first_goal(ctx: eframe::egui::Context, prompt: &str, answer: &str) -> Receiver<Result<String, String>> {
+    let cut = |t: &str, n: usize| t.chars().take(n).collect::<String>();
+    let prompt = format!(
+        "Summarize the context of this coding session in at most {} words: what the USER wants \
+         done and why, and what CLAUDE's first answer established (plan, findings, constraints). \
+         Plain prose, one paragraph, no preamble, no markdown. Reply with the summary only.\n\n\
+         USER:\n{}\n\nCLAUDE:\n{}",
+        crate::goal::FIRST_GOAL_WORDS,
+        cut(prompt, 4000),
+        cut(answer, 4000)
     );
     ask_haiku(ctx, prompt)
 }

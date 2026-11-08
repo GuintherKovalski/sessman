@@ -63,6 +63,24 @@ fn haiku_names_the_session_after_its_first_answer() {
 }
 
 #[test]
+fn haiku_summarizes_the_goal_after_its_first_answer() {
+    let mut s = workspace_with_folder();
+    s.click("+  New session");
+    s.send("please start the new thing for me");
+    s.wait_until("the goal is saved", |s| s.env.config_json("goals.json").as_object().is_some_and(|g| !g.is_empty()));
+    let (id, _) = s.env.runs().pop().unwrap();
+    assert_eq!(s.env.config_json("goals.json")[id.as_str()], "GOAL: Fake summary of what the session is about.");
+    let call = s.env.calls().into_iter().rfind(|c| c["args"].as_array().unwrap().iter().any(|a| a.as_str().unwrap().contains("Summarize the context"))).unwrap();
+    let args = call["args"].as_array().unwrap();
+    assert!(args.windows(2).any(|w| w[0] == "--model" && w[1] == "haiku"));
+    let request = args.last().unwrap().as_str().unwrap();
+    assert!(request.contains("at most 50 words"));
+    assert!(request.contains("please start the new thing for me") && request.contains("Echo: please start the new thing for me"), "it sees the prompt and the answer");
+    s.click("Info");
+    s.wait_to_see("Fake summary of what the session is about.");
+}
+
+#[test]
 fn a_starting_session_can_be_left_and_opened_again() {
     let mut s = workspace_with_folder();
     s.click("+  New session");

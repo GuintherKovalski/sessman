@@ -169,6 +169,8 @@ pub struct App {
     summarizing: Option<(String, Receiver<Result<String, String>>)>,
     /// New sessions whose name the helper model is writing after their first answer.
     naming: Vec<(String, Receiver<Result<String, String>>)>,
+    /// Goals being written for new sessions after their first answer, by session id.
+    first_goals: Vec<(String, Receiver<Result<String, String>>)>,
     /// Side questions per session id, oldest first; kept until closed with their ×.
     btw: HashMap<String, Vec<Btw>>,
     /// Text in the Info tab's "ask about this goal" field.
@@ -447,6 +449,7 @@ impl App {
             goals: Shared::load(Names::goals_path()),
             summarizing: None,
             naming: Vec::new(),
+            first_goals: Vec::new(),
             btw: HashMap::new(),
             goal_question: String::new(),
             info_height: 0.0,
@@ -1725,6 +1728,29 @@ impl App {
     }
 
     fn poll_summary(&mut self) {
+        let mut written = Vec::new();
+        self.first_goals.retain(|(id, rx)| match rx.try_recv() {
+            Ok(result) => {
+                if let Some(goal) = result.ok().and_then(|r| goal::from_summary(&r, goal::FIRST_GOAL_WORDS)) {
+                    written.push((id.clone(), goal));
+                }
+                false
+            }
+            Err(std::sync::mpsc::TryRecvError::Empty) => true,
+            Err(_) => false,
+        });
+        // A goal summarized by hand meanwhile (here or in another scope) is kept.
+        if !written.is_empty()
+            && let Err(e) = self.goals.change(|g| {
+                for (id, goal) in &written {
+                    if g.get(id).is_none() {
+                        g.set(id, goal);
+                    }
+                }
+            })
+        {
+            self.error = Some(format!("could not save goal: {e}"));
+        }
         let Some((id, rx)) = &self.summarizing else { return };
         if let Ok(result) = rx.try_recv() {
             let id = id.clone();
@@ -2031,6 +2057,10 @@ impl App {
         // After the first answer, the helper model names the session (unless it has a name).
         if run.new && !stopped && result.is_ok() && self.names.get(id).is_none() {
             self.naming.push((id.to_owned(), runner::name_session(self.ctx.clone(), &run.prompt, &run.answer)));
+        }
+        // ...and summarizes its context as the goal shown in Info (unless it has one).
+        if run.new && !stopped && result.is_ok() && self.goals.get(id).is_none() {
+            self.first_goals.push((id.to_owned(), runner::first_goal(self.ctx.clone(), &run.prompt, &run.answer)));
         }
         if stopped {
             run.stop.stop();
@@ -3827,7 +3857,7 @@ impl App {
                 }
             }
             if let Some(id) = id.as_ref().filter(|_| !s.prompts.is_empty()) {
-                if self.summarizing.as_ref().is_some_and(|(sid, _)| sid == id) {
+                if self.summarizing.as_ref().is_some_and(|(sid, _)| sid == id) || self.first_goals.iter().any(|(sid, _)| sid == id) {
                     ui.horizontal(|ui| {
                         ui.spinner();
                         ui.label("Summarizing…");
