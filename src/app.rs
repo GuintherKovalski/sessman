@@ -165,8 +165,8 @@ pub struct App {
     right_tab: RightTab,
     /// AI-written one-line goals, keyed by session id.
     goals: Shared<Names>,
-    /// Session id whose goal is being summarized, and the pending result.
-    summarizing: Option<(String, Receiver<Result<String, String>>)>,
+    /// Sessions whose goal is being summarized, and the pending results.
+    summarizing: Vec<(String, Receiver<Result<String, String>>)>,
     /// New sessions whose name the helper model is writing after their first answer.
     naming: Vec<(String, Receiver<Result<String, String>>)>,
     /// Side questions per session id, oldest first; kept until closed with their ×.
@@ -445,7 +445,7 @@ impl App {
             focus_prompt: false,
             right_tab: RightTab::Changes,
             goals: Shared::load(Names::goals_path()),
-            summarizing: None,
+            summarizing: Vec::new(),
             naming: Vec::new(),
             btw: HashMap::new(),
             goal_question: String::new(),
@@ -1725,10 +1725,16 @@ impl App {
     }
 
     fn poll_summary(&mut self) {
-        let Some((id, rx)) = &self.summarizing else { return };
-        if let Ok(result) = rx.try_recv() {
-            let id = id.clone();
-            self.summarizing = None;
+        let mut done = Vec::new();
+        self.summarizing.retain(|(id, rx)| match rx.try_recv() {
+            Ok(result) => {
+                done.push((id.clone(), result));
+                false
+            }
+            Err(std::sync::mpsc::TryRecvError::Empty) => true,
+            Err(std::sync::mpsc::TryRecvError::Disconnected) => false,
+        });
+        for (id, result) in done {
             match result {
                 Ok(goal) => {
                     if let Err(e) = self.goals.change(|g| g.set(&id, &goal)) {
@@ -2031,6 +2037,11 @@ impl App {
         // After the first answer, the helper model names the session (unless it has a name).
         if run.new && !stopped && result.is_ok() && self.names.get(id).is_none() {
             self.naming.push((id.to_owned(), runner::name_session(self.ctx.clone(), &run.prompt, &run.answer)));
+        }
+        // ...and summarizes its goal, which the Info tab shows from then on.
+        if run.new && !stopped && result.is_ok() && self.goals.get(id).is_none() && !self.summarizing.iter().any(|(s, _)| s == id) {
+            let digest = format!("USER: {}\nCLAUDE: {}", run.prompt, run.answer);
+            self.summarizing.push((id.to_owned(), runner::summarize_goal(self.ctx.clone(), digest)));
         }
         if stopped {
             run.stop.stop();
@@ -3802,6 +3813,14 @@ impl App {
         let sections = egui::ScrollArea::vertical().auto_shrink(false).show(ui, |ui| {
             section(ui, "Goal");
             let goal = id.as_deref().and_then(|id| self.goals.get(id));
+            let busy = id.as_ref().is_some_and(|id| self.summarizing.iter().any(|(sid, _)| sid == id));
+            let answered = s.messages.iter().any(|m| m.role != Role::User);
+            if busy {
+                ui.horizontal(|ui| {
+                    ui.spinner();
+                    ui.label("Summarizing…");
+                });
+            }
             match (goal, &id) {
                 (Some(raw), _) => {
                     let g = goal::parse(raw);
@@ -3818,25 +3837,19 @@ impl App {
                         }
                     }
                 }
-                (None, _) if s.prompts.is_empty() => {
-                    ui.label("No prompts yet");
+                (None, _) if busy => {}
+                (None, _) if answered => {
+                    ui.label(RichText::new("No goal summarized yet").weak());
                 }
                 (None, _) => {
-                    let first: String = s.prompts[0].chars().take(280).collect();
-                    ui.label(RichText::new(format!("First prompt: {first}…")).weak());
+                    ui.label(RichText::new("Goal will be summarized here after the first answer is generated on the session").weak());
                 }
             }
-            if let Some(id) = id.as_ref().filter(|_| !s.prompts.is_empty()) {
-                if self.summarizing.as_ref().is_some_and(|(sid, _)| sid == id) {
-                    ui.horizontal(|ui| {
-                        ui.spinner();
-                        ui.label("Summarizing…");
-                    });
-                } else {
-                    let label = if goal.is_some() { "Summarize again" } else { "Summarize goal" };
-                    let btn = ui.button(label).on_hover_text("Asks Claude Haiku for the goal and a checklist of subgoals (uses a little of your usage)");
-                    start_summary = btn.clicked();
-                }
+            // Once it has answers, a goal can be asked for (again): older sessions, a failed summary.
+            if id.is_some() && answered && !busy {
+                let label = if goal.is_some() { "Summarize again" } else { "Summarize goal" };
+                let btn = ui.button(label).on_hover_text("Asks Claude Haiku for the goal and a checklist of subgoals (uses a little of your usage)");
+                start_summary = btn.clicked();
             }
 
             section(ui, "Model");
@@ -3901,7 +3914,7 @@ impl App {
         }
         if let (true, Some(id)) = (start_summary, id) {
             let rx = runner::summarize_goal(ui.ctx().clone(), session::digest(&s.messages, 400, 12_000));
-            self.summarizing = Some((id, rx));
+            self.summarizing.push((id, rx));
         }
     }
 
