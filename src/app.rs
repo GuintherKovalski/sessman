@@ -4330,7 +4330,10 @@ fn session_bubble(ui: &mut egui::Ui, selected: bool, title: &str, note: Option<&
         (w, t) => {
             let mut job = egui::text::LayoutJob::default();
             if let Some(v) = t {
-                job.append(v.label(), 0.0, egui::TextFormat::simple(small.clone(), tag_color(v)));
+                // Only the icon takes the state's color; its word reads as ordinary text.
+                let (icon, word) = v.label().split_once(' ').unwrap_or((v.label(), ""));
+                job.append(icon, 0.0, egui::TextFormat::simple(small.clone(), tag_color(v)));
+                job.append(word, 3.0, egui::TextFormat::simple(small.clone(), ui.visuals().text_color()));
             }
             if let Some(w) = w {
                 job.append(w, if t.is_some() { 6.0 } else { 0.0 }, egui::TextFormat::simple(small.clone(), ui.visuals().weak_text_color()));
