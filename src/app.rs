@@ -169,6 +169,8 @@ pub struct App {
     summarizing: Vec<(String, Receiver<Result<String, String>>)>,
     /// New sessions whose name the helper model is writing after their first answer.
     naming: Vec<(String, Receiver<Result<String, String>>)>,
+    /// Goals being written for new sessions after their first answer, by session id.
+    first_goals: Vec<(String, Receiver<Result<String, String>>)>,
     /// Side questions per session id, oldest first; kept until closed with their ×.
     btw: HashMap<String, Vec<Btw>>,
     /// Text in the Info tab's "ask about this goal" field.
@@ -450,6 +452,7 @@ impl App {
             goals: Shared::load(Names::goals_path()),
             summarizing: Vec::new(),
             naming: Vec::new(),
+            first_goals: Vec::new(),
             btw: HashMap::new(),
             goal_question: String::new(),
             info_height: 0.0,
@@ -1729,6 +1732,30 @@ impl App {
     }
 
     fn poll_summary(&mut self) {
+        let mut written = Vec::new();
+        let words = self.settings.goal_words.max(1) as usize;
+        self.first_goals.retain(|(id, rx)| match rx.try_recv() {
+            Ok(result) => {
+                if let Some(goal) = result.ok().and_then(|r| goal::from_summary(&r, words)) {
+                    written.push((id.clone(), goal));
+                }
+                false
+            }
+            Err(std::sync::mpsc::TryRecvError::Empty) => true,
+            Err(_) => false,
+        });
+        // A goal summarized by hand meanwhile (here or in another scope) is kept.
+        if !written.is_empty()
+            && let Err(e) = self.goals.change(|g| {
+                for (id, goal) in &written {
+                    if g.get(id).is_none() {
+                        g.set(id, goal);
+                    }
+                }
+            })
+        {
+            self.error = Some(format!("could not save goal: {e}"));
+        }
         let mut done = Vec::new();
         self.summarizing.retain(|(id, rx)| match rx.try_recv() {
             Ok(result) => {
@@ -2042,10 +2069,11 @@ impl App {
         if run.new && !stopped && result.is_ok() && self.names.get(id).is_none() {
             self.naming.push((id.to_owned(), runner::name_session(self.ctx.clone(), &run.prompt, &run.answer)));
         }
-        // ...and summarizes its goal, which the Info tab shows from then on.
-        if run.new && !stopped && result.is_ok() && self.goals.get(id).is_none() && !self.summarizing.iter().any(|(s, _)| s == id) {
-            let digest = format!("USER: {}\nCLAUDE: {}", run.prompt, run.answer);
-            self.summarizing.push((id.to_owned(), runner::summarize_goal(self.ctx.clone(), digest)));
+        // ...and summarizes its context as the goal shown in Info (unless it has one).
+        if run.new && !stopped && result.is_ok() && self.goals.get(id).is_none() && !self.first_goals.iter().any(|(s, _)| s == id) {
+            let harness = Settings::harness(&self.settings.goal_harness, goal::GOAL_HARNESS);
+            let words = self.settings.goal_words.max(1);
+            self.first_goals.push((id.to_owned(), runner::first_goal(self.ctx.clone(), harness, words, &run.prompt, &run.answer)));
         }
         if stopped {
             run.stop.stop();
@@ -3863,7 +3891,7 @@ impl App {
         let sections = egui::ScrollArea::vertical().auto_shrink(false).show(ui, |ui| {
             section(ui, "Goal");
             let goal = id.as_deref().and_then(|id| self.goals.get(id));
-            let busy = id.as_ref().is_some_and(|id| self.summarizing.iter().any(|(sid, _)| sid == id));
+            let busy = id.as_ref().is_some_and(|id| self.summarizing.iter().chain(&self.first_goals).any(|(sid, _)| sid == id));
             let answered = s.messages.iter().any(|m| m.role != Role::User);
             if busy {
                 ui.horizontal(|ui| {
@@ -3980,7 +4008,7 @@ impl App {
             self.btw.entry(id.clone()).or_default().push(Btw { question, answer: None, rx: Some(rx) });
         }
         if let (true, Some(id)) = (start_summary, id) {
-            let rx = runner::summarize_goal(ui.ctx().clone(), session::digest(&s.messages, 400, 12_000));
+            let rx = runner::summarize_goal(ui.ctx().clone(), self.settings.goal_words.max(1), session::digest(&s.messages, 400, 12_000));
             self.summarizing.push((id, rx));
         }
         if model_pick != picked_before {

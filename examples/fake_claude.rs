@@ -198,6 +198,8 @@ fn helper(fake: &Path, args: &[String], prompt: &str) -> i32 {
         "overview"
     } else if prompt.contains("Answer the developer's QUESTION") {
         "ask"
+    } else if prompt.contains("Reply with the summary only, in at most") {
+        "first-goal"
     } else if prompt.contains("Name this coding session") {
         "name"
     } else if prompt.contains("Has this Claude Code session finished") {
@@ -214,6 +216,7 @@ fn helper(fake: &Path, args: &[String], prompt: &str) -> i32 {
     }
     let reply = match kind {
         "btw" => "Fake side answer".to_owned(),
+        "first-goal" => "Fake summary of what the session is about.".to_owned(),
         "goal" => "GOAL: Ship the fake feature\n- [x] Write the parser\n- [ ] Add the tests".to_owned(),
         "refine" => {
             let text = prompt.rsplit("\nPROMPT:\n").next().unwrap_or_default().trim();

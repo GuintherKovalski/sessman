@@ -68,6 +68,10 @@ pub struct Settings {
     pub orchestration_harness: String,
     pub question_harness: String,
     pub search_harness: String,
+    pub goal_harness: String,
+    /// Most words in a session's goal (the one written after the first answer, and the goal
+    /// line of Summarize again).
+    pub goal_words: u32,
     /// Model for workspace orchestration; empty = the helper model.
     pub orchestration_model: String,
     /// Minutes between automatic orchestration updates while there is new activity; 0 = only
@@ -110,6 +114,8 @@ impl Default for Settings {
             orchestration_harness: crate::orchestration::DEFAULT_HARNESS.into(),
             question_harness: crate::goal::QUESTION_HARNESS.into(),
             search_harness: crate::search::DEFAULT_HARNESS.into(),
+            goal_harness: crate::goal::GOAL_HARNESS.into(),
+            goal_words: crate::goal::GOAL_WORDS,
             orchestration_model: String::new(),
             orchestration_every: 10,
             stale_after_hours: 24,
@@ -469,6 +475,22 @@ pub fn ui(ui: &mut egui::Ui, s: &mut Settings, filter: &mut String, about: &mut 
                 page.preview("Full prompt: a report update", &preview::orchestrator_report(&s.orchestration_harness));
             });
 
+            page.card("🎯 Session goal", "Right panel: Info → Goal, written after a new session's first answer", |page| {
+                page.facts(&[
+                    ("Answered by", format!("{helper} (the helper model)")),
+                    ("It sees", "the first prompt and Claude's first answer".into()),
+                    ("It gives back", "a status line of the work, cut to the word limit (Summarize again adds a checklist)".into()),
+                ]);
+                page.harness("Harness", s.goal_harness != defaults.goal_harness, &mut s.goal_harness, &defaults.goal_harness);
+                page.row("Goal length (words)", "Most words in a session's goal, after the first answer and in Summarize again", s.goal_words != defaults.goal_words, |ui, reset| {
+                    if reset {
+                        s.goal_words = defaults.goal_words;
+                    }
+                    ui.add(egui::Slider::new(&mut s.goal_words, 10..=100));
+                });
+                page.preview("Full prompt", &preview::first_goal(&s.goal_harness, s.goal_words));
+            });
+
             page.card("💬 Ask about this goal", "Right panel: Info → Ask about this goal", |page| {
                 page.facts(&[
                     ("Answered by", "Claude Code's default model, in a throwaway copy of the session (like /btw)".into()),
@@ -482,7 +504,7 @@ pub fn ui(ui: &mut egui::Ui, s: &mut Settings, filter: &mut String, about: &mut 
             page.card("Built-in helpers", "Fixed: scope reads their replies in these exact formats", |page| {
                 let fixed = [
                     ("Names a new session", "after its first reply", preview::name()),
-                    ("Goal and checklist", "Info → Summarize", preview::goal()),
+                    ("Goal and checklist", "Info → Summarize again", preview::goal(s.goal_words)),
                     ("Tags a finished session", "after a run ends, with Tag finished sessions on", preview::tag()),
                     ("Refine", "Cmd+Enter in the prompt input", preview::refine()),
                     ("Scopes overview cards", "All sessions, when a scope has new activity", preview::overview()),
@@ -587,8 +609,12 @@ pub mod preview {
         crate::runner::name_request("<the first prompt>", "<Claude's first reply>")
     }
 
-    pub fn goal() -> String {
-        crate::runner::goal_request("<a digest of the conversation>")
+    pub fn goal(words: u32) -> String {
+        crate::runner::goal_request(words, "<a digest of the conversation>")
+    }
+
+    pub fn first_goal(harness: &str, words: u32) -> String {
+        crate::runner::first_goal_request(Settings::harness(harness, goal::GOAL_HARNESS), words, "<the first prompt>", "<Claude's first answer>")
     }
 
     pub fn tag() -> String {
@@ -870,6 +896,7 @@ mod tests {
     fn harness_falls_back_to_its_default_when_emptied() {
         let s = Settings::default();
         assert_eq!(s.search_harness, crate::search::DEFAULT_HARNESS);
+        assert_eq!((s.goal_harness.as_str(), s.goal_words), (crate::goal::GOAL_HARNESS, 25));
         assert_eq!(Settings::harness("  \n", "D"), "D");
         assert_eq!(Settings::harness("mine", "D"), "mine");
         assert!(matches("harness", "Harness", "Scope orchestration"));
