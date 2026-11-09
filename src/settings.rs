@@ -84,6 +84,10 @@ pub struct Settings {
     pub check_for_updates: bool,
     /// Preset, accent, roundness, spacing, text size and single colors (style.rs).
     pub style: crate::style::Style,
+    /// Where prompt templates are written, relative to the scope's root folder (templates.rs).
+    pub templates_folder: String,
+    /// The template composer also has Claude add that folder to the root's `.gitignore`.
+    pub templates_gitignore: bool,
 }
 
 impl Default for Settings {
@@ -121,6 +125,8 @@ impl Default for Settings {
             stale_after_hours: 24,
             check_for_updates: true,
             style: crate::style::Style::default(),
+            templates_folder: crate::templates::DEFAULT_FOLDER.into(),
+            templates_gitignore: true,
         }
     }
 }
@@ -422,6 +428,18 @@ pub fn ui(ui: &mut egui::Ui, s: &mut Settings, filter: &mut String, about: &mut 
                     s.jira_url = defaults.jira_url.clone();
                 }
                 ui.add(egui::TextEdit::singleline(&mut s.jira_url).hint_text("https://…atlassian.net").desired_width(260.0));
+            });
+            page.row("Prompt templates folder", "Where Create template has Claude write them, relative to the scope's root folder", s.templates_folder != defaults.templates_folder, |ui, reset| {
+                if reset {
+                    s.templates_folder = defaults.templates_folder.clone();
+                }
+                ui.add(egui::TextEdit::singleline(&mut s.templates_folder).hint_text(crate::templates::DEFAULT_FOLDER).desired_width(260.0));
+            });
+            page.row("Keep templates out of git", "Claude also adds the templates folder to the root's .gitignore", s.templates_gitignore != defaults.templates_gitignore, |ui, reset| {
+                if reset {
+                    s.templates_gitignore = defaults.templates_gitignore;
+                }
+                ui.checkbox(&mut s.templates_gitignore, "");
             });
         });
 
