@@ -346,16 +346,16 @@ of it.
   into it. Quitting doesn't end the sessions scope runs; the new scope picks them up.
 
 ### Notifications
-When a session stops working (its run ended and no queued prompt went
-on), a macOS notification with scope's icon: the session's name as title, how it ended as
-subtitle (✔ done, ✋ needs you, ⚠ blocked: its verdict, so it waits the few seconds the
-helper model takes; ✖ failed; ✔ finished when tagging is off) and the verdict's sentence.
-Clicking it brings scope forward with that session open. Not sent for a session you are
-looking at, nor for a run stopped with Ctrl+C. A Developer ID signed scope.app uses the User
-Notifications framework (macOS asks once whether scope may notify); macOS refuses that to an
-ad-hoc signed one (built with `scripts/bundle.sh`, test instances), which posts through the
-older NSUserNotificationCenter instead, with the same icon and click. A bare `cargo run`
-binary has no bundle and falls back to `osascript` (Script Editor's icon, no click-through).
+When a session stops working (its run ended and no queued prompt went on), a macOS
+notification: `<status> · <session name>` as title (Done, Needs your attention, Blocked: the
+session's verdict, so it waits the few seconds the helper model takes; Failed; Finished when
+tagging is off), `Scope: <workspace>` below it, and the verdict's sentence on what was achieved
+or is needed. Not sent for a session you are looking at, nor for a run stopped with Ctrl+C.
+A Developer ID signed scope.app posts them as its own (scope's icon, clicking opens the
+session; macOS asks once whether scope may notify). macOS refuses that to any app not signed
+by an Apple-issued certificate (ad-hoc or self-signed, as `scripts/bundle.sh` builds without
+`SCOPE_SIGN_IDENTITY`, test instances, `cargo run`): those fall back to `osascript`, whose
+banners carry Script Editor's icon. (The older NSUserNotificationCenter is inert on macOS 15.)
 
 ### Restarting
 Closing and opening scope brings everything back: window size and position, panel widths,

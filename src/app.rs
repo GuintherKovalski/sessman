@@ -1894,8 +1894,8 @@ impl App {
             if self.notify_on_verdict.remove(&id) {
                 let name = self.sessions.iter().position(|s| s.id == id).map_or_else(|| id.clone(), |i| self.title(i).to_owned());
                 match &result {
-                    Ok(v) => self.notify_ended(&id, &name, v.label(), &v.why),
-                    Err(_) => self.notify_ended(&id, &name, "✔ finished", ""),
+                    Ok(v) => self.notify_ended(&id, &name, v.status(), &v.why),
+                    Err(_) => self.notify_ended(&id, &name, "Finished", "Claude finished its turn"),
                 }
             }
             match result {
@@ -1930,13 +1930,15 @@ impl App {
         }
     }
 
-    /// A notification that session `id` (`name`) stopped working, tagged with how it ended;
-    /// not while scope is in front with that session open (it is in view).
-    fn notify_ended(&self, id: &str, name: &str, tag: &str, why: &str) {
+    /// A notification that session `id` (`name`) stopped working: "<status> · <session>" as
+    /// title, its scope (workspace) below, and what was achieved or is needed (`why`). Not sent
+    /// while scope is in front with that session open (it is in view).
+    fn notify_ended(&self, id: &str, name: &str, status: &str, why: &str) {
         if self.ctx.input(|i| i.focused) && self.open_id().as_deref() == Some(id) {
             return;
         }
-        crate::notify::post(id, name, tag, why);
+        let scope = self.workspaces.list.iter().find(|w| w.sessions.iter().any(|s| s == id)).map(|w| format!("Scope: {}", w.name));
+        crate::notify::post(id, &format!("{status} · {name}"), scope.as_deref().unwrap_or(""), why);
     }
 
     /// A notification was clicked: opens its session, in a tab that lists it.
@@ -2232,12 +2234,12 @@ impl App {
         // ended, once its verdict is in when sessions are tagged.
         if self.settings.notify_when_done && !stopped && !self.runs.contains_key(id) {
             match &result {
-                Err(e) => self.notify_ended(id, &name, "✖ failed", e),
+                Err(e) => self.notify_ended(id, &name, "Failed", e),
                 // Judged now, or (a new session) once the indexer lists it.
                 Ok(()) if self.settings.tag_finished => {
                     self.notify_on_verdict.insert(id.to_owned());
                 }
-                Ok(()) => self.notify_ended(id, &name, "✔ finished", ""),
+                Ok(()) => self.notify_ended(id, &name, "Finished", "Claude finished its turn"),
             }
         }
         // The file now holds what was streamed; reloading makes it canonical. A new session is

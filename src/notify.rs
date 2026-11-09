@@ -3,11 +3,9 @@
 //! Inside an app bundle (scope.app, or a test instance's) they are scope's own, posted through
 //! the User Notifications framework: the banner carries scope's icon, groups under scope in
 //! Notification Center, shows even while scope is in front, and clicking it opens the session.
-//! macOS asks once whether scope may notify (System Settings → Notifications → scope). It
-//! refuses that framework outright to an ad-hoc signed app (scope.app built here, test
-//! instances), which then posts through the older NSUserNotificationCenter: same icon and
-//! click, no question asked. A bare
-//! binary (`cargo run`) has no bundle for macOS to attach them to, so it falls back to
+//! macOS asks once whether scope may notify (System Settings → Notifications → scope). It only
+//! allows that to apps signed with an Apple-issued certificate (Developer ID): an ad-hoc or
+//! self-signed scope.app, a test instance or a bare `cargo run` binary falls back to
 //! `osascript`, whose banners carry Script Editor's icon.
 
 use std::sync::Mutex;
@@ -40,8 +38,7 @@ pub fn post(id: &str, title: &str, subtitle: &str, body: &str) {
 
 /// Through `osascript`: Script Editor's icon, no click to open.
 fn fallback(title: &str, subtitle: &str, body: &str) {
-    let body = [subtitle, body].iter().filter(|s| !s.is_empty()).copied().collect::<Vec<_>>().join(": ");
-    crate::runner::notify(title, &body);
+    crate::runner::notify(title, subtitle, body);
 }
 
 /// The sessions whose notification was clicked since the last call.
@@ -50,16 +47,13 @@ pub fn take_clicked() -> Vec<String> {
 }
 
 #[cfg(target_os = "macos")]
-#[allow(deprecated)]
 mod mac {
     use super::CLICKED;
     use block2::RcBlock;
     use objc2::rc::Retained;
     use objc2::runtime::{Bool, NSObject, ProtocolObject};
     use objc2::{AnyThread, DefinedClass, define_class, msg_send};
-    use objc2_foundation::{
-        NSBundle, NSDictionary, NSError, NSObjectProtocol, NSString, NSUserNotification, NSUserNotificationCenter, NSUserNotificationCenterDelegate,
-    };
+    use objc2_foundation::{NSBundle, NSDictionary, NSError, NSObjectProtocol, NSString};
     use objc2_user_notifications::{
         UNAuthorizationOptions, UNMutableNotificationContent, UNNotification, UNNotificationPresentationOptions, UNNotificationRequest,
         UNNotificationResponse, UNNotificationSound, UNUserNotificationCenter, UNUserNotificationCenterDelegate,
@@ -99,28 +93,7 @@ mod mac {
                 handler.call(());
             }
         }
-
-        // The older API, for when macOS refuses the one above (see `REFUSED`).
-        unsafe impl NSUserNotificationCenterDelegate for Delegate {
-            #[unsafe(method(userNotificationCenter:shouldPresentNotification:))]
-            fn should_present(&self, _center: &NSUserNotificationCenter, _n: &NSUserNotification) -> bool {
-                true
-            }
-
-            #[unsafe(method(userNotificationCenter:didActivateNotification:))]
-            fn did_activate(&self, _center: &NSUserNotificationCenter, n: &NSUserNotification) {
-                let key = NSString::from_str(SESSION_KEY);
-                if let Some(id) = n.userInfo().and_then(|i| i.objectForKey(&key)).and_then(|v| v.downcast::<NSString>().ok()) {
-                    CLICKED.lock().unwrap_or_else(|e| e.into_inner()).push(id.to_string());
-                    self.ivars().ctx.request_repaint();
-                }
-            }
-        }
     );
-
-    fn info(id: &str) -> Retained<NSDictionary<NSString, NSString>> {
-        NSDictionary::from_retained_objects(&[&*NSString::from_str(SESSION_KEY)], &[NSString::from_str(id)])
-    }
 
     /// The notification center, when scope runs from an app bundle (without one,
     /// `currentNotificationCenter` raises an exception).
@@ -142,7 +115,6 @@ mod mac {
             unsafe { msg_send![super(this), init] }
         };
         center.setDelegate(Some(ProtocolObject::from_ref(&*delegate)));
-        unsafe { NSUserNotificationCenter::defaultUserNotificationCenter().setDelegate(Some(ProtocolObject::from_ref(&*delegate))) };
         std::mem::forget(delegate);
         let done = RcBlock::new(|granted: Bool, err: *mut NSError| {
             if let Some(e) = unsafe { err.as_ref() }.filter(|_| !granted.as_bool()) {
@@ -158,8 +130,7 @@ mod mac {
     pub fn post(id: &str, title: &str, subtitle: &str, body: &str) -> bool {
         let Some(center) = center() else { return false };
         if REFUSED.get().is_some() {
-            legacy(id, title, subtitle, body);
-            return true;
+            return false;
         }
         let content = UNMutableNotificationContent::new();
         content.setTitle(&NSString::from_str(title));
@@ -168,7 +139,7 @@ mod mac {
         content.setSound(Some(&UNNotificationSound::defaultSound()));
         // One thread per session in Notification Center.
         content.setThreadIdentifier(&NSString::from_str(id));
-        let info = info(id);
+        let info: Retained<NSDictionary<NSString, NSString>> = NSDictionary::from_retained_objects(&[&*NSString::from_str(SESSION_KEY)], &[NSString::from_str(id)]);
         // Untyped, as userInfo is declared; the keys and values are strings.
         let info: Retained<NSDictionary> = unsafe { Retained::cast_unchecked(info) };
         unsafe { content.setUserInfo(&info) };
@@ -176,18 +147,5 @@ mod mac {
         let request = UNNotificationRequest::requestWithIdentifier_content_trigger(&key, &content, None);
         center.addNotificationRequest_withCompletionHandler(&request, None);
         true
-    }
-
-    /// Through NSUserNotificationCenter (deprecated, but needs no authorization: an ad-hoc
-    /// signed scope.app, which macOS refuses the newer API, still gets its own icon).
-    fn legacy(id: &str, title: &str, subtitle: &str, body: &str) {
-        let n = NSUserNotification::new();
-        n.setTitle(Some(&NSString::from_str(title)));
-        n.setSubtitle((!subtitle.is_empty()).then(|| NSString::from_str(subtitle)).as_deref());
-        n.setInformativeText((!body.is_empty()).then(|| NSString::from_str(body)).as_deref());
-        n.setSoundName(Some(&NSString::from_str("NSUserNotificationDefaultSoundName")));
-        let info: Retained<NSDictionary<NSString, objc2::runtime::AnyObject>> = unsafe { Retained::cast_unchecked(info(id)) };
-        unsafe { n.setUserInfo(Some(&info)) };
-        NSUserNotificationCenter::defaultUserNotificationCenter().deliverNotification(&n);
     }
 }

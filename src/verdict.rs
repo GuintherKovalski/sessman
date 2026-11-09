@@ -32,6 +32,15 @@ impl Verdict {
             _ => "✋ needs you",
         }
     }
+
+    /// How a notification words it.
+    pub fn status(&self) -> &'static str {
+        match self.state.as_str() {
+            "done" => "Done",
+            "blocked" => "Blocked",
+            _ => "Needs your attention",
+        }
+    }
 }
 
 /// Session id → verdict, saved as JSON (shared by every scope on the config folder:

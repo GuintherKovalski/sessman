@@ -627,10 +627,14 @@ pub fn trash(path: &Path) -> Result<(), String> {
     if path.is_dir() { std::fs::remove_dir_all(path) } else { std::fs::remove_file(path) }.map_err(|e| e.to_string())
 }
 
-/// A system notification (macOS), e.g. when a run ends while scope is in the background.
-pub fn notify(title: &str, body: &str) {
+/// A system notification (macOS) through `osascript`: Script Editor's icon (notify.rs posts
+/// scope's own where macOS allows it). An empty `subtitle` is left out.
+pub fn notify(title: &str, subtitle: &str, body: &str) {
     let quote = |s: &str| s.replace('\\', "\\\\").replace('"', "\\\"");
-    let script = format!("display notification \"{}\" with title \"{}\"", quote(body), quote(title));
+    let mut script = format!("display notification \"{}\" with title \"{}\"", quote(body), quote(title));
+    if !subtitle.is_empty() {
+        script += &format!(" subtitle \"{}\"", quote(subtitle));
+    }
     let _ = Command::new("osascript").args(["-e", &script]).stdin(Stdio::null()).spawn();
 }
 
