@@ -249,7 +249,9 @@ opened; clicking "All sessions" again comes back to it.
     button asks Claude Haiku (a little of your usage) for the goal plus a **checklist of 3–7
     subgoals**, ticked where the conversation shows they're done, with "N of M done". You can
     tick and untick items yourself; that is saved.
-  - **Model**: what the next prompt runs with. Before any reply (a new session) it shows the
+  - **Model**: what the next prompt runs with, by its full name as Claude Code reports it
+    (`claude-opus-5-5`; an alias in Settings shows as its model, and a reply on a newer model
+    of a family moves the list on). Before any reply (a new session) it shows the
     default and where it comes from (scope's Settings, the extra arguments, `ANTHROPIC_MODEL`,
     then Claude Code's settings files), the same pick as the new session page. While the
     session isn't running, the dropdown switches its model: the next prompts resume the same

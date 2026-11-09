@@ -251,6 +251,8 @@ pub struct App {
     /// The model a session's runs get when it picked none, for the folder, Settings model and
     /// extra arguments it was read with, and when (read again after a few seconds).
     default_model: Option<((PathBuf, String, String), std::time::Instant, Option<crate::newinfo::Sourced>)>,
+    /// The models the dropdowns offer, by full name: the newest known per family.
+    model_ids: Vec<String>,
     seen_from: u64,
     /// Whether each session's work looks finished (verdict.rs), the checks under way, the
     /// checks that failed (id → the change they read; not retried until there is a newer one),
@@ -501,6 +503,7 @@ impl App {
             choices: HashMap::new(),
             new_choice: runner::Choice::default(),
             default_model: None,
+            model_ids: crate::newinfo::MODEL_IDS.map(String::from).to_vec(),
             seen_from: 0,
             verdicts: Shared::load(Verdicts::path()),
             judging: Vec::new(),
@@ -3409,7 +3412,7 @@ impl App {
             let running = self.open_running();
             let status = if running { "Starting…" } else { "Type your first prompt below." };
             if let Some((_, info)) = &self.new_info {
-                crate::newinfo::show(ui, &dir, info, &mut self.new_choice, !running, status);
+                crate::newinfo::show(ui, &dir, info, &mut self.new_choice, &self.model_ids, !running, status);
             }
             return;
         }
@@ -3778,6 +3781,9 @@ impl App {
     fn info(&mut self, ui: &mut egui::Ui) {
         let dir = self.new_session.clone().or_else(|| self.open.as_ref().and_then(|s| s.cwd.clone()));
         let default_model = dir.map(|d| self.default_model(&d));
+        if let Some(m) = self.open.as_ref().and_then(|s| s.model.clone()) {
+            crate::newinfo::learn(&mut self.model_ids, &m);
+        }
         let mut model_pick = self.open_model_choice();
         let picked_before = model_pick.clone();
         let model_editable = !self.open_running();
@@ -3933,14 +3939,14 @@ impl App {
             section(ui, "Model");
             // What the next prompt runs with: the session's own pick, else the default. Runs
             // resume the same session, so switching keeps the conversation.
-            let (default, from) = match default_model.flatten() {
-                Some(m) => (m.value, m.from),
-                None => ("default".to_owned(), "Claude Code's default".to_owned()),
-            };
-            let options: Vec<(String, String)> = crate::newinfo::MODELS.iter().map(|m| ((*m).to_owned(), (*m).to_owned())).collect();
+            let default_model = default_model.flatten();
             ui.horizontal_wrapped(|ui| {
-                crate::newinfo::picker(ui, "info-model", &mut model_pick, &options, &format!("{default} (as set)"), model_editable);
-                let note = if model_pick.is_empty() { format!("({from})") } else { "(this session; later prompts keep it)".to_owned() };
+                crate::newinfo::model_picker(ui, "info-model", &mut model_pick, default_model.as_ref().map(|m| m.value.as_str()), &self.model_ids, model_editable);
+                let note = match &default_model {
+                    _ if !model_pick.is_empty() => "(this session; later prompts keep it)".to_owned(),
+                    Some(m) => format!("({})", m.from),
+                    None => "(Claude Code's default)".to_owned(),
+                };
                 ui.label(RichText::new(note).weak().small());
             });
             if !model_editable {
