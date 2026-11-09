@@ -121,7 +121,7 @@ fn the_info_tab_shows_goal_model_and_context() {
     let mut s = setup().session(session("s-a", "alpha prompt to summarize", 100).model("claude-sonnet-4-5-20250929", 150_000)).launch();
     s.click("alpha prompt to summarize");
     s.click("Info");
-    assert!(s.sees("First prompt: alpha prompt to summarize…"));
+    assert!(s.sees("No goal summarized yet"));
     assert!(s.sees("claude-sonnet-4-5-20250929"));
     assert!(s.sees("150k / 200k tokens (75%)"), "older models have a 200k window");
     assert!(s.sees("Usage limits"));

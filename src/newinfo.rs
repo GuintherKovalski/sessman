@@ -111,34 +111,50 @@ fn git_branch(dir: &Path) -> Option<String> {
     })
 }
 
-pub fn gather(dir: &Path, home: &Path, scope: &Scope, env: &dyn Fn(&str) -> Option<String>) -> NewInfo {
-    let mut info = NewInfo { extra_args: scope.extra.join(" "), branch: git_branch(dir), ..Default::default() };
-    let user_dir = home.join(".claude");
-    // The project root: the repository's top, else the folder itself.
+/// Settings files that apply in `dir`, most specific first (that is their precedence).
+fn settings_files(dir: &Path, home: &Path) -> Vec<(PathBuf, Value)> {
     let root = dir.ancestors().find(|d| d.join(".git").exists()).unwrap_or(dir).to_path_buf();
+    [root.join(".claude/settings.local.json"), root.join(".claude/settings.json"), home.join(".claude/settings.json")]
+        .into_iter()
+        .filter_map(|p| read_json(&p).map(|v| (p, v)))
+        .collect()
+}
 
-    // Settings files, most specific first (that is their precedence).
-    let mut files: Vec<(PathBuf, Value)> = Vec::new();
-    for p in [root.join(".claude/settings.local.json"), root.join(".claude/settings.json"), user_dir.join("settings.json")] {
-        if let Some(v) = read_json(&p) {
-            info.settings_files.push(tilde(&p, home));
-            files.push((p, v));
-        }
-    }
-    let from_files = |get: &dyn Fn(&Value) -> Option<String>| {
-        files.iter().find_map(|(p, v)| get(v).map(|value| Sourced { value, from: tilde(p, home) }))
-    };
-    let s = |v: &Value| v.as_str().map(str::to_owned).filter(|s| !s.trim().is_empty());
-
-    info.model = if !scope.model.trim().is_empty() {
+/// The model a run in `dir` gets when its session picked none, and where that comes from;
+/// `None` = Claude Code's own default.
+fn model_from(scope: &Scope, env: &dyn Fn(&str) -> Option<String>, files: &[(PathBuf, Value)], home: &Path) -> Option<Sourced> {
+    if !scope.model.trim().is_empty() {
         Some(Sourced { value: scope.model.trim().to_owned(), from: "scope settings".into() })
     } else if let Some(m) = flag(scope.extra, "--model") {
         Some(Sourced { value: m, from: "extra arguments".into() })
     } else if let Some(m) = env("ANTHROPIC_MODEL").filter(|m| !m.is_empty()) {
         Some(Sourced { value: m, from: "ANTHROPIC_MODEL".into() })
     } else {
-        from_files(&|v| v.get("model").and_then(s))
+        files.iter().find_map(|(p, v)| {
+            let m = v.get("model")?.as_str()?.trim();
+            (!m.is_empty()).then(|| Sourced { value: m.to_owned(), from: tilde(p, home) })
+        })
+    }
+}
+
+/// [`model_from`] for `dir`, reading its settings files.
+pub fn default_model(dir: &Path, home: &Path, scope: &Scope, env: &dyn Fn(&str) -> Option<String>) -> Option<Sourced> {
+    model_from(scope, env, &settings_files(dir, home), home)
+}
+
+pub fn gather(dir: &Path, home: &Path, scope: &Scope, env: &dyn Fn(&str) -> Option<String>) -> NewInfo {
+    let mut info = NewInfo { extra_args: scope.extra.join(" "), branch: git_branch(dir), ..Default::default() };
+    let user_dir = home.join(".claude");
+    // The project root: the repository's top, else the folder itself.
+    let root = dir.ancestors().find(|d| d.join(".git").exists()).unwrap_or(dir).to_path_buf();
+    let files = settings_files(dir, home);
+    info.settings_files = files.iter().map(|(p, _)| tilde(p, home)).collect();
+    let from_files = |get: &dyn Fn(&Value) -> Option<String>| {
+        files.iter().find_map(|(p, v)| get(v).map(|value| Sourced { value, from: tilde(p, home) }))
     };
+    let s = |v: &Value| v.as_str().map(str::to_owned).filter(|s| !s.trim().is_empty());
+
+    info.model = model_from(scope, env, &files, home);
     info.effort = flag(scope.extra, "--effort")
         .map(|e| Sourced { value: e, from: "extra arguments".into() })
         .or_else(|| env("CLAUDE_CODE_EFFORT_LEVEL").filter(|e| !e.is_empty()).map(|e| Sourced { value: e, from: "CLAUDE_CODE_EFFORT_LEVEL".into() }))
@@ -224,7 +240,63 @@ pub fn gather(dir: &Path, home: &Path, scope: &Scope, env: &dyn Fn(&str) -> Opti
 
 /// Shows `info` for a new session in `dir`, centred, with `status` under it.
 /// Model aliases, effort levels and permission modes offered on the new session page.
-pub const MODELS: [&str; 4] = ["opus", "sonnet", "haiku", "fable"];
+/// Each model family's full name as Claude Code reports it (the `model` of its replies), the
+/// newest known when scope was built; [`learn`] moves a family on when a reply shows a newer one.
+pub const MODEL_IDS: [&str; 4] = ["claude-opus-5-5", "claude-sonnet-5-5", "claude-haiku-5-5", "claude-fable-5-1"];
+
+/// The family of a full model name ("opus" in `claude-opus-5-5[1m]`) and its version numbers.
+fn family_version(id: &str) -> Option<(&str, Vec<u64>)> {
+    let id = id.split('[').next()?;
+    let mut parts = id.strip_prefix("claude-")?.split('-');
+    let family = parts.next().filter(|f| !f.is_empty())?;
+    let version: Vec<u64> = parts.map(str::parse).collect::<Result<_, _>>().ok()?;
+    (!version.is_empty()).then_some((family, version))
+}
+
+/// Puts `seen`, a model a reply ran on, in place of its family's name in `known` when it is newer
+/// (or adds its family).
+pub fn learn(known: &mut Vec<String>, seen: &str) {
+    let Some((family, version)) = family_version(seen) else { return };
+    let seen = seen.split('[').next().unwrap_or(seen);
+    match known.iter_mut().find(|k| family_version(k).is_some_and(|(f, _)| f == family)) {
+        Some(k) if family_version(k).is_some_and(|(_, v)| v < version) => *k = seen.to_owned(),
+        Some(_) => {}
+        None => known.push(seen.to_owned()),
+    }
+}
+
+/// The full name of `model`: an alias ("opus") is its family's name in `known`; a full name, or
+/// an alias not known, stays as it is.
+pub fn full_name(model: &str, known: &[String]) -> String {
+    let m = model.trim();
+    known.iter().find(|k| family_version(k).is_some_and(|(f, _)| f == m)).cloned().unwrap_or_else(|| m.to_owned())
+}
+
+/// The model dropdown: full names, as Claude Code reports them. The button shows the pick, or
+/// what applies without one (`default`; `None` = Claude Code's own default); the default comes
+/// first in the menu and is not listed again under its name.
+pub fn model_picker(ui: &mut egui::Ui, id: &str, value: &mut String, default: Option<&str>, known: &[String], enabled: bool) {
+    let default = default.map(|d| full_name(d, known));
+    let shown = if value.is_empty() { default.clone().unwrap_or_else(|| "default".to_owned()) } else { full_name(value, known) };
+    ui.add_enabled_ui(enabled, |ui| {
+        ui.push_id(id, |ui| {
+            ui.menu_button(egui::RichText::new(format!("{shown} ⏷")).monospace(), |ui| {
+                let first = match &default {
+                    Some(d) => format!("{d} (default)"),
+                    None => "Claude Code's default".to_owned(),
+                };
+                let others = known.iter().filter(|k| Some(*k) != default.as_ref()).map(|k| (k.clone(), k.clone()));
+                for (v, label) in std::iter::once((String::new(), first)).chain(others) {
+                    let on = if v.is_empty() { value.is_empty() } else { full_name(value, known) == v };
+                    if ui.selectable_label(on, egui::RichText::new(label).monospace()).clicked() {
+                        *value = v;
+                        ui.close();
+                    }
+                }
+            });
+        });
+    });
+}
 pub const EFFORTS: [&str; 5] = ["low", "medium", "high", "xhigh", "max"];
 pub const PERMISSIONS: [&str; 4] = ["default", "acceptEdits", "plan", "bypassPermissions"];
 
@@ -259,7 +331,7 @@ fn count(n: usize, one: &str, many: &str) -> String {
 
 /// Shows `info` for a new session in `dir`, centred, with `status` under it. What can be
 /// changed for this session has a dropdown (`choice`), usable while `editable`.
-pub fn show(ui: &mut egui::Ui, dir: &Path, info: &NewInfo, choice: &mut crate::runner::Choice, editable: bool, status: &str) {
+pub fn show(ui: &mut egui::Ui, dir: &Path, info: &NewInfo, choice: &mut crate::runner::Choice, models: &[String], editable: bool, status: &str) {
     use egui::RichText;
     let default = |o: &Option<Sourced>, d: &str| match o {
         Some(s) => (s.value.clone(), s.from.clone()),
@@ -304,8 +376,13 @@ pub fn show(ui: &mut egui::Ui, dir: &Path, info: &NewInfo, choice: &mut crate::r
                             let (v, from) = default(o, d);
                             (v, format!("({from})"))
                         };
-                        let (v, n) = sourced(&info.model, "default");
-                        pick(ui, "Model", &mut choice.model, &same(&MODELS), v, n);
+                        ui.label(RichText::new("Model").weak());
+                        ui.horizontal_wrapped(|ui| {
+                            model_picker(ui, "Model", &mut choice.model, info.model.as_ref().map(|m| m.value.as_str()), models, editable);
+                            let note = if choice.model.is_empty() { sourced(&info.model, "default").1 } else { "(this session; later prompts keep it)".to_owned() };
+                            ui.label(RichText::new(note).weak().small());
+                        });
+                        ui.end_row();
                         let (v, n) = sourced(&info.effort, "default");
                         pick(ui, "Effort", &mut choice.effort, &same(&EFFORTS), v, n);
                         let (v, n) = sourced(&info.permissions, "default (asks)");
@@ -435,5 +512,21 @@ mod tests {
         assert_eq!(i.commands, ["ship"]);
         assert!(i.model.is_none() && i.effort.is_none(), "nothing set: Claude Code's defaults");
         let _ = std::fs::remove_dir_all(&t);
+    }
+
+    #[test]
+    fn models_go_by_their_full_names() {
+        let mut known: Vec<String> = MODEL_IDS.map(String::from).to_vec();
+        assert_eq!(full_name("opus", &known), "claude-opus-5-5");
+        assert_eq!(full_name("claude-sonnet-4-5", &known), "claude-sonnet-4-5", "a full name stays");
+        assert_eq!(full_name("mystery", &known), "mystery");
+        // A reply on a newer model moves its family on; an older one doesn't.
+        learn(&mut known, "claude-opus-5-6[1m]");
+        learn(&mut known, "claude-sonnet-4-5-20250929");
+        learn(&mut known, "not-a-model");
+        assert_eq!(full_name("opus", &known), "claude-opus-5-6");
+        assert_eq!(full_name("sonnet", &known), "claude-sonnet-5-5");
+        learn(&mut known, "claude-nova-1-0");
+        assert_eq!(full_name("nova", &known), "claude-nova-1-0", "a new family joins");
     }
 }

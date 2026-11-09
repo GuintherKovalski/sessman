@@ -216,10 +216,12 @@ pub struct App {
     right_tab: RightTab,
     /// AI-written one-line goals, keyed by session id.
     goals: Shared<Names>,
-    /// Session id whose goal is being summarized, and the pending result.
-    summarizing: Option<(String, Receiver<Result<String, String>>)>,
+    /// Sessions whose goal is being summarized, and the pending results.
+    summarizing: Vec<(String, Receiver<Result<String, String>>)>,
     /// New sessions whose name the helper model is writing after their first answer.
     naming: Vec<(String, Receiver<Result<String, String>>)>,
+    /// Goals being written for new sessions after their first answer, by session id.
+    first_goals: Vec<(String, Receiver<Result<String, String>>)>,
     /// Side questions per session id, oldest first; kept until closed with their ×.
     btw: HashMap<String, Vec<Btw>>,
     /// Text in the Info tab's "ask about this goal" field.
@@ -297,6 +299,11 @@ pub struct App {
     choices: HashMap<String, runner::Choice>,
     /// What the new session page has picked so far.
     new_choice: runner::Choice,
+    /// The model a session's runs get when it picked none, for the folder, Settings model and
+    /// extra arguments it was read with, and when (read again after a few seconds).
+    default_model: Option<((PathBuf, String, String), std::time::Instant, Option<crate::newinfo::Sourced>)>,
+    /// The models the dropdowns offer, by full name: the newest known per family.
+    model_ids: Vec<String>,
     seen_from: u64,
     /// Whether each session's work looks finished (verdict.rs), the checks under way, the
     /// checks that failed (id → the change they read; not retried until there is a newer one),
@@ -507,8 +514,9 @@ impl App {
             focus_prompt: false,
             right_tab: RightTab::Changes,
             goals: Shared::load(Names::goals_path()),
-            summarizing: None,
+            summarizing: Vec::new(),
             naming: Vec::new(),
+            first_goals: Vec::new(),
             btw: HashMap::new(),
             goal_question: String::new(),
             info_height: 0.0,
@@ -556,6 +564,8 @@ impl App {
             seen: HashMap::new(),
             choices: HashMap::new(),
             new_choice: runner::Choice::default(),
+            default_model: None,
+            model_ids: crate::newinfo::MODEL_IDS.map(String::from).to_vec(),
             seen_from: 0,
             verdicts: Shared::load(Verdicts::path()),
             judging: Vec::new(),
@@ -1802,10 +1812,40 @@ impl App {
     }
 
     fn poll_summary(&mut self) {
-        let Some((id, rx)) = &self.summarizing else { return };
-        if let Ok(result) = rx.try_recv() {
-            let id = id.clone();
-            self.summarizing = None;
+        let mut written = Vec::new();
+        let words = self.settings.goal_words.max(1) as usize;
+        self.first_goals.retain(|(id, rx)| match rx.try_recv() {
+            Ok(result) => {
+                if let Some(goal) = result.ok().and_then(|r| goal::from_summary(&r, words)) {
+                    written.push((id.clone(), goal));
+                }
+                false
+            }
+            Err(std::sync::mpsc::TryRecvError::Empty) => true,
+            Err(_) => false,
+        });
+        // A goal summarized by hand meanwhile (here or in another scope) is kept.
+        if !written.is_empty()
+            && let Err(e) = self.goals.change(|g| {
+                for (id, goal) in &written {
+                    if g.get(id).is_none() {
+                        g.set(id, goal);
+                    }
+                }
+            })
+        {
+            self.error = Some(format!("could not save goal: {e}"));
+        }
+        let mut done = Vec::new();
+        self.summarizing.retain(|(id, rx)| match rx.try_recv() {
+            Ok(result) => {
+                done.push((id.clone(), result));
+                false
+            }
+            Err(std::sync::mpsc::TryRecvError::Empty) => true,
+            Err(std::sync::mpsc::TryRecvError::Disconnected) => false,
+        });
+        for (id, result) in done {
             match result {
                 Ok(goal) => {
                     if let Err(e) = self.goals.change(|g| g.set(&id, &goal)) {
@@ -2111,6 +2151,12 @@ impl App {
         // After the first answer, the helper model names the session (unless it has a name).
         if run.new && !stopped && result.is_ok() && self.names.get(id).is_none() {
             self.naming.push((id.to_owned(), runner::name_session(self.ctx.clone(), &run.prompt, &run.answer)));
+        }
+        // ...and summarizes its context as the goal shown in Info (unless it has one).
+        if run.new && !stopped && result.is_ok() && self.goals.get(id).is_none() && !self.first_goals.iter().any(|(s, _)| s == id) {
+            let harness = Settings::harness(&self.settings.goal_harness, goal::GOAL_HARNESS);
+            let words = self.settings.goal_words.max(1);
+            self.first_goals.push((id.to_owned(), runner::first_goal(self.ctx.clone(), harness, words, &run.prompt, &run.answer)));
         }
         if stopped {
             run.stop.stop();
@@ -3452,7 +3498,7 @@ impl App {
             let running = self.open_running();
             let status = if running { "Starting…" } else { "Type your first prompt below." };
             if let Some((_, info)) = &self.new_info {
-                crate::newinfo::show(ui, &dir, info, &mut self.new_choice, !running, status);
+                crate::newinfo::show(ui, &dir, info, &mut self.new_choice, &self.model_ids, !running, status);
             }
             return;
         }
@@ -3779,7 +3825,56 @@ impl App {
         }
     }
 
+    /// The model a run in `dir` gets when its session picked none (Settings, extra arguments,
+    /// `ANTHROPIC_MODEL`, then Claude Code's settings files); `None` = Claude Code's default.
+    fn default_model(&mut self, dir: &std::path::Path) -> Option<crate::newinfo::Sourced> {
+        let key = (dir.to_path_buf(), self.settings.model.clone(), self.settings.extra_args.clone());
+        if let Some((k, at, m)) = &self.default_model
+            && *k == key
+            && at.elapsed() < std::time::Duration::from_secs(5)
+        {
+            return m.clone();
+        }
+        let home = PathBuf::from(std::env::var("HOME").unwrap_or_default());
+        let extra: Vec<String> = key.2.split_whitespace().map(str::to_owned).collect();
+        let scope = crate::newinfo::Scope { model: &key.1, extra: &extra };
+        let m = crate::newinfo::default_model(dir, &home, &scope, &|k| std::env::var(k).ok());
+        self.default_model = Some((key, std::time::Instant::now(), m.clone()));
+        m
+    }
+
+    /// The model picked for the open session (empty = the default): the new session page's
+    /// pick until its first prompt, then the session's own.
+    fn open_model_choice(&self) -> String {
+        match self.open_id() {
+            Some(id) => self.choices.get(&id).map(|c| c.model.clone()).unwrap_or_default(),
+            None => self.new_choice.model.clone(),
+        }
+    }
+
+    /// Picks `model` for the open session (empty = the default); its next runs use it.
+    fn set_open_model(&mut self, model: String) {
+        let Some(id) = self.open_id() else {
+            self.new_choice.model = model;
+            return;
+        };
+        let c = self.choices.entry(id.clone()).or_default();
+        c.model = model;
+        if c.is_empty() {
+            self.choices.remove(&id);
+        }
+        self.save_state();
+    }
+
     fn info(&mut self, ui: &mut egui::Ui) {
+        let dir = self.new_session.clone().or_else(|| self.open.as_ref().and_then(|s| s.cwd.clone()));
+        let default_model = dir.map(|d| self.default_model(&d));
+        if let Some(m) = self.open.as_ref().and_then(|s| s.model.clone()) {
+            crate::newinfo::learn(&mut self.model_ids, &m);
+        }
+        let mut model_pick = self.open_model_choice();
+        let picked_before = model_pick.clone();
+        let model_editable = !self.open_running();
         let Some(s) = &self.open else {
             ui.label("Select a session to see its info");
             return;
@@ -3890,6 +3985,14 @@ impl App {
         let sections = egui::ScrollArea::vertical().auto_shrink(false).show(ui, |ui| {
             section(ui, "Goal");
             let goal = id.as_deref().and_then(|id| self.goals.get(id));
+            let busy = id.as_ref().is_some_and(|id| self.summarizing.iter().chain(&self.first_goals).any(|(sid, _)| sid == id));
+            let answered = s.messages.iter().any(|m| m.role != Role::User);
+            if busy {
+                ui.horizontal(|ui| {
+                    ui.spinner();
+                    ui.label("Summarizing…");
+                });
+            }
             match (goal, &id) {
                 (Some(raw), _) => {
                     let g = goal::parse(raw);
@@ -3906,29 +4009,40 @@ impl App {
                         }
                     }
                 }
-                (None, _) if s.prompts.is_empty() => {
-                    ui.label("No prompts yet");
+                (None, _) if busy => {}
+                (None, _) if answered => {
+                    ui.label(RichText::new("No goal summarized yet").weak());
                 }
                 (None, _) => {
-                    let first: String = s.prompts[0].chars().take(280).collect();
-                    ui.label(RichText::new(format!("First prompt: {first}…")).weak());
+                    ui.label(RichText::new("Goal will be summarized here after the first answer is generated on the session").weak());
                 }
             }
-            if let Some(id) = id.as_ref().filter(|_| !s.prompts.is_empty()) {
-                if self.summarizing.as_ref().is_some_and(|(sid, _)| sid == id) {
-                    ui.horizontal(|ui| {
-                        ui.spinner();
-                        ui.label("Summarizing…");
-                    });
-                } else {
-                    let label = if goal.is_some() { "Summarize again" } else { "Summarize goal" };
-                    let btn = ui.button(label).on_hover_text("Asks Claude Haiku for the goal and a checklist of subgoals (uses a little of your usage)");
-                    start_summary = btn.clicked();
-                }
+            // Once it has answers, a goal can be asked for (again): older sessions, a failed summary.
+            if id.is_some() && answered && !busy {
+                let label = if goal.is_some() { "Summarize again" } else { "Summarize goal" };
+                let btn = ui.button(label).on_hover_text("Asks Claude Haiku for the goal and a checklist of subgoals (uses a little of your usage)");
+                start_summary = btn.clicked();
             }
 
             section(ui, "Model");
-            ui.label(RichText::new(s.model.as_deref().unwrap_or("unknown yet")).monospace());
+            // What the next prompt runs with: the session's own pick, else the default. Runs
+            // resume the same session, so switching keeps the conversation.
+            let default_model = default_model.flatten();
+            ui.horizontal_wrapped(|ui| {
+                crate::newinfo::model_picker(ui, "info-model", &mut model_pick, default_model.as_ref().map(|m| m.value.as_str()), &self.model_ids, model_editable);
+                let note = match &default_model {
+                    _ if !model_pick.is_empty() => "(this session; later prompts keep it)".to_owned(),
+                    Some(m) => format!("({})", m.from),
+                    None => "(Claude Code's default)".to_owned(),
+                };
+                ui.label(RichText::new(note).weak().small());
+            });
+            if !model_editable {
+                ui.label(RichText::new("Can be changed once this run ends").weak().small());
+            }
+            if let Some(m) = &s.model {
+                ui.label(RichText::new(format!("Latest reply: {m}")).weak().small().monospace());
+            }
 
             section(ui, "Context");
             let exact = id.as_ref().and_then(|id| status::load(&status::dir().join(format!("{id}.json"))));
@@ -3988,8 +4102,11 @@ impl App {
             self.btw.entry(id.clone()).or_default().push(Btw { question, answer: None, rx: Some(rx) });
         }
         if let (true, Some(id)) = (start_summary, id) {
-            let rx = runner::summarize_goal(ui.ctx().clone(), session::digest(&s.messages, 400, 12_000));
-            self.summarizing = Some((id, rx));
+            let rx = runner::summarize_goal(ui.ctx().clone(), self.settings.goal_words.max(1), session::digest(&s.messages, 400, 12_000));
+            self.summarizing.push((id, rx));
+        }
+        if model_pick != picked_before {
+            self.set_open_model(model_pick);
         }
     }
 
@@ -4451,7 +4568,10 @@ fn session_bubble(ui: &mut egui::Ui, selected: bool, title: &str, note: Option<&
         (w, t) => {
             let mut job = egui::text::LayoutJob::default();
             if let Some(v) = t {
-                job.append(v.label(), 0.0, egui::TextFormat::simple(small.clone(), tag_color(v)));
+                // Only the icon takes the state's color; its word reads as ordinary text.
+                let (icon, word) = v.label().split_once(' ').unwrap_or((v.label(), ""));
+                job.append(icon, 0.0, egui::TextFormat::simple(small.clone(), tag_color(v)));
+                job.append(word, 3.0, egui::TextFormat::simple(small.clone(), ui.visuals().text_color()));
             }
             if let Some(w) = w {
                 job.append(w, if t.is_some() { 6.0 } else { 0.0 }, egui::TextFormat::simple(small.clone(), ui.visuals().weak_text_color()));

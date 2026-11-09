@@ -249,7 +249,15 @@ opened; clicking "All sessions" again comes back to it.
     button asks Claude Haiku (a little of your usage) for the goal plus a **checklist of 3–7
     subgoals**, ticked where the conversation shows they're done, with "N of M done". You can
     tick and untick items yourself; that is saved.
-  - **Model** of the latest reply.
+  - **Model**: what the next prompt runs with, by its full name as Claude Code reports it
+    (`claude-opus-5-5`; an alias in Settings shows as its model, and a reply on a newer model
+    of a family moves the list on). Before any reply (a new session) it shows the
+    default and where it comes from (scope's Settings, the extra arguments, `ANTHROPIC_MODEL`,
+    then Claude Code's settings files), the same pick as the new session page. While the
+    session isn't running, the dropdown switches its model: the next prompts resume the same
+    session (`--resume <id> --model <m>`, same id, whole conversation kept) with it, and the
+    pick is kept per session in `state.json` (`choices`). Picking the default again drops it.
+    Under it, the model of the latest reply.
   - **Context**: tokens in context vs the window size (e.g. 204k / 1.0M).
   - **Usage limits**: your 5-hour and weekly limits with time until reset. Claude Code only
     shares these with its status line, so click **Enable** once: it sets scope as Claude
