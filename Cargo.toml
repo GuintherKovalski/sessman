@@ -20,7 +20,7 @@ cpal = "0.16"
 whisper-rs = { version = "0.15", features = ["metal"] }
 objc2 = "0.6"
 block2 = "0.6"
-objc2-foundation = { version = "0.3", features = ["NSString", "NSDictionary", "NSBundle", "NSError", "NSURL", "NSArray", "NSFileManager", "NSError", "NSData"] }
+objc2-foundation = { version = "0.3", features = ["NSString", "NSUserNotification", "NSDictionary", "NSBundle", "NSError", "NSURL", "NSArray", "NSFileManager", "NSError", "NSData"] }
 objc2-user-notifications = { version = "0.3", features = ["UNUserNotificationCenter", "UNNotification", "UNNotificationContent", "UNNotificationRequest", "UNNotificationResponse", "UNNotificationSound", "UNNotificationTrigger", "block2"] }
 objc2-app-kit = { version = "0.3", features = ["NSOpenPanel", "NSSavePanel", "NSPanel", "NSWindow", "NSResponder", "NSApplication", "NSPasteboard", "NSPasteboardItem", "NSEvent", "block2"] }
 

@@ -351,9 +351,11 @@ on), a macOS notification with scope's icon: the session's name as title, how it
 subtitle (✔ done, ✋ needs you, ⚠ blocked: its verdict, so it waits the few seconds the
 helper model takes; ✖ failed; ✔ finished when tagging is off) and the verdict's sentence.
 Clicking it brings scope forward with that session open. Not sent for a session you are
-looking at, nor for a run stopped with Ctrl+C. macOS asks once whether scope may notify;
-bundles under `/tmp` (test instances) are refused by macOS and fall back to `osascript`
-(Script Editor's icon, no click-through), as does a bare `cargo run` binary.
+looking at, nor for a run stopped with Ctrl+C. A Developer ID signed scope.app uses the User
+Notifications framework (macOS asks once whether scope may notify); macOS refuses that to an
+ad-hoc signed one (built with `scripts/bundle.sh`, test instances), which posts through the
+older NSUserNotificationCenter instead, with the same icon and click. A bare `cargo run`
+binary has no bundle and falls back to `osascript` (Script Editor's icon, no click-through).
 
 ### Restarting
 Closing and opening scope brings everything back: window size and position, panel widths,
