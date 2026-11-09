@@ -483,14 +483,14 @@ pub fn btw(ctx: eframe::egui::Context, id: String, cwd: Option<PathBuf>, questio
 
 /// Asks a small model for the session goal and a checklist of subgoals (format in goal.rs).
 /// Uses --no-session-persistence so the summary itself doesn't become a session.
-pub fn summarize_goal(ctx: eframe::egui::Context, digest: String) -> Receiver<Result<String, String>> {
+pub fn summarize_goal(ctx: eframe::egui::Context, words: u32, digest: String) -> Receiver<Result<String, String>> {
     let prompt = format!(
         "Below is a digest of a coding session between a USER and CLAUDE (an AI coding assistant).\n\
          Write the session's overall goal and a checklist of 3 to 7 concrete subgoals.\n\
          Mark a subgoal [x] when CLAUDE reported it done (e.g. it built, committed, verified or \
          shipped it) or the USER moved on to build on it; mark [ ] only if it is still open.\n\
          Keep each subgoal under 12 words. Reply in exactly this format and nothing else:\n\n\
-         GOAL: <one or two short sentences, at most 50 words>\n\
+         GOAL: <one or two short sentences, at most {words} words>\n\
          - [x] <completed subgoal>\n\
          - [ ] <open subgoal>\n\n\
          Session digest:\n{digest}"
@@ -499,20 +499,20 @@ pub fn summarize_goal(ctx: eframe::egui::Context, digest: String) -> Receiver<Re
 }
 
 /// Asks the helper model for a new session's goal from its first prompt and answer: a summary
-/// of the context in at most `goal::FIRST_GOAL_WORDS` words, no checklist (that comes with
-/// Info → Summarize again, once there is more to go on).
-pub fn first_goal(ctx: eframe::egui::Context, prompt: &str, answer: &str) -> Receiver<Result<String, String>> {
+/// of the context in at most `words` words, no checklist (that comes with Info → Summarize
+/// again, once there is more to go on). `harness` is Settings → Harness → Session goal.
+pub fn first_goal(ctx: eframe::egui::Context, harness: &str, words: u32, prompt: &str, answer: &str) -> Receiver<Result<String, String>> {
     let cut = |t: &str, n: usize| t.chars().take(n).collect::<String>();
-    let prompt = format!(
-        "Summarize the context of this coding session in at most {} words: what the USER wants \
-         done and why, and what CLAUDE's first answer established (plan, findings, constraints). \
-         Plain prose, one paragraph, no preamble, no markdown. Reply with the summary only.\n\n\
-         USER:\n{}\n\nCLAUDE:\n{}",
-        crate::goal::FIRST_GOAL_WORDS,
-        cut(prompt, 4000),
-        cut(answer, 4000)
-    );
+    let prompt = format!("{}\n\n{}\n\nUSER:\n{}\n\nCLAUDE:\n{}", harness.trim(), first_goal_format(words), cut(prompt, 4000), cut(answer, 4000));
     ask_haiku(ctx, prompt)
+}
+
+/// The fixed part of the first goal request, after the harness.
+pub fn first_goal_format(words: u32) -> String {
+    // Models overshoot a word limit, so this asks for less and the cut (goal::from_summary) is
+    // the hard limit.
+    let aim = (words * 3 / 4).max(1);
+    format!("Reply with the summary only, in at most {words} words: aim for about {aim}, and end on a complete sentence.")
 }
 
 /// Asks the helper model for a short name for a new session, from its first prompt and answer.

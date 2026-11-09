@@ -68,6 +68,10 @@ pub struct Settings {
     pub orchestration_harness: String,
     pub question_harness: String,
     pub search_harness: String,
+    pub goal_harness: String,
+    /// Most words in a session's goal (the one written after the first answer, and the goal
+    /// line of Summarize again).
+    pub goal_words: u32,
     /// Model for workspace orchestration; empty = the helper model.
     pub orchestration_model: String,
     /// Minutes between automatic orchestration updates while there is new activity; 0 = only
@@ -110,6 +114,8 @@ impl Default for Settings {
             orchestration_harness: crate::orchestration::DEFAULT_HARNESS.into(),
             question_harness: crate::goal::QUESTION_HARNESS.into(),
             search_harness: crate::search::DEFAULT_HARNESS.into(),
+            goal_harness: crate::goal::GOAL_HARNESS.into(),
+            goal_words: crate::goal::GOAL_WORDS,
             orchestration_model: String::new(),
             orchestration_every: 10,
             stale_after_hours: 24,
@@ -419,6 +425,18 @@ pub fn ui(ui: &mut egui::Ui, s: &mut Settings, filter: &mut String, about: &mut 
             }
             harness_field(ui, &mut s.question_harness);
         });
+        page.row("Session goal (right panel)", "What the helper model is told when it writes a new session's goal after the first answer; the word limit, prompt and answer follow", s.goal_harness != defaults.goal_harness, |ui, reset| {
+            if reset {
+                s.goal_harness = defaults.goal_harness.clone();
+            }
+            harness_field(ui, &mut s.goal_harness);
+        });
+        page.row("Goal length (words)", "Most words in a session's goal, after the first answer and in Summarize again", s.goal_words != defaults.goal_words, |ui, reset| {
+            if reset {
+                s.goal_words = defaults.goal_words;
+            }
+            ui.add(egui::Slider::new(&mut s.goal_words, 10..=100));
+        });
         page.row("Finding sessions (left panel)", "What the helper model is told when Enter in the search asks it; the query, reply format and session list follow", s.search_harness != defaults.search_harness, |ui, reset| {
             if reset {
                 s.search_harness = defaults.search_harness.clone();
@@ -587,6 +605,7 @@ mod tests {
     fn harness_falls_back_to_its_default_when_emptied() {
         let s = Settings::default();
         assert_eq!(s.search_harness, crate::search::DEFAULT_HARNESS);
+        assert_eq!((s.goal_harness.as_str(), s.goal_words), (crate::goal::GOAL_HARNESS, 25));
         assert_eq!(Settings::harness("  \n", "D"), "D");
         assert_eq!(Settings::harness("mine", "D"), "mine");
         assert!(matches("harness", "Harness", "Scope orchestration"));

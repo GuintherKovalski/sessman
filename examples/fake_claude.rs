@@ -198,7 +198,7 @@ fn helper(fake: &Path, args: &[String], prompt: &str) -> i32 {
         "overview"
     } else if prompt.contains("Answer the developer's QUESTION") {
         "ask"
-    } else if prompt.contains("Summarize the context of this coding session") {
+    } else if prompt.contains("Reply with the summary only, in at most") {
         "first-goal"
     } else if prompt.contains("Name this coding session") {
         "name"

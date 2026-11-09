@@ -1729,9 +1729,10 @@ impl App {
 
     fn poll_summary(&mut self) {
         let mut written = Vec::new();
+        let words = self.settings.goal_words.max(1) as usize;
         self.first_goals.retain(|(id, rx)| match rx.try_recv() {
             Ok(result) => {
-                if let Some(goal) = result.ok().and_then(|r| goal::from_summary(&r, goal::FIRST_GOAL_WORDS)) {
+                if let Some(goal) = result.ok().and_then(|r| goal::from_summary(&r, words)) {
                     written.push((id.clone(), goal));
                 }
                 false
@@ -2060,7 +2061,9 @@ impl App {
         }
         // ...and summarizes its context as the goal shown in Info (unless it has one).
         if run.new && !stopped && result.is_ok() && self.goals.get(id).is_none() {
-            self.first_goals.push((id.to_owned(), runner::first_goal(self.ctx.clone(), &run.prompt, &run.answer)));
+            let harness = Settings::harness(&self.settings.goal_harness, goal::GOAL_HARNESS);
+            let words = self.settings.goal_words.max(1);
+            self.first_goals.push((id.to_owned(), runner::first_goal(self.ctx.clone(), harness, words, &run.prompt, &run.answer)));
         }
         if stopped {
             run.stop.stop();
@@ -3930,7 +3933,7 @@ impl App {
             self.btw.entry(id.clone()).or_default().push(Btw { question, answer: None, rx: Some(rx) });
         }
         if let (true, Some(id)) = (start_summary, id) {
-            let rx = runner::summarize_goal(ui.ctx().clone(), session::digest(&s.messages, 400, 12_000));
+            let rx = runner::summarize_goal(ui.ctx().clone(), self.settings.goal_words.max(1), session::digest(&s.messages, 400, 12_000));
             self.summarizing = Some((id, rx));
         }
     }

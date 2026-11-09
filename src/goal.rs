@@ -12,8 +12,12 @@
 /// Settings → Harness. The goal, its checklist and the question follow it.
 pub const QUESTION_HARNESS: &str = "Side question about this session (answer briefly; do not change any files).";
 
-/// Most words in the goal written after a new session's first answer.
-pub const FIRST_GOAL_WORDS: usize = 50;
+/// What the helper model is told when it writes a new session's goal after the first answer,
+/// editable in Settings → Harness. The word limit, reply format, prompt and answer follow it.
+pub const GOAL_HARNESS: &str = "Summarize the context of this coding session: what the USER wants done and why, and what CLAUDE's first answer established (plan, findings, constraints). Plain prose, one sentence or two, no preamble, no markdown.";
+
+/// Most words in a goal by default (Settings → Harness → Goal length).
+pub const GOAL_WORDS: u32 = 25;
 
 /// The helper model's reply to `runner::first_goal` as a stored goal: one paragraph, cut to
 /// `max` words (models overshoot), or None when it is empty.
@@ -26,7 +30,12 @@ pub fn from_summary(reply: &str, max: usize) -> Option<String> {
     }
     let mut text = words[..words.len().min(max)].join(" ");
     if words.len() > max {
-        text = text.trim_end_matches([',', ';', ':', '-']).to_owned() + "…";
+        // Ends on the last whole sentence when that keeps most of it, else on "…".
+        let whole = words[..max].iter().rposition(|w| w.ends_with(['.', '!', '?'])).filter(|&i| i + 1 >= max / 2);
+        text = match whole {
+            Some(i) => words[..=i].join(" "),
+            None => text.trim_end_matches([',', ';', ':', '-']).to_owned() + "…",
+        };
     }
     Some(format!("GOAL: {text}"))
 }
@@ -92,6 +101,8 @@ mod tests {
         assert_eq!(from_summary("  Build a\nsession   manager. ", 50).as_deref(), Some("GOAL: Build a session manager."));
         assert_eq!(from_summary("GOAL: one two, three four", 3).as_deref(), Some("GOAL: one two, three…"));
         assert_eq!(from_summary("one two, three four", 2).as_deref(), Some("GOAL: one two…"));
+        assert_eq!(from_summary("One two three. Four five six seven", 5).as_deref(), Some("GOAL: One two three."), "ends on the last sentence");
+        assert_eq!(from_summary("One. Two three four five six", 5).as_deref(), Some("GOAL: One. Two three four five…"), "unless that drops most of it");
         assert_eq!(from_summary(" \n", 50), None);
         assert_eq!(parse(&from_summary("Do it.", 50).unwrap()).items.len(), 0);
     }
