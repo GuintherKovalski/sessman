@@ -1,7 +1,7 @@
 //! The Info tab's goal: summarizing it, ticking its checklist, asking about it.
 use super::harness::*;
 use eframe::egui::Key;
-use serde_json::json;
+use serde_json::{Value, json};
 
 fn info_of_one() -> Scope {
     let mut s = setup().session(session("s-a", "alpha prompt", 100).reply("alpha reply")).launch();
@@ -59,10 +59,53 @@ fn a_question_about_the_goal_is_answered_without_touching_the_session() {
 }
 
 #[test]
-fn a_new_session_has_no_goal_yet() {
+fn a_session_without_a_goal_can_ask_for_one() {
     let mut s = setup().session(session("s-a", "alpha prompt", 100)).launch();
     s.click("alpha prompt");
     s.click("Info");
-    assert!(s.sees("First prompt: alpha prompt…"));
+    assert!(s.sees("No goal summarized yet"));
+    assert!(!s.sees("First prompt: alpha prompt…"), "the first prompt isn't shown as a goal");
     assert!(s.sees("Summarize goal"));
+}
+
+#[test]
+fn the_model_shows_the_default_before_any_reply() {
+    let s = setup().session(session("s-a", "alpha prompt", 100)).setting("model", json!("opus"));
+    let folder = s.env().folder("newproj");
+    let mut s = s.workspaces_json(json!({"list": [{"name": "Work", "sessions": ["s-a"], "folder": folder}]})).launch();
+    s.click_first("WORK");
+    s.click("+  New session");
+    s.click("Info");
+    assert!(!s.sees("unknown yet"));
+    assert!(s.sees("(scope settings)"), "where the default comes from");
+    // The Info tab and the new session page pick the same thing.
+    s.click_first("opus (as set) ⏷");
+    s.click("sonnet");
+    assert!(!s.sees("opus (as set)"), "both show the pick");
+}
+
+#[test]
+fn the_model_of_a_session_can_be_switched_between_runs() {
+    let mut s = setup().session(session("s-a", "alpha prompt", 100).reply("alpha reply")).setting("model", json!("opus")).launch();
+    s.click("alpha prompt");
+    s.click("Info");
+    assert!(s.sees("opus (as set)"));
+    s.click("opus (as set)");
+    s.click("sonnet");
+    assert!(s.sees("(this session; later prompts keep it)"));
+    assert_eq!(s.env.config_json("state.json")["choices"]["s-a"]["model"], "sonnet", "kept across restarts");
+    s.send("next");
+    s.wait_to_see("Echo: next");
+    s.send("again");
+    s.wait_to_see("Echo: again");
+    let runs: Vec<Vec<Value>> = s.env.calls().into_iter().map(|c| c["args"].as_array().unwrap().clone()).filter(|a| a.iter().any(|x| x == "--resume")).filter(|a| !a.iter().any(|x| x == "--fork-session")).collect();
+    assert_eq!(runs.len(), 2);
+    for args in runs {
+        assert!(args.windows(2).any(|w| w[0] == "--resume" && w[1] == "s-a"), "the same session: {args:?}");
+        assert!(args.windows(2).any(|w| w[0] == "--model" && w[1] == "sonnet"), "{args:?}");
+    }
+    // Back to the default: the session's pick is dropped.
+    s.click("sonnet");
+    s.click("opus (as set)");
+    assert!(s.env.config_json("state.json")["choices"].get("s-a").is_none());
 }

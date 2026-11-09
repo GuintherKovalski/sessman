@@ -81,6 +81,16 @@ pub fn toggle(raw: &str, index: usize) -> String {
         .join("\n")
 }
 
+/// A question in Info → Ask about this goal: the harness, the goal and its checklist, then the
+/// question. It goes to a throwaway fork of the session, which has the whole conversation.
+pub fn question_prompt(harness: &str, goal: Option<&str>, question: &str) -> String {
+    let harness = harness.trim();
+    match goal {
+        Some(raw) => format!("{harness}\nThe session's goal and subgoal checklist:\n{raw}\n\nQuestion: {question}"),
+        None => format!("{harness}\n\nQuestion: {question}"),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

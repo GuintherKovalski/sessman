@@ -317,9 +317,10 @@ pub fn request(harness: &str, members: &[Member], digests: &[Option<String>], pr
          \"now\": \"what it is doing, or last did\", \"next\": \"its next step, or empty\"}],\n \
          \"attention\": [\"what needs the developer now; [] if nothing\"],\n \
          \"next\": [\"up to 4 next steps for the scope as a whole\"]}\n\
-         List every session below by its number. \"waiting\" means it needs the developer's input or \
-         review; \"blocked\" means it hit a problem it could not solve; \"done\" means its goal is met.\n",
+         List every session below by its number. \"working\" means it is running now; \"idle\" \
+         means it stopped with nothing pending. The others:\n",
     );
+    p.push_str(crate::verdict::MEANING);
     p.push_str(REFS);
     p.push('\n');
     if let Some(prev) = previous {
@@ -423,6 +424,40 @@ sessions, move their cards on the orchestration page, or start new sessions. To 
 \"to\" is \"top\", \"bottom\", \"up\", \"down\" or a position among the cards from 1. They are done in order, \
 right after your reply; above the block, say briefly what you are doing. Without a request to act, add no block.";
 
+/// The question request: the harness, how to answer and act, the current report, the last
+/// questions, the cards' order, a digest of each session, then the question.
+pub fn ask_request(harness: &str, members: &[Member], digests: &[String], bar: &[String], orch: Option<&Orchestration>, question: &str) -> String {
+    let ids: Vec<String> = members.iter().map(|m| m.id.clone()).collect();
+    let mut p = format!(
+        "{}\n\nAnswer the developer's QUESTION about this scope, briefly, in Markdown. Use the \
+         report and the sessions below; say so when they don't tell. {REFS}\n\n{ACTIONS}\n",
+        harness.trim()
+    );
+    if let Some(r) = orch.and_then(|o| o.report.as_ref()) {
+        p.push_str(&format!("\nCURRENT REPORT:\n{}\n", r.numbered(&ids)));
+    }
+    let recent: Vec<&Exchange> = orch.map(|o| o.log.iter().rev().take(3).rev().collect()).unwrap_or_default();
+    if !recent.is_empty() {
+        p.push_str("\nEARLIER QUESTIONS:\n");
+        for e in recent {
+            let short: String = e.answer.chars().take(600).collect();
+            p.push_str(&format!("Q: {}\nA: {}\n", e.question, number_ids(&short, &ids)));
+        }
+    }
+    let order: Vec<String> = bar.iter().filter_map(|id| ids.iter().position(|x| x == id)).map(|n| format!("[[{}]]", n + 1)).collect();
+    p.push_str(&format!("\nTHE CARDS on the orchestration page are in this order, top first: {}\n", order.join(", ")));
+    p.push_str("\nSESSIONS, newest first:\n");
+    for (n, (m, digest)) in members.iter().zip(digests).enumerate() {
+        p.push_str(&format!("\n## Session {}: {}\n", n + 1, m.title));
+        if let Some(g) = &m.goal {
+            p.push_str(&format!("Goal and checklist:\n{}\n", g.trim()));
+        }
+        p.push_str(digest);
+    }
+    p.push_str(&format!("\nQUESTION: {question}\n"));
+    p
+}
+
 /// Answers a question about the workspace on a thread, from the report, recent questions and a
 /// short digest of each session. `bar` is the workspace's sessions in the bar's order.
 pub fn ask(ctx: egui::Context, harness: String, model: String, members: Vec<Member>, bar: Vec<String>, orch: Option<Orchestration>, question: String) -> Receiver<Result<Answer, String>> {
@@ -430,35 +465,8 @@ pub fn ask(ctx: egui::Context, harness: String, model: String, members: Vec<Memb
     std::thread::spawn(move || {
         let members: Vec<Member> = members.into_iter().take(MAX_SESSIONS).collect();
         let ids: Vec<String> = members.iter().map(|m| m.id.clone()).collect();
-        let mut p = format!(
-            "{}\n\nAnswer the developer's QUESTION about this scope, briefly, in Markdown. Use the \
-             report and the sessions below; say so when they don't tell. {REFS}\n\n{ACTIONS}\n",
-            harness.trim()
-        );
-        if let Some(r) = orch.as_ref().and_then(|o| o.report.as_ref()) {
-            p.push_str(&format!("\nCURRENT REPORT:\n{}\n", r.numbered(&ids)));
-        }
-        let recent: Vec<&Exchange> = orch.as_ref().map(|o| o.log.iter().rev().take(3).rev().collect()).unwrap_or_default();
-        if !recent.is_empty() {
-            p.push_str("\nEARLIER QUESTIONS:\n");
-            for e in recent {
-                let short: String = e.answer.chars().take(600).collect();
-                p.push_str(&format!("Q: {}\nA: {}\n", e.question, number_ids(&short, &ids)));
-            }
-        }
-        let order: Vec<String> = bar.iter().filter_map(|id| ids.iter().position(|x| x == id)).map(|n| format!("[[{}]]", n + 1)).collect();
-        p.push_str(&format!("\nTHE CARDS on the orchestration page are in this order, top first: {}\n", order.join(", ")));
-        p.push_str("\nSESSIONS, newest first:\n");
-        for (n, m) in members.iter().enumerate() {
-            p.push_str(&format!("\n## Session {}: {}\n", n + 1, m.title));
-            if let Some(g) = &m.goal {
-                p.push_str(&format!("Goal and checklist:\n{}\n", g.trim()));
-            }
-            if let Ok(s) = session::load(&m.path) {
-                p.push_str(&session::digest(&s.messages, 200, 1_500));
-            }
-        }
-        p.push_str(&format!("\nQUESTION: {question}\n"));
+        let digests: Vec<String> = members.iter().map(|m| session::load(&m.path).map(|s| session::digest(&s.messages, 200, 1_500)).unwrap_or_default()).collect();
+        let p = ask_request(&harness, &members, &digests, &bar, orch.as_ref(), &question);
         let result = runner::ask_model(ctx.clone(), &model, p)
             .recv()
             .unwrap_or_else(|_| Err("the model stopped unexpectedly".into()))
@@ -885,7 +893,7 @@ struct Card<'a> {
 
 /// A session's tile, drawn like its tile on the Scopes overview: its name, then in small
 /// print what it is doing and what comes next, and at the bottom how it stands (✔ done,
-/// ✋ waiting, ⚠ blocked) on the left and when it was last touched, or a spinner while it
+/// ✋ needs you, ⚠ blocked) on the left and when it was last touched, or a spinner while it
 /// works, on the right. Clicking opens the session, dragging it onto another tile puts it
 /// before or after that one, the pencil renames it, and right-click has all of these. At least
 /// `height` tall; also returns how tall it would be on its own.
@@ -909,7 +917,7 @@ fn session_tile(ui: &mut egui::Ui, card: &Card, renaming: &mut Option<Rename>, h
     let newer = s.verdict.filter(|v| !s.running && v.at > covered && !v.why.is_empty());
     let status = if newer.is_some() { None } else { status };
     let mark = match state {
-        "waiting" => Some(("✋ waiting", pal.note)),
+        "waiting" => Some(("✋ needs you", pal.note)),
         "blocked" => Some(("⚠ blocked", pal.error)),
         "done" => Some(("✔ done", pal.add_fg)),
         "idle" => Some(("idle", v.weak_text_color())),
@@ -1009,7 +1017,17 @@ fn session_tile(ui: &mut egui::Ui, card: &Card, renaming: &mut Option<Rename>, h
                 }
                 if let Some((text, color)) = mark {
                     ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
-                        ui.label(RichText::new(text).small().color(color));
+                        // Only the icon takes the state's color; its word reads as ordinary text.
+                        let font = egui::TextStyle::Small.resolve(ui.style());
+                        let mut job = egui::text::LayoutJob::default();
+                        match text.split_once(' ') {
+                            Some((icon, word)) => {
+                                job.append(icon, 0.0, egui::TextFormat::simple(font.clone(), color));
+                                job.append(&format!(" {word}"), 0.0, egui::TextFormat::simple(font, ui.visuals().text_color()));
+                            }
+                            None => job.append(text, 0.0, egui::TextFormat::simple(font, color)),
+                        }
+                        ui.label(job);
                     });
                 }
             });

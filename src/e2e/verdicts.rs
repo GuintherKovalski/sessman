@@ -60,6 +60,6 @@ fn a_session_that_needs_you_says_so_on_its_orchestration_card() {
     s.click_first("WORK");
     s.click("Orchestration");
     s.wait_to_see("watching CI");
-    assert!(s.sees("waiting"), "the verdict's state, not the report's stale working");
+    assert!(s.sees("✋ needs you"), "the verdict's state, not the report's stale working");
     assert!(!s.sees("working"));
 }
