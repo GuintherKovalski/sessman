@@ -14,7 +14,7 @@ pub const QUESTION_HARNESS: &str = "Side question about this session (answer bri
 
 /// What the helper model is told when it writes a new session's goal after the first answer,
 /// editable in Settings → Harness. The word limit, reply format, prompt and answer follow it.
-pub const GOAL_HARNESS: &str = "Summarize the context of this coding session: what the USER wants done and why, and what CLAUDE's first answer established (plan, findings, constraints). Plain prose, one sentence or two, no preamble, no markdown.";
+pub const GOAL_HARNESS: &str = "Say what this coding session is about, as an ultra-concise status line: the task, then where it stands. Describe the work itself; never mention the user, the developer or Claude (no \"The user wants\", no \"Claude suggested\"). Telegraphic, like a ticket title, no preamble, no markdown. Example: \"Login redirect loop after OAuth callback. Cause found: stale session cookie; fix not applied yet.\"";
 
 /// Most words in a goal by default (Settings → Harness → Goal length).
 pub const GOAL_WORDS: u32 = 25;
