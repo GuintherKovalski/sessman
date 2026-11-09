@@ -18,6 +18,7 @@ use crate::settings::{self, Settings};
 use crate::shared::{self, Shared};
 use crate::state::{self, OpenFile, State, View, Views};
 use crate::status;
+use crate::templates;
 use crate::theme;
 use crate::verdict::{self, Verdict, Verdicts};
 use crate::workspaces::{self, Workspaces};
@@ -28,6 +29,9 @@ use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::mpsc::{self, Receiver, TryRecvError};
 use std::time::{SystemTime, UNIX_EPOCH};
+
+mod template_pages;
+use template_pages::composer_title;
 
 /// Height of the bar at the top of the window, where the macOS window buttons sit.
 pub const TITLE_BAR_HEIGHT: f32 = 28.0;
@@ -84,6 +88,53 @@ const UNDO_LIMIT: usize = 50;
 enum RightTab {
     Changes,
     Info,
+    Templates,
+}
+
+/// A page the main area shows over the conversation, from its own tab (like Settings).
+#[derive(Clone, Copy, PartialEq)]
+enum Page {
+    /// The template, skill or command picked in the Templates tab.
+    Template,
+    /// The template composer.
+    Composer,
+}
+
+/// A template, skill or command open in the main area (read-only), and the root it belongs to.
+struct TemplateView {
+    item: templates::Item,
+    root: PathBuf,
+    contents: Result<String, String>,
+    rendered: bool,
+}
+
+/// Create template: a pseudo session in the scope's root where Claude writes a prompt
+/// template (templates.rs). It is a real Claude Code session kept out of the list.
+struct Composer {
+    id: String,
+    root: PathBuf,
+    /// The templates folder, the only place its runs may write.
+    dir: PathBuf,
+    /// Its session file exists, so the next prompt resumes it.
+    started: bool,
+    session: Session,
+    run: Option<ComposerRun>,
+    input: String,
+    /// The template it wrote (or was opened on), and its text as last read.
+    template: Option<PathBuf>,
+    preview: Option<String>,
+    error: Option<String>,
+    /// Give its field the keyboard, with the cursor at the end, when it is next drawn.
+    focus: bool,
+}
+
+struct ComposerRun {
+    rx: Receiver<RunEvent>,
+    stop: runner::Stop,
+    live: String,
+    tool: Option<String>,
+    since: SystemTime,
+    stopped: bool,
 }
 
 /// Inline rename in progress: which session, the edited text, and whether it was just opened.
@@ -267,6 +318,14 @@ pub struct App {
     usage: Option<(Vec<status::Window>, SystemTime)>,
     usage_error: Option<String>,
     usage_busy: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    /// The composer's sessions, kept out of the session list (templates.rs).
+    template_store: Shared<templates::Store>,
+    /// The Templates tab's list: the root it was read for, when, and what it found.
+    template_items: Option<(PathBuf, std::time::Instant, Vec<templates::Item>)>,
+    template_view: Option<TemplateView>,
+    composer: Option<Composer>,
+    /// The page the main area shows instead of the conversation, if any (Settings aside).
+    page: Option<Page>,
 }
 
 /// A running `claude -p` for one session: its events, the reply being written, the tool it
@@ -403,12 +462,15 @@ impl App {
         let check_for_updates = settings.check_for_updates;
         let shared_changes = shared::watch(
             ctx.clone(),
-            vec![Workspaces::path(), Names::path(), Names::goals_path(), settings::path(), Overviews::path(), orchestration::Store::path(), Verdicts::path()],
+            vec![Workspaces::path(), Names::path(), Names::goals_path(), settings::path(), Overviews::path(), orchestration::Store::path(), Verdicts::path(), templates::Store::path()],
         );
         let usage_busy = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let template_store: Shared<templates::Store> = Shared::load(templates::Store::path());
+        let mut sessions = session::list(&session::projects_dir());
+        sessions.retain(|m| !template_store.sessions.contains_key(&m.id));
         let mut app = Self {
             ctx: ctx.clone(),
-            sessions: session::list(&session::projects_dir()),
+            sessions,
             selected: None,
             open: None,
             error: None,
@@ -503,6 +565,11 @@ impl App {
             orchestrations: Shared::load(orchestration::Store::path()),
             orch: orchestration::Jobs::default(),
             control: control::watch(ctx.clone()),
+            template_store,
+            template_items: None,
+            template_view: None,
+            composer: None,
+            page: None,
         };
         app.apply_settings();
         // Persist colors assigned on load to workspaces saved before colors existed.
@@ -638,6 +705,13 @@ impl App {
         self.overviews.refresh();
         self.orchestrations.refresh();
         self.verdicts.refresh();
+        if self.template_store.refresh() {
+            // A composer another scope started leaves the list too.
+            let store = &self.template_store;
+            if self.sessions.iter().any(|m| store.sessions.contains_key(&m.id)) {
+                let _ = self.poke_index.send(());
+            }
+        }
         if self.settings.refresh() {
             self.apply_settings();
         }
@@ -886,6 +960,7 @@ impl App {
         self.refine = None;
         self.refine_undo = None;
         self.settings_active = false;
+        self.page = None;
     }
 
     fn select(&mut self, i: usize) {
@@ -951,6 +1026,7 @@ impl App {
         self.orchestrating = false;
         self.main_tab = None;
         self.settings_active = false;
+        self.page = None;
     }
 
     /// The open workspace's orchestration page in the main area; the tab reopens on it.
@@ -960,6 +1036,7 @@ impl App {
         self.orchestrating = true;
         self.main_tab = None;
         self.settings_active = false;
+        self.page = None;
         self.sync_workspaces(None);
         if self.workspaces.set_last(Some(t), orchestration::LAST_KEY) {
             self.save_workspaces();
@@ -967,7 +1044,7 @@ impl App {
     }
 
     fn showing_orchestration(&self) -> bool {
-        self.orchestrating && self.tab.is_some() && self.open.is_none() && !(self.settings_active && self.settings_tab)
+        self.orchestrating && self.tab.is_some() && self.open.is_none() && !self.page_shown()
     }
 
     /// Workspace `w`'s sessions as the orchestrator reads them, newest first: new ones still
@@ -1508,7 +1585,7 @@ impl App {
 
     /// The main area shows the workspaces overview: All sessions with no session open.
     fn showing_overview(&self) -> bool {
-        self.tab.is_none() && self.open.is_none() && !(self.settings_active && self.settings_tab)
+        self.tab.is_none() && self.open.is_none() && !self.page_shown()
     }
 
     fn poll_overviews(&mut self) {
@@ -1868,6 +1945,9 @@ impl App {
         self.sync_workspaces(None);
         let current = self.selected.map(|i| (self.sessions[i].id.clone(), self.sessions[i].modified));
         self.sessions = snap.sessions;
+        // The template composer's sessions aren't listed anywhere.
+        let store = &self.template_store;
+        self.sessions.retain(|m| !store.sessions.contains_key(&m.id));
         self.index = snap.index;
         let sessions = &self.sessions;
         self.unlisted.retain(|(id, ..)| !sessions.iter().any(|s| &s.id == id));
@@ -2350,6 +2430,12 @@ impl App {
     fn open_settings(&mut self) {
         self.settings_tab = true;
         self.settings_active = true;
+        self.page = None;
+    }
+
+    /// Whether the main area shows Settings or a template page instead of what is open.
+    fn page_shown(&self) -> bool {
+        (self.settings_active && self.settings_tab) || self.page.is_some()
     }
 
     fn sidebar(&mut self, ui: &mut egui::Ui) {
@@ -3683,11 +3769,13 @@ impl App {
         ui.horizontal(|ui| {
             ui.selectable_value(&mut self.right_tab, RightTab::Changes, RichText::new("Changes").heading());
             ui.selectable_value(&mut self.right_tab, RightTab::Info, RichText::new("Info").heading());
+            ui.selectable_value(&mut self.right_tab, RightTab::Templates, RichText::new("Templates").heading());
         });
         ui.separator();
         match self.right_tab {
             RightTab::Changes => self.diffs(ui),
             RightTab::Info => self.info(ui),
+            RightTab::Templates => self.templates_panel(ui),
         }
     }
 
@@ -3916,6 +4004,7 @@ impl App {
         };
         self.main_tab = Some(i);
         self.settings_active = false;
+        self.page = None;
     }
 
     fn close_file(&mut self, i: usize) {
@@ -4051,28 +4140,48 @@ impl App {
     fn main_tabs(&mut self, ui: &mut egui::Ui) {
         let mut close = None;
         let mut close_settings = false;
+        let mut close_page = None;
         ui.horizontal_wrapped(|ui| {
             ui.spacing_mut().item_spacing.x = 4.0;
-            let main_active = self.main_tab.is_none() && !self.settings_active;
+            let main_active = self.main_tab.is_none() && !self.page_shown();
             if ui.selectable_label(main_active, RichText::new("Main").strong()).clicked() {
                 self.main_tab = None;
                 self.settings_active = false;
+                self.page = None;
             }
             for (i, t) in self.file_tabs.iter().enumerate() {
                 let (name, _) = diffview::split_path(&t.path);
-                let active = self.main_tab == Some(i) && !self.settings_active;
+                let active = self.main_tab == Some(i) && !self.page_shown();
                 match closable_tab(ui, ("file-tab", i), RichText::new(name).monospace(), active, &t.path) {
                     TabClick::Select => {
                         self.main_tab = Some(i);
                         self.settings_active = false;
+                        self.page = None;
                     }
                     TabClick::Close => close = Some(i),
                     TabClick::None => {}
                 }
             }
+            let pages = [
+                self.template_view.as_ref().map(|v| (Page::Template, format!("📝 {}", v.item.name), v.item.path.display().to_string())),
+                self.composer.as_ref().map(|c| (Page::Composer, composer_title(c), format!("Prompt template composer, in {}", c.dir.display()))),
+            ];
+            for (page, title, hover) in pages.into_iter().flatten() {
+                match closable_tab(ui, ("page-tab", page == Page::Composer), RichText::new(title), self.page == Some(page), &hover) {
+                    TabClick::Select => {
+                        self.page = Some(page);
+                        self.settings_active = false;
+                    }
+                    TabClick::Close => close_page = Some(page),
+                    TabClick::None => {}
+                }
+            }
             if self.settings_tab {
                 match closable_tab(ui, "settings-tab", RichText::new("⚙ Settings"), self.settings_active, "Settings") {
-                    TabClick::Select => self.settings_active = true,
+                    TabClick::Select => {
+                        self.settings_active = true;
+                        self.page = None;
+                    }
                     TabClick::Close => close_settings = true,
                     TabClick::None => {}
                 }
@@ -4084,6 +4193,18 @@ impl App {
         if close_settings {
             self.settings_tab = false;
             self.settings_active = false;
+        }
+        match close_page {
+            Some(Page::Template) => self.template_view = None,
+            Some(Page::Composer) => {
+                if let Some(run) = self.composer.take().and_then(|c| c.run) {
+                    run.stop.stop();
+                }
+            }
+            None => {}
+        }
+        if close_page.is_some() && close_page == self.page {
+            self.page = None;
         }
     }
 
@@ -4853,6 +4974,7 @@ impl eframe::App for App {
         self.poll_refine();
         self.poll_dictation();
         self.poll_usage();
+        self.poll_composer();
     }
 
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
@@ -4870,12 +4992,17 @@ impl eframe::App for App {
         egui::Panel::right("diffs").default_size(420.0).resizable(true).show(ui, |ui| self.right_panel(ui));
         let mut find_bar = None;
         egui::CentralPanel::default().show(ui, |ui| {
-            if !self.file_tabs.is_empty() || self.settings_tab {
+            if !self.file_tabs.is_empty() || self.settings_tab || self.template_view.is_some() || self.composer.is_some() {
                 egui::Panel::top("main-tabs").show_separator_line(true).resizable(false).show(ui, |ui| self.main_tabs(ui));
             }
             if self.settings_active && self.settings_tab {
                 self.settings_page(ui);
                 return;
+            }
+            match self.page {
+                Some(Page::Template) if self.template_view.is_some() => return self.template_page(ui),
+                Some(Page::Composer) if self.composer.is_some() => return self.composer_page(ui),
+                _ => {}
             }
             if self.showing_overview() {
                 self.overview(ui);

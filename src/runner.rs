@@ -282,6 +282,18 @@ pub fn send(ctx: eframe::egui::Context, id: String, cwd: Option<PathBuf>, prompt
     spawn_stream(ctx, cmd, input)
 }
 
+/// A run of the template composer (templates.rs): like [`send`], in the scope's root, with
+/// `setup` (its instructions and cut-down tools) and none of scope's own commands.
+pub fn compose(ctx: eframe::egui::Context, id: String, root: PathBuf, prompt: String, new: bool, setup: Vec<String>) -> (Receiver<RunEvent>, Stop) {
+    let c = claude();
+    let mut cmd = command(&c);
+    cmd.args(setup);
+    cmd.args(send_args(&c, &Choice::default(), &id, &prompt, new));
+    cmd.current_dir(root);
+    let input = crate::images::has_images(&prompt).then_some(prompt);
+    spawn_stream(ctx, cmd, input)
+}
+
 /// Runs `cmd` on a thread in its own process group (so Stop reaches its children too),
 /// streaming its events. With `input`, a prompt with images, it is written to claude's stdin.
 fn spawn_stream(ctx: eframe::egui::Context, mut cmd: Command, input: Option<String>) -> (Receiver<RunEvent>, Stop) {

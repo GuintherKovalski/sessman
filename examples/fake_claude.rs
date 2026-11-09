@@ -10,7 +10,9 @@
 //!   `notes.txt` in the session's folder, `SHELL` (with `HOLD`) runs `sleep 30` the way
 //!   Claude Code's Bash tool does (a shell that `eval`s it, its call in the session file)
 //!   while it waits, `FAIL` ends with an error, `NOFILE` fails before
-//!   writing anything (so a new session never gets a file). With `--input-format stream-json`
+//!   writing anything (so a new session never gets a file), `TEMPLATE` writes
+//!   `fake-template.md` in the templates folder its instructions name (the template composer).
+//!   With `--input-format stream-json`
 //!   the prompt is the user message on stdin: its text, then `(N images)` when it has images,
 //!   and the session file gets its content blocks as they came.
 //! - A helper question (`--no-session-persistence`) gets a fixed reply in the format its
@@ -172,6 +174,17 @@ fn run(home: &Path, fake: &Path, args: &[String], prompt: &str, content: Value) 
         let path = cwd.join("notes.txt");
         let _ = std::fs::write(&path, "after\n");
         content.push(json!({"type": "tool_use", "name": "Edit", "input": {"file_path": path.display().to_string(), "old_string": "before", "new_string": "after"}}));
+    }
+    if prompt.contains("TEMPLATE") {
+        // The template composer's run: it says where templates go (templates.rs).
+        let folder = value_after(args, "--append-system-prompt").and_then(|p| p.lines().find_map(|l| l.strip_prefix("Templates folder: ")));
+        if let Some(dir) = folder.map(PathBuf::from) {
+            let path = dir.join("fake-template.md");
+            let text = format!("---\nname: Fake template\ndescription: Made by the fake claude\n---\nDo the fake thing to {{{{target}}}}. Asked: {first}\n");
+            let _ = std::fs::create_dir_all(&dir);
+            let _ = std::fs::write(&path, &text);
+            content.push(json!({"type": "tool_use", "name": "Write", "input": {"file_path": path.display().to_string(), "content": text}}));
+        }
     }
     let assistant = json!({
         "type": "assistant",

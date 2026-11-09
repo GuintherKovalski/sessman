@@ -24,6 +24,7 @@ mod shared;
 mod state;
 mod status;
 mod style;
+mod templates;
 mod theme;
 mod update;
 mod verdict;

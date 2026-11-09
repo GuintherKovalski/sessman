@@ -233,7 +233,7 @@ opened; clicking "All sessions" again comes back to it.
     Claude works in the session. Two prompts left next to each other merge into one card, as
     consecutive prompts always do.
 
-### Right: Changes and Info tabs
+### Right: Changes, Info and Templates tabs
 - **Changes**: one card per changed file, in order of its first change: file name, folder,
   and `+added -removed` counts, then each edit as diff hunks with syntax highlighting, green /
   red tinted rows for added / removed lines, and unchanged stretches collapsed to 3 lines of
@@ -260,6 +260,41 @@ opened; clicking "All sessions" again comes back to it.
     with the goal and checklist, to the session's own model with its full context, like
     Claude Code's `/btw`: nothing is added to the session. The answer shows just above the field
     until you click Dismiss.
+- **Templates**: what the scope's root folder offers to prompt with. The root is the scope's
+  folder (in "All sessions", that of the open session's scope, else the open session's own
+  folder). Listed by kind, each with its name and description (front matter `name` /
+  `description`, else the file's name and first line), read again every 2 s while shown:
+  - **Prompt templates**: the `.md` files in `<root>/.scope/templates/` (Settings → Prompt
+    templates folder);
+  - **Skills** (every `SKILL.md` under `<root>/.claude/skills/`, nested folders included) and
+    **Commands** (`<root>/.claude/commands/**/*.md`, nested ones as `dir:name`), also those of
+    every subproject under the root with a `.claude/` of its own (up to 5 folders deep, not in
+    hidden, `target*`, `node_modules`, build or vendor folders; looked for every 30 s). A
+    name found in several places (copies of the repo, worktrees) is listed once, where it is
+    nearest the root;
+  - your own skills and commands from `~/.claude/`.
+  Each kind is a tree of groups that open and close (closed at first): a subproject (its folder),
+  a nested folder, and the names sharing a prefix (`speckit-plan`, `speckit-tasks` under
+  **speckit (2)**, shown as `plan`, `tasks`).
+  Click one to show it in the main area, in a **📝 name** tab (Rendered / Source, **Copy**).
+  **Use in prompt** puts a template's prompt (without its front matter) in the open session's
+  input, or `/<name> ` for a skill or command. **✎ Change with Claude** (templates) opens the
+  composer on it, in the session that wrote it when scope knows it.
+  - **✨ Create template** opens the composer in the main area, in a **✨ New template** tab (then
+    named after the template): a pseudo session where you tell Claude what the template should
+    do, over as many prompts as it takes. Claude writes the file; as soon as it is there it shows
+    at the top of the page (with **Open** and **Use in prompt**), above the conversation, and
+    joins the list. scope itself never writes it: each run lets Claude read anything but write
+    only Markdown files in the templates folder, plus (Settings → Keep templates out of git, on
+    by default) a `/.scope/templates/` line in the root's `.gitignore`; no shell, anything else
+    refused.
+  - **Refer to a session** by its name as `@[name]` (**@ Session** picks one from the open
+    scope): Claude gets where that session's transcript is and a digest of it, and is told to
+    write a prompt that would reproduce what it did (goal, context, the steps that worked, how
+    to check it), with placeholders like `{{target_file}}` for what changes. A name that isn't
+    a session is refused before anything runs.
+  - The composer's sessions are real Claude Code sessions in the root, kept out of the session
+    list (and search, overviews, `scope list`) by `~/.config/scope/templates.json`.
 
 ### Settings
 **⚙ Settings** opens as a tab in the main area (close it with its `×`). A search field filters
@@ -279,7 +314,8 @@ of it.
 - **Sessions and scopes**: tag finished sessions, notify when a run finishes in the
   background, restore the previous state at start, confirm before deleting a scope or a
   message, the idle hours after which the overview offers Finish session, the Jira URL ticket
-  keys link to (e.g. `https://acme.atlassian.net`).
+  keys link to (e.g. `https://acme.atlassian.net`), the prompt templates folder (relative to
+  the scope's root) and whether Claude also adds it to the root's `.gitignore`.
 - **AI helpers and harnesses**: the helper model, then one card per place you ask something,
   each saying where it is, which model answers, what it sees and gives back, with its harness
   (the instructions it starts from: editable, empty = default, ↺ resets; *default* / *edited*
@@ -360,6 +396,8 @@ What each window shows (its open tab and session, panels, drafts) stays its own.
 | Bare URLs | Turned into Markdown autolinks before rendering (not inside code or existing links). |
 | Workspaces and their colors | scope's own file: `~/.config/scope/workspaces.json`. |
 | Custom session names | scope's own file: `~/.config/scope/names.json`. |
+| Templates tab | Reads `<root>/.scope/templates/*.md`, `<root>/.claude/skills`, `<root>/.claude/commands` and the same under `~/.claude`. |
+| Template composer | `claude -p [extra args] --append-system-prompt <how to write a template> --tools Read,Grep,Glob,Write,Edit --allowedTools Read,Grep,Glob,Edit(//<templates>/**)[,Edit(//<root>/.gitignore)] --permission-mode dontAsk --session-id/--resume <id> --output-format stream-json …` in the root; `@[name]` adds a `<referenced-sessions>` block (transcript path, folder, digest) to the prompt, which the composer doesn't show. Its session ids (with their root and template): `~/.config/scope/templates.json`. |
 
 scope writes to Claude's session files only when you ask it to, with **Move to Trash** and a
 message's **🗑**, which keeps a backup first. Everything it adds (workspaces, names, goals,
@@ -380,6 +418,7 @@ Planned features for the next rounds are in [ROADMAP.md](ROADMAP.md).
 src/
 ├── main.rs        window setup
 ├── app.rs         the panels, tabs, drag-and-drop, prompt input (queue, stop, refine), pinned prompt
+│   └── template_pages.rs  the Templates tab, a template in the main area, the composer page
 ├── session.rs     finds and parses Claude Code session files
 ├── history.rs     Up/Down prompt history
 ├── images.rs      images in prompts: markers, the images folder, clipboard, stream-json message
@@ -398,6 +437,7 @@ src/
 ├── runner.rs      runs `claude -p` (streaming send, stop, helper questions), folder picker, notifications
 ├── search.rs      session search: background index, matching and ranking, Haiku search format
 ├── status.rs      `scope statusline`: saves Claude Code's status data; usage limits
+├── templates.rs   prompt templates, skills, commands of a root; the composer's runs and references
 ├── verdict.rs     session tags: done / needs you / blocked, judged by the helper model
 ├── update.rs      finds newer releases on GitHub, installs one in place of scope.app
 └── workspaces.rs  workspaces: create, move, remove, delete, load/save

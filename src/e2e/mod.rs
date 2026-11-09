@@ -34,5 +34,6 @@ mod settings_page;
 mod startup;
 mod style;
 mod sync;
+mod templates;
 mod verdicts;
 mod workspaces;
