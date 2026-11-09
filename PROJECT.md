@@ -319,8 +319,8 @@ of it.
   long lines, tab width, open Markdown rendered.
 - **Claude Code**: path to `claude`, model for prompts, extra arguments for every `claude -p`
   (e.g. `--permission-mode acceptEdits`), default folder for new sessions.
-- **Sessions and scopes**: tag finished sessions, notify when a run finishes in the
-  background, restore the previous state at start, confirm before deleting a scope or a
+- **Sessions and scopes**: tag finished sessions, notify when a session finishes (on by
+  default; see Notifications), restore the previous state at start, confirm before deleting a scope or a
   message, the idle hours after which the overview offers Finish session, the Jira URL ticket
   keys link to (e.g. `https://acme.atlassian.net`), the prompt templates folder (relative to
   the scope's root) and whether Claude also adds it to the root's `.gitignore`.
@@ -344,6 +344,16 @@ of it.
   Settings; **Install X and restart** downloads the release's `.zip`, checks its signature
   (same Developer ID team as the running app), swaps it in place of scope.app and restarts
   into it. Quitting doesn't end the sessions scope runs; the new scope picks them up.
+
+### Notifications
+When a session stops working (its run ended and no queued prompt went
+on), a macOS notification with scope's icon: the session's name as title, how it ended as
+subtitle (✔ done, ✋ needs you, ⚠ blocked: its verdict, so it waits the few seconds the
+helper model takes; ✖ failed; ✔ finished when tagging is off) and the verdict's sentence.
+Clicking it brings scope forward with that session open. Not sent for a session you are
+looking at, nor for a run stopped with Ctrl+C. macOS asks once whether scope may notify;
+bundles under `/tmp` (test instances) are refused by macOS and fall back to `osascript`
+(Script Editor's icon, no click-through), as does a bare `cargo run` binary.
 
 ### Restarting
 Closing and opening scope brings everything back: window size and position, panel widths,
@@ -446,6 +456,7 @@ src/
 ├── search.rs      session search: background index, matching and ranking, Haiku search format
 ├── status.rs      `scope statusline`: saves Claude Code's status data; usage limits
 ├── templates.rs   prompt templates, skills, commands of a root; the composer's runs and references
+├── notify.rs      system notifications as scope's own (User Notifications), osascript fallback
 ├── verdict.rs     session tags: done / needs you / blocked, judged by the helper model
 ├── update.rs      finds newer releases on GitHub, installs one in place of scope.app
 └── workspaces.rs  workspaces: create, move, remove, delete, load/save
