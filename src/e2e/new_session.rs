@@ -85,12 +85,12 @@ fn model_and_effort_picked_for_a_new_session_go_with_all_its_prompts() {
     let mut s = s.workspaces_json(json!({"list": [{"name": "Work", "sessions": ["s-a"], "folder": folder}]})).launch();
     s.click_first("WORK");
     s.click("+  New session");
-    assert!(s.sees("opus (as set)"), "Settings' model is what it would use");
-    s.click("opus (as set)");
-    s.click("fable");
+    assert!(s.sees("claude-opus-5-5 ⏷"), "Settings' model is what it would use, by its full name");
+    s.click("claude-opus-5-5 ⏷");
+    s.click("claude-fable-5-1");
     s.click("default (as set)");
     s.click("high");
-    assert!(s.sees("fable") && s.sees("high"));
+    assert!(s.sees("claude-fable-5-1 ⏷") && s.sees("high"));
     s.send("first");
     s.wait_to_see("Echo: first");
     s.wait_until("it is a normal session", |s| !s.list().contains("[starting]"));
@@ -99,7 +99,7 @@ fn model_and_effort_picked_for_a_new_session_go_with_all_its_prompts() {
     let runs: Vec<Vec<Value>> = s.env.calls().into_iter().map(|c| c["args"].as_array().unwrap().clone()).filter(|a| a.iter().any(|x| x == "--session-id" || x == "--resume")).collect();
     assert_eq!(runs.len(), 2);
     for args in runs {
-        assert!(args.windows(2).any(|w| w[0] == "--model" && w[1] == "fable"), "{args:?}");
+        assert!(args.windows(2).any(|w| w[0] == "--model" && w[1] == "claude-fable-5-1"), "{args:?}");
         assert!(args.windows(2).any(|w| w[0] == "--effort" && w[1] == "high"), "{args:?}");
     }
 }

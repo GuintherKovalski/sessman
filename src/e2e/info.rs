@@ -78,9 +78,9 @@ fn the_model_shows_the_default_before_any_reply() {
     assert!(!s.sees("unknown yet"));
     assert!(s.sees("(scope settings)"), "where the default comes from");
     // The Info tab and the new session page pick the same thing.
-    s.click_first("opus (as set) ⏷");
-    s.click("sonnet");
-    assert!(!s.sees("opus (as set)"), "both show the pick");
+    s.click_first("claude-opus-5-5 ⏷");
+    s.click("claude-sonnet-5-5");
+    assert!(!s.sees("claude-opus-5-5 ⏷"), "both show the pick");
 }
 
 #[test]
@@ -88,11 +88,10 @@ fn the_model_of_a_session_can_be_switched_between_runs() {
     let mut s = setup().session(session("s-a", "alpha prompt", 100).reply("alpha reply")).setting("model", json!("opus")).launch();
     s.click("alpha prompt");
     s.click("Info");
-    assert!(s.sees("opus (as set)"));
-    s.click("opus (as set)");
-    s.click("sonnet");
+    s.click("claude-opus-5-5 ⏷");
+    s.click("claude-sonnet-5-5");
     assert!(s.sees("(this session; later prompts keep it)"));
-    assert_eq!(s.env.config_json("state.json")["choices"]["s-a"]["model"], "sonnet", "kept across restarts");
+    assert_eq!(s.env.config_json("state.json")["choices"]["s-a"]["model"], "claude-sonnet-5-5", "kept across restarts");
     s.send("next");
     s.wait_to_see("Echo: next");
     s.send("again");
@@ -101,10 +100,10 @@ fn the_model_of_a_session_can_be_switched_between_runs() {
     assert_eq!(runs.len(), 2);
     for args in runs {
         assert!(args.windows(2).any(|w| w[0] == "--resume" && w[1] == "s-a"), "the same session: {args:?}");
-        assert!(args.windows(2).any(|w| w[0] == "--model" && w[1] == "sonnet"), "{args:?}");
+        assert!(args.windows(2).any(|w| w[0] == "--model" && w[1] == "claude-sonnet-5-5"), "{args:?}");
     }
     // Back to the default: the session's pick is dropped.
-    s.click("sonnet");
-    s.click("opus (as set)");
+    s.click("claude-sonnet-5-5 ⏷");
+    s.click("claude-opus-5-5 (default)");
     assert!(s.env.config_json("state.json")["choices"].get("s-a").is_none());
 }
