@@ -91,8 +91,9 @@ fn create_template_has_claude_write_it_only_in_the_templates_folder() {
     let system = after(&args, "--append-system-prompt").unwrap();
     assert!(system.contains("add the line `/.scope/templates/`") && !system.contains("scope list"), "its own instructions, not scope's commands");
     let id = after(&args, "--session-id").expect("a new session").to_owned();
-    let store = s.env.config_json("templates.json");
-    assert_eq!(store["sessions"][&id]["template"], dir.join("fake-template.md").display().to_string());
+    // The store is saved when the run ends, a moment after the template shows.
+    let want = dir.join("fake-template.md").display().to_string();
+    s.wait_until("templates.json has the new session's template", |s| s.env.config_json("templates.json")["sessions"][&id]["template"] == want.as_str());
 
     // The list has the new template; the pseudo session isn't a session in it.
     s.wait_to_see("Prompt templates · 2");
