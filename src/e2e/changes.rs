@@ -110,3 +110,59 @@ fn file_tabs_belong_to_their_session_and_survive_a_restart() {
     s.press(Key::Escape);
 }
 
+
+fn git(dir: &std::path::Path, args: &[&str]) {
+    let ok = std::process::Command::new("git").arg("-C").arg(dir).args(args).output().unwrap().status.success();
+    assert!(ok, "git {args:?}");
+}
+
+/// `edited`, with main.rs committed in a repository and README.md not.
+fn committed_one() -> Scope {
+    let s = setup();
+    let proj = s.env().proj.clone();
+    std::fs::write(proj.join("main.rs"), "fn main() {\n    println!(\"new\");\n}\n").unwrap();
+    std::fs::write(proj.join("README.md"), "# Title\n\nSome *text*.\n").unwrap();
+    git(&proj, &["init", "-q"]);
+    git(&proj, &["add", "main.rs"]);
+    git(&proj, &["-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "-m", "main"]);
+    let mut s = s
+        .session(
+            session("s-a", "alpha prompt", 100)
+                .edit(&proj.join("main.rs"), "    println!(\"old\");\n", "    println!(\"new\");\n")
+                .edit(&proj.join("README.md"), "", "# Title\n\nSome *text*.\n"),
+        )
+        .launch();
+    s.click("alpha prompt");
+    s
+}
+
+#[test]
+fn changes_show_committed_files_too_by_default() {
+    let s = committed_one();
+    assert!(s.sees("Files (2)"), "committed main.rs is listed as well");
+    assert!(s.sees("All") && s.sees("Uncommitted"));
+}
+
+#[test]
+fn uncommitted_shows_only_files_git_reports_as_changed_and_is_remembered() {
+    let mut s = committed_one();
+    s.click("Uncommitted");
+    s.wait_to_see("Files (1)");
+    assert!(s.sees("README.md"));
+    assert!(!s.sees("+1 -1"), "main.rs is committed, so hidden");
+    let mut s = s.restart();
+    s.wait_to_see("Files (1)");
+    s.click("All");
+    s.wait_to_see("Files (2)");
+}
+
+#[test]
+fn uncommitted_says_so_when_everything_is_committed() {
+    let mut s = committed_one();
+    let proj = s.env.proj.clone();
+    git(&proj, &["add", "README.md"]);
+    git(&proj, &["-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "-m", "readme"]);
+    s.click("Uncommitted");
+    s.wait_to_see("No uncommitted changes");
+    assert!(s.sees("Files (0)"));
+}

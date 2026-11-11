@@ -315,6 +315,32 @@ pub fn read(path: &str) -> Result<String, String> {
     String::from_utf8(bytes).map_err(|_| format!("{path} is not a text file"))
 }
 
+/// Which of `files` git reports as changed and not yet committed (modified, staged, untracked,
+/// deleted). A file git can't speak for (no repository, git missing) counts as uncommitted, so
+/// the filter never hides a change it knows nothing about.
+pub fn uncommitted(files: &[String]) -> std::collections::HashSet<String> {
+    files
+        .iter()
+        .filter(|f| {
+            let path = Path::new(f.as_str());
+            let (Some(dir), Some(name)) = (path.parent(), path.file_name()) else { return true };
+            let out = std::process::Command::new("git")
+                .arg("-C")
+                .arg(dir)
+                .args(["status", "--porcelain", "--untracked-files=all", "--"])
+                .arg(name)
+                .stdin(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .output();
+            match out {
+                Ok(o) if o.status.success() => !o.stdout.is_empty(),
+                _ => true,
+            }
+        })
+        .cloned()
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
