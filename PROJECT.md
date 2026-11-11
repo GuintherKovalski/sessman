@@ -319,8 +319,8 @@ of it.
   long lines, tab width, open Markdown rendered.
 - **Claude Code**: path to `claude`, model for prompts, extra arguments for every `claude -p`
   (e.g. `--permission-mode acceptEdits`), default folder for new sessions.
-- **Sessions and scopes**: tag finished sessions, notify when a run finishes in the
-  background, restore the previous state at start, confirm before deleting a scope or a
+- **Sessions and scopes**: tag finished sessions, notify when a session finishes (on by
+  default; see Notifications), restore the previous state at start, confirm before deleting a scope or a
   message, the idle hours after which the overview offers Finish session, the Jira URL ticket
   keys link to (e.g. `https://acme.atlassian.net`), the prompt templates folder (relative to
   the scope's root) and whether Claude also adds it to the root's `.gitignore`.
@@ -344,6 +344,18 @@ of it.
   Settings; **Install X and restart** downloads the release's `.zip`, checks its signature
   (same Developer ID team as the running app), swaps it in place of scope.app and restarts
   into it. Quitting doesn't end the sessions scope runs; the new scope picks them up.
+
+### Notifications
+When a session stops working (its run ended and no queued prompt went on), a macOS
+notification: `<status> · <session name>` as title (Done, Needs your attention, Blocked: the
+session's verdict, so it waits the few seconds the helper model takes; Failed; Finished when
+tagging is off), `Scope: <workspace>` below it, and the verdict's sentence on what was achieved
+or is needed. Not sent for a session you are looking at, nor for a run stopped with Ctrl+C.
+A Developer ID signed scope.app posts them as its own (scope's icon, clicking opens the
+session; macOS asks once whether scope may notify). macOS refuses that to any app not signed
+by an Apple-issued certificate (ad-hoc or self-signed, as `scripts/bundle.sh` builds without
+`SCOPE_SIGN_IDENTITY`, test instances, `cargo run`): those fall back to `osascript`, whose
+banners carry Script Editor's icon. (The older NSUserNotificationCenter is inert on macOS 15.)
 
 ### Restarting
 Closing and opening scope brings everything back: window size and position, panel widths,
@@ -446,6 +458,7 @@ src/
 ├── search.rs      session search: background index, matching and ranking, Haiku search format
 ├── status.rs      `scope statusline`: saves Claude Code's status data; usage limits
 ├── templates.rs   prompt templates, skills, commands of a root; the composer's runs and references
+├── notify.rs      system notifications as scope's own (User Notifications), osascript fallback
 ├── verdict.rs     session tags: done / needs you / blocked, judged by the helper model
 ├── update.rs      finds newer releases on GitHub, installs one in place of scope.app
 └── workspaces.rs  workspaces: create, move, remove, delete, load/save

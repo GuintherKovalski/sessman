@@ -366,6 +366,9 @@ pub struct App {
     verdicts: Shared<Verdicts>,
     judging: Vec<(String, Receiver<Result<Verdict, String>>)>,
     judge_failed: HashMap<String, u64>,
+    /// Sessions whose run ended and whose notification waits for their verdict, to carry its
+    /// tag (done, needs you, blocked).
+    notify_on_verdict: HashSet<String>,
     last_sweep: Option<std::time::Instant>,
     /// The main area shows the open workspace's orchestration page (with no session open).
     orchestrating: bool,
@@ -530,6 +533,7 @@ impl App {
         let template_store: Shared<templates::Store> = Shared::load(templates::Store::path());
         let mut sessions = session::list(&session::projects_dir());
         sessions.retain(|m| !template_store.sessions.contains_key(&m.id));
+        crate::notify::init(&ctx);
         let mut app = Self {
             ctx: ctx.clone(),
             sessions,
@@ -627,6 +631,7 @@ impl App {
             verdicts: Shared::load(Verdicts::path()),
             judging: Vec::new(),
             judge_failed: HashMap::new(),
+            notify_on_verdict: HashSet::new(),
             last_sweep: None,
             orchestrating: false,
             orchestrations: Shared::load(orchestration::Store::path()),
@@ -1945,6 +1950,13 @@ impl App {
             Err(TryRecvError::Disconnected) => false,
         });
         for (id, result) in done {
+            if self.notify_on_verdict.remove(&id) {
+                let name = self.sessions.iter().position(|s| s.id == id).map_or_else(|| id.clone(), |i| self.title(i).to_owned());
+                match &result {
+                    Ok(v) => self.notify_ended(&id, &name, v.status(), &v.why),
+                    Err(_) => self.notify_ended(&id, &name, "Finished", "Claude finished its turn"),
+                }
+            }
             match result {
                 Ok(v) => {
                     self.judge_failed.remove(&id);
@@ -1974,6 +1986,33 @@ impl App {
         let free = AT_ONCE.saturating_sub(self.judging.len());
         for (id, _) in verdict::candidates(&sessions, &self.verdicts, &self.judge_failed, now, QUIET, WINDOW).into_iter().take(free) {
             self.judge(&id);
+        }
+    }
+
+    /// A notification that session `id` (`name`) stopped working: "<status> · <session>" as
+    /// title, its scope (workspace) below, and what was achieved or is needed (`why`). Not sent
+    /// while scope is in front with that session open (it is in view).
+    fn notify_ended(&self, id: &str, name: &str, status: &str, why: &str) {
+        if self.ctx.input(|i| i.focused) && self.open_id().as_deref() == Some(id) {
+            return;
+        }
+        let scope = self.workspaces.list.iter().find(|w| w.sessions.iter().any(|s| s == id)).map(|w| format!("Scope: {}", w.name));
+        crate::notify::post(id, &format!("{status} · {name}"), scope.as_deref().unwrap_or(""), why);
+    }
+
+    /// A notification was clicked: opens its session, in a tab that lists it.
+    fn poll_notifications(&mut self) {
+        for id in crate::notify::take_clicked() {
+            let Some(i) = self.sessions.iter().position(|s| s.id == id) else { continue };
+            self.ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
+            if !self.visible().contains(&i) {
+                let w = self.workspaces.list.iter().position(|w| w.sessions.contains(&id));
+                if self.tab != w {
+                    self.search.clear();
+                }
+                self.tab = w;
+            }
+            self.apply(Action::Select(i));
         }
     }
 
@@ -2050,6 +2089,12 @@ impl App {
         self.index = snap.index;
         let sessions = &self.sessions;
         self.unlisted.retain(|(id, ..)| !sessions.iter().any(|s| &s.id == id));
+        // New sessions whose first run ended before they were listed: judged now, for the
+        // notification that waits on it.
+        let listed: Vec<String> = self.notify_on_verdict.iter().filter(|id| sessions.iter().any(|s| &s.id == *id)).cloned().collect();
+        for id in listed {
+            self.judge(&id);
+        }
         self.generation += 1;
         self.selected = current.as_ref().and_then(|(id, _)| self.sessions.iter().position(|s| &s.id == id));
         let changed = match (&current, self.selected) {
@@ -2240,16 +2285,21 @@ impl App {
         } else if let Some(next) = queue.next() {
             self.start_run(id.to_owned(), run.cwd.clone(), next, false);
         }
-        if self.settings.notify_when_done && !stopped && !self.ctx.input(|i| i.focused) {
-            let body = match &result {
-                Ok(()) => format!("{name}: Claude finished"),
-                Err(e) => format!("{name}: {e}"),
-            };
-            runner::notify("scope", &body);
-        }
         // Done, or waiting for the developer? The helper model reads how it ended.
         if !stopped && result.is_ok() && !self.runs.contains_key(id) {
             self.judge(id);
+        }
+        // The session stopped working (no queued prompt went on): a notification says how it
+        // ended, once its verdict is in when sessions are tagged.
+        if self.settings.notify_when_done && !stopped && !self.runs.contains_key(id) {
+            match &result {
+                Err(e) => self.notify_ended(id, &name, "Failed", e),
+                // Judged now, or (a new session) once the indexer lists it.
+                Ok(()) if self.settings.tag_finished => {
+                    self.notify_on_verdict.insert(id.to_owned());
+                }
+                Ok(()) => self.notify_ended(id, &name, "Finished", "Claude finished its turn"),
+            }
         }
         // The file now holds what was streamed; reloading makes it canonical. A new session is
         // selected when the indexer lists it.
@@ -5162,6 +5212,7 @@ impl eframe::App for App {
         self.poll_summary();
         self.poll_naming();
         self.poll_verdicts();
+        self.poll_notifications();
         self.updater.poll(&self.ctx);
         if std::mem::take(&mut self.updater.restart) {
             // Quits like Cmd+Q; the sessions it runs go on and the new scope picks them up.

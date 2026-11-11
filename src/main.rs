@@ -10,6 +10,7 @@ mod history;
 mod images;
 mod names;
 mod newinfo;
+mod notify;
 mod orchestration;
 mod overview;
 mod processes;

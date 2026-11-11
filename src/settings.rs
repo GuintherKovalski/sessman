@@ -112,7 +112,7 @@ impl Default for Settings {
             confirm_delete_workspace: true,
             confirm_delete_message: true,
             restore_state: true,
-            notify_when_done: false,
+            notify_when_done: true,
             tag_finished: true,
             jira_url: String::new(),
             orchestration_harness: crate::orchestration::DEFAULT_HARNESS.into(),
@@ -393,7 +393,7 @@ pub fn ui(ui: &mut egui::Ui, s: &mut Settings, filter: &mut String, about: &mut 
                 }
                 ui.checkbox(&mut s.tag_finished, "");
             });
-            page.row("Notify when a run finishes", "A system notification, while scope is in the background", s.notify_when_done != defaults.notify_when_done, |ui, reset| {
+            page.row("Notify when a session finishes", "A system notification with the session's name and how it ended: done, needs you or blocked", s.notify_when_done != defaults.notify_when_done, |ui, reset| {
                 if reset {
                     s.notify_when_done = defaults.notify_when_done;
                 }
