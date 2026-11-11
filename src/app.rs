@@ -84,6 +84,57 @@ struct Removal {
 /// How many removals Cmd+Z can go back through.
 const UNDO_LIMIT: usize = 50;
 
+/// How often the Changes tab asks git again while it shows only uncommitted files.
+const UNCOMMITTED_REFRESH: std::time::Duration = std::time::Duration::from_secs(3);
+
+/// The open session's changed files that git says are uncommitted, checked in the background.
+#[derive(Default)]
+struct Uncommitted {
+    /// The files last asked about, and git's answer; None until the first answer for them.
+    files: Vec<String>,
+    set: Option<HashSet<String>>,
+    asked: Option<std::time::Instant>,
+    rx: Option<Receiver<(Vec<String>, HashSet<String>)>>,
+}
+
+impl Uncommitted {
+    /// Takes git's answer when it's in, and asks again when the files changed or the answer is
+    /// old. Returns the uncommitted files, None while the first answer for `files` is pending.
+    fn poll(&mut self, ctx: &egui::Context, files: Vec<String>) -> Option<&HashSet<String>> {
+        if let Some(rx) = &self.rx {
+            match rx.try_recv() {
+                Ok((asked, set)) => {
+                    self.rx = None;
+                    if asked == files {
+                        self.set = Some(set);
+                    }
+                }
+                Err(TryRecvError::Empty) => {}
+                Err(TryRecvError::Disconnected) => self.rx = None,
+            }
+        }
+        if files != self.files {
+            self.files = files.clone();
+            self.set = None;
+            self.asked = None;
+        }
+        let stale = self.asked.is_none_or(|t| t.elapsed() >= UNCOMMITTED_REFRESH);
+        if self.rx.is_none() && stale {
+            let (tx, rx) = mpsc::channel();
+            let ctx2 = ctx.clone();
+            std::thread::spawn(move || {
+                let set = diffview::uncommitted(&files);
+                let _ = tx.send((files, set));
+                ctx2.request_repaint();
+            });
+            self.rx = Some(rx);
+            self.asked = Some(std::time::Instant::now());
+        }
+        ctx.request_repaint_after(UNCOMMITTED_REFRESH);
+        self.set.as_ref()
+    }
+}
+
 #[derive(PartialEq)]
 enum RightTab {
     Changes,
@@ -232,6 +283,10 @@ pub struct App {
     goal_field_height: f32,
     /// Changes tab shows only this file, when set.
     changes_filter: Option<String>,
+    /// Changes tab shows only files with uncommitted changes (else every file the session edited).
+    only_uncommitted: bool,
+    /// What git last said about the open session's changed files, for `only_uncommitted`.
+    uncommitted: Uncommitted,
     /// Files open read-only in the main area, for the open session.
     file_tabs: Vec<FileTab>,
     /// Active main tab: None = the conversation ("Main"), Some(i) = file_tabs[i].
@@ -526,6 +581,8 @@ impl App {
             info_height: 0.0,
             goal_field_height: 0.0,
             changes_filter: None,
+            only_uncommitted: false,
+            uncommitted: Uncommitted::default(),
             file_tabs: Vec::new(),
             main_tab: None,
             views: Views::default(),
@@ -611,6 +668,7 @@ impl App {
         self.views = Views(st.views);
         self.queues = st.queues;
         self.right_tab = if st.info_tab { RightTab::Info } else { RightTab::Changes };
+        self.only_uncommitted = st.only_uncommitted;
         self.search = st.search;
         self.prompt_height = st.prompt_height;
         self.prompt_collapsed = st.prompt_collapsed;
@@ -638,6 +696,7 @@ impl App {
             views,
             queues: self.queues.iter().filter(|(_, q)| !q.is_empty()).map(|(k, q)| (k.clone(), q.clone())).collect(),
             info_tab: self.right_tab == RightTab::Info,
+            only_uncommitted: self.only_uncommitted,
             search: self.search.clone(),
             prompt_height: self.prompt_height,
             prompt_collapsed: self.prompt_collapsed,
@@ -4185,8 +4244,21 @@ impl App {
             ui.label("No code changes in this session");
             return;
         }
-        let files = diffview::group(&s.changes);
+        let mut files = diffview::group(&s.changes);
+        // Only uncommitted: the files git still reports as changed; None while git is asked.
+        let mut checking = false;
+        if self.only_uncommitted {
+            let names = files.iter().map(|f| f.file.clone()).collect();
+            match self.uncommitted.poll(ui.ctx(), names) {
+                Some(set) => files.retain(|f| set.contains(&f.file)),
+                None => {
+                    files.clear();
+                    checking = true;
+                }
+            }
+        }
         let (mut toggle, mut open) = (None, None);
+        let mut only_uncommitted = self.only_uncommitted;
         // File list at the bottom: click filters the cards above, double-click opens the file.
         egui::Panel::bottom("changed-files").resizable(true).default_size(170.0).show(ui, |ui| {
             ui.horizontal(|ui| {
@@ -4194,6 +4266,12 @@ impl App {
                 if self.changes_filter.is_some() && ui.small_button("Show all").clicked() {
                     toggle = self.changes_filter.clone();
                 }
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    ui.selectable_value(&mut only_uncommitted, true, "Uncommitted")
+                        .on_hover_text("Only files git still reports as changed: not yet committed");
+                    ui.selectable_value(&mut only_uncommitted, false, "All")
+                        .on_hover_text("Every file this session changed, committed and pushed ones included");
+                });
             });
             egui::ScrollArea::vertical().auto_shrink(false).show(ui, |ui| {
                 for f in &files {
@@ -4219,6 +4297,11 @@ impl App {
         });
         // Both directions: long unwrapped diff lines scroll instead of widening the panel.
         egui::ScrollArea::both().auto_shrink(false).show(ui, |ui| {
+            if checking {
+                ui.label(RichText::new("Checking git for uncommitted changes…").weak());
+            } else if files.is_empty() {
+                ui.label("No uncommitted changes: everything this session changed is committed");
+            }
             for f in files.iter().filter(|f| self.changes_filter.as_ref().is_none_or(|x| *x == f.file)) {
                 match diffview::file_card(ui, f, &s.changes) {
                     CardEvent::DoubleClicked => open = Some(f.file.clone()),
@@ -4228,6 +4311,7 @@ impl App {
                 ui.add_space(8.0);
             }
         });
+        self.only_uncommitted = only_uncommitted;
         if let Some(file) = toggle {
             self.changes_filter = if self.changes_filter.as_ref() == Some(&file) { None } else { Some(file) };
         }

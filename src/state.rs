@@ -62,6 +62,8 @@ pub struct State {
     pub views: HashMap<String, View>,
     pub queues: HashMap<String, Queue>,
     pub info_tab: bool,
+    /// The Changes tab shows only uncommitted files.
+    pub only_uncommitted: bool,
     pub search: String,
     pub prompt_height: Option<f32>,
     pub prompt_collapsed: bool,
