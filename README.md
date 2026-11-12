@@ -4,9 +4,9 @@
 
 ![scope in 20 seconds: scopes, session status, themes, dictation and refine](assets/scope.gif)
 
-scope is a desktop IDE for working *with* Claude Code rather than typing code yourself. When
-you run several sessions at once, the hard part is no longer the code: it is remembering
-which session was doing what, which one finished, which one is waiting on you, and what each
+scope lets you work with dozens of Claude Code sessions in one organized place, instead of
+juggling a pile of terminals in a clunky, overwhelming way. When you run several sessions at
+once, the hard part is no longer the code: it is remembering which session was doing what, which one finished, which one is waiting on you, and what each
 one changed. Every switch between them costs you a re-read. scope carries that context for
 you, so you can direct the work instead of reconstructing it.
 
@@ -19,34 +19,45 @@ you, so you can direct the work instead of reconstructing it.
 
 ## How it works
 
-- **Scopes group sessions by the work they belong to.** A scope is a tab (a feature, a
-  ticket, a project) with its own color. Drag sessions into it, order them by hand, and it
-  reopens where you left it. **SCOPES** shows every session and a card per scope: what the
-  scope is about, its Jira tickets, and a tile per session saying what it is doing and what
-  it needs from you.
-- **Every session tells you where it stands.** While Claude works the session shows a
-  spinner; when it stops, a small model reads the end of the run and tags it **✔ done**,
-  **✋ needs you** or **⚠ blocked**, with the reason. Each session gets a short name and a goal
-  with a checklist of subgoals, written for you after its first answer.
-- **An orchestrator watches each scope.** Its page sums the scope up: overall progress, what
-  needs you, the next steps, and a card per session. It updates with only the new activity,
-  and you can ask it questions about the scope. Its **Processes** tab shows everything the
-  sessions are running right now (commands, MCP servers, searches) with CPU, memory and time
-  left.
-- **You switch by clicking, not by re-reading.** Each session keeps its own draft, queued
-  prompts, open files and scroll position; the prompt that the reply on screen answers stays
-  pinned above it; the **Changes** tab shows exactly what Claude edited.
-- **It is still Claude Code underneath.** scope reads the sessions Claude Code keeps in
-  `~/.claude/projects` and continues them with `claude -p --resume`. Sessions you start in a
-  terminal show up on their own, runs keep going when scope quits, and everything scope adds
-  (scopes, names, goals, settings) lives in its own config folder.
-- **Claude can drive it too.** Every session scope runs knows the `scope` command, so you can
-  ask Claude to start, rename or reorder sessions, ask the orchestrator something, or restyle
-  the app ("make it warmer").
+<table>
+<tr>
+<td width="50%"><img src="assets/readme/scopes.gif" alt="Sessions sorted into scope tabs"><br><b>Scopes</b>: group sessions by project, ticket or epic.</td>
+<td width="50%"><img src="assets/readme/status.gif" alt="Session status marks"><br><b>Status</b>: working, done, needs you or blocked.</td>
+</tr>
+<tr>
+<td><img src="assets/readme/orch.png" alt="A scope's orchestration page"><br><b>Orchestrator</b>: each scope's progress, and what needs you.</td>
+<td><img src="assets/readme/changes.png" alt="The Changes tab"><br><b>Changes</b>: every edit Claude made, file by file.</td>
+</tr>
+<tr>
+<td><img src="assets/readme/ask.gif" alt="Side questions in the Info tab"><br><b>Ask</b>: side questions with full context. Session untouched.</td>
+<td><img src="assets/readme/refine.gif" alt="Dictation and Refine"><br><b>Voice + Refine</b>: talk, then get a clear prompt.</td>
+</tr>
+<tr>
+<td colspan="2"><img src="assets/readme/themes.png" alt="One Dark Pro, Dracula, two-tone white and Matrix themes"><br><b>Themes</b>: ask Claude to restyle it. Anything goes.</td>
+</tr>
+</table>
+
+```mermaid
+flowchart LR
+    T["terminal sessions"] --> F[("~/.claude/projects")]
+    S["scope"] <--> F
+```
+
+**Still Claude Code underneath.** Nothing to migrate.
 
 ## Install
 
-Needs macOS 11 or later (Apple Silicon or Intel) and [Claude Code](https://docs.claude.com/en/docs/claude-code).
+Use your terminal one last time. Open Claude Code and paste:
+
+```text
+Install this IDE and open it: https://github.com/GuintherKovalski/sessman
+```
+
+Needs macOS 11 or later and [Claude Code](https://docs.claude.com/en/docs/claude-code).
+
+<details>
+<summary>Other ways to install</summary>
+
 In a terminal:
 
 ```sh
@@ -65,6 +76,8 @@ That's all: nothing to compile, no Rust or cmake. scope updates itself: when a n
 out, the top bar says so, and **Settings → About** installs it and restarts (your sessions keep
 running). Installed another way, dictation (🎤) offers to download its speech model (about
 150 MB) the first time you use it; the first recording asks for microphone access.
+
+</details>
 
 ## Features
 
