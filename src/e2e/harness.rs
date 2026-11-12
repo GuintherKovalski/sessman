@@ -277,13 +277,19 @@ fn fake_claude() -> PathBuf {
     BIN.get_or_init(|| {
         let manifest = Path::new(env!("CARGO_MANIFEST_DIR"));
         let out = std::process::Command::new(env!("CARGO"))
-            .args(["build", "--quiet", "--example", "fake_claude", "--manifest-path"])
+            .args(["build", "--quiet", "--example", "fake_claude", "--message-format=json", "--manifest-path"])
             .arg(manifest.join("Cargo.toml"))
             .output()
             .expect("run cargo to build the fake claude");
         assert!(out.status.success(), "building the fake claude failed:\n{}", String::from_utf8_lossy(&out.stderr));
-        let exe = std::env::current_exe().unwrap();
-        exe.parent().unwrap().parent().unwrap().join("examples/fake_claude")
+        // Where cargo put it, as cargo reports it: the layout of target/ changes between Rust
+        // versions, so it isn't derived from the test binary's own path.
+        String::from_utf8_lossy(&out.stdout)
+            .lines()
+            .filter_map(|l| serde_json::from_str::<serde_json::Value>(l).ok())
+            .filter(|m| m["reason"] == "compiler-artifact" && m["target"]["name"] == "fake_claude")
+            .find_map(|m| m["executable"].as_str().map(PathBuf::from))
+            .expect("cargo reported no executable for the fake claude")
     })
     .clone()
 }
