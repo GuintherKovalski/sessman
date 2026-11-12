@@ -2,6 +2,8 @@
 
 **Organize your Claude Code sessions by scope, and stop holding all of them in your head.**
 
+![scope in 20 seconds: scopes, session status, themes, dictation and refine](assets/scope.gif)
+
 scope is a desktop IDE for working *with* Claude Code rather than typing code yourself. When
 you run several sessions at once, the hard part is no longer the code: it is remembering
 which session was doing what, which one finished, which one is waiting on you, and what each
