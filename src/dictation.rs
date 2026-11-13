@@ -1,9 +1,10 @@
 //! Dictation: records the microphone while the mic button is on, then transcribes the audio
-//! with a local Whisper model (whisper.cpp, Metal-accelerated). macOS only for now.
+//! with a local Whisper model (whisper.cpp: Metal-accelerated on macOS, on the CPU on
+//! Windows).
 use std::path::PathBuf;
 
 /// Whether dictation works on this platform; the mic button is hidden where it doesn't.
-pub const AVAILABLE: bool = cfg!(target_os = "macos");
+pub const AVAILABLE: bool = cfg!(any(target_os = "macos", windows));
 
 /// The Whisper model file. It is not bundled: the app offers to download it on first use.
 pub fn model_path() -> PathBuf {
@@ -28,8 +29,9 @@ pub fn start_model_download() -> Result<std::process::Child, String> {
     if let Some(dir) = part.parent() {
         std::fs::create_dir_all(dir).map_err(|e| format!("can't create {}: {e}", dir.display()))?;
     }
-    std::process::Command::new("curl")
-        .args(["--location", "--fail", "--silent", "--show-error", "--output"])
+    let mut curl = std::process::Command::new("curl");
+    crate::platform::hide_window(&mut curl);
+    curl.args(["--location", "--fail", "--silent", "--show-error", "--output"])
         .arg(&part)
         .arg(MODEL_URL)
         .stdin(std::process::Stdio::null())
@@ -125,7 +127,7 @@ mod tests {
     }
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", windows))]
 mod imp {
     use super::model_path;
     use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
@@ -270,16 +272,16 @@ mod imp {
     }
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", windows))]
 pub use imp::{Recorder, transcribe};
 
-#[cfg(not(target_os = "macos"))]
+#[cfg(not(any(target_os = "macos", windows)))]
 pub struct Recorder;
 
-#[cfg(not(target_os = "macos"))]
+#[cfg(not(any(target_os = "macos", windows)))]
 impl Recorder {
     pub fn start() -> Result<Self, String> {
-        Err("dictation is only available on macOS for now".into())
+        Err("dictation is only available on macOS and Windows for now".into())
     }
 
     pub fn finish(self) -> Vec<f32> {
@@ -295,7 +297,7 @@ impl Recorder {
     }
 }
 
-#[cfg(not(target_os = "macos"))]
+#[cfg(not(any(target_os = "macos", windows)))]
 pub fn transcribe(_samples: &[f32]) -> Result<String, String> {
-    Err("dictation is only available on macOS for now".into())
+    Err("dictation is only available on macOS and Windows for now".into())
 }

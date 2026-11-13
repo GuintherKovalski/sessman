@@ -123,9 +123,9 @@ impl Env {
         std::fs::write(self.config.join(name), serde_json::to_string_pretty(v).unwrap()).unwrap();
     }
 
-    /// The session file of `id`, wherever its project is.
     /// Starts a prompt run on session `id` the way a scope that has since quit left it: not a
     /// child of the app (`sh` starts it and exits), so the app finds it like any other run.
+    #[cfg(unix)]
     pub fn run_outside(&self, id: &str, prompt: &str) {
         let script = r#""$0" -p --resume "$1" --output-format stream-json --verbose "$2" >/dev/null 2>&1 &"#;
         let status = std::process::Command::new("sh")
@@ -139,6 +139,7 @@ impl Env {
         assert!(status.success());
     }
 
+    /// The session file of `id`, wherever its project is.
     pub fn session_file(&self, id: &str) -> Option<PathBuf> {
         std::fs::read_dir(self.projects()).ok()?.flatten().map(|p| p.path().join(format!("{id}.jsonl"))).find(|p| p.exists())
     }
@@ -381,6 +382,10 @@ impl Scope {
         // SAFETY: app tests hold ONE_AT_A_TIME, and no other test reads these variables.
         unsafe {
             std::env::set_var("HOME", &env.home);
+            // Windows takes the home folder from USERPROFILE first (platform.rs), and anyone
+            // may point Claude Code elsewhere: neither may reach the developer's own.
+            std::env::set_var("USERPROFILE", &env.home);
+            std::env::remove_var("CLAUDE_CONFIG_DIR");
             std::env::set_var("SCOPE_CONFIG", &env.config);
         }
         let h = Harness::builder()

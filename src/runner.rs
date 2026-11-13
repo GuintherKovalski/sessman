@@ -1,7 +1,6 @@
 use serde_json::Value;
 use std::io::{BufRead, BufReader, Read, Write};
 use std::path::{Path, PathBuf};
-use std::os::unix::process::CommandExt;
 use std::process::{Command, Stdio};
 use std::sync::mpsc::{Receiver, channel};
 use std::sync::{Arc, Mutex, RwLock};
@@ -103,7 +102,8 @@ impl Claude {
 
 /// Where CLIs like `claude` usually live but a Finder-launched app's PATH
 /// (`/usr/bin:/bin:/usr/sbin:/sbin`) does not reach.
-const EXTRA_DIRS: [&str; 8] = [
+#[cfg(not(windows))]
+const EXTRA_DIRS: &[&str] = &[
     "~/.local/bin",
     "~/.claude/local",
     "~/.npm-global/bin",
@@ -114,41 +114,69 @@ const EXTRA_DIRS: [&str; 8] = [
     "~/.cargo/bin",
 ];
 
+/// Where Claude Code's installers put `claude` on Windows (the native installer, npm, bun,
+/// volta, scoop): a PATH changed by an installer reaches only programs started after it.
+#[cfg(windows)]
+const EXTRA_DIRS: &[&str] = &[
+    "~/.local/bin",
+    "~/.claude/local",
+    "~/AppData/Roaming/npm",
+    "~/.bun/bin",
+    "~/AppData/Local/Volta/bin",
+    "~/scoop/shims",
+    "~/.cargo/bin",
+];
+
 fn expand_home(p: &str, home: &str) -> String {
     match p.strip_prefix('~') {
-        Some(rest) if !home.is_empty() && (rest.is_empty() || rest.starts_with('/')) => format!("{home}{rest}"),
+        Some(rest) if !home.is_empty() && (rest.is_empty() || rest.starts_with(['/', '\\'])) => {
+            let rest = if cfg!(windows) { rest.replace('/', "\\") } else { rest.to_owned() };
+            format!("{home}{rest}")
+        }
         _ => p.to_owned(),
     }
 }
 
 /// `current`, then the login shell's PATH, then [`EXTRA_DIRS`], without repeats.
 pub fn merged_path(current: &str, login: &str, home: &str) -> String {
+    use crate::platform::PATH_SEP;
     let mut out: Vec<String> = Vec::new();
     let extra = EXTRA_DIRS.iter().map(|d| expand_home(d, home));
-    for dir in current.split(':').chain(login.split(':')).map(str::to_owned).chain(extra) {
-        if !dir.is_empty() && !out.contains(&dir) {
+    for dir in current.split(PATH_SEP).chain(login.split(PATH_SEP)).map(str::to_owned).chain(extra) {
+        // Windows doesn't care about case or a trailing \ in PATH entries.
+        let same = |a: &String| if cfg!(windows) { a.trim_end_matches('\\').eq_ignore_ascii_case(dir.trim_end_matches('\\')) } else { *a == dir };
+        if !dir.is_empty() && !out.iter().any(same) {
             out.push(dir);
         }
     }
-    out.join(":")
+    out.join(&PATH_SEP.to_string())
 }
 
 /// The command to spawn for `bin`: a path as is (with `~` expanded), a bare name as the first
-/// executable of that name on `path`, or the name unchanged when there is none.
+/// program of that name on `path` (on Windows also `claude.exe`, `claude.cmd`, …), or the
+/// name unchanged when there is none.
 pub fn resolve_bin(bin: &str, path: &str, home: &str) -> PathBuf {
     let bin = expand_home(bin.trim(), home);
-    if bin.contains('/') {
+    if crate::platform::is_path(&bin) {
         return PathBuf::from(bin);
     }
-    use std::os::unix::fs::PermissionsExt;
-    path.split(':')
+    let names = crate::platform::program_names(&bin);
+    path.split(crate::platform::PATH_SEP)
         .filter(|d| !d.is_empty())
-        .map(|d| PathBuf::from(expand_home(d, home)).join(&bin))
-        .find(|p| p.metadata().is_ok_and(|m| m.is_file() && m.permissions().mode() & 0o111 != 0))
+        .flat_map(|d| names.iter().map(move |n| PathBuf::from(expand_home(d, home)).join(n)))
+        .find(|p| crate::platform::is_program(p))
         .unwrap_or_else(|| PathBuf::from(bin))
 }
 
+/// PATH as the user's login shell sets it, or empty if it does not answer within 3 s. Windows
+/// has no login shell: a program gets the PATH saved for the user already.
+#[cfg(windows)]
+fn login_shell_path() -> String {
+    String::new()
+}
+
 /// PATH as the user's login shell sets it, or empty if it does not answer within 3 s.
+#[cfg(not(windows))]
 fn login_shell_path() -> String {
     let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/zsh".into());
     let Ok(mut child) = Command::new(shell)
@@ -177,7 +205,7 @@ fn login_shell_path() -> String {
 /// would have. Call first thing in `main`, before any thread starts.
 pub fn fix_path() {
     let current = std::env::var("PATH").unwrap_or_default();
-    let home = std::env::var("HOME").unwrap_or_default();
+    let home = crate::platform::home_string();
     let path = merged_path(&current, &login_shell_path(), &home);
     // SAFETY: called at the start of main, while this is the only thread.
     unsafe { std::env::set_var("PATH", path) };
@@ -196,9 +224,10 @@ fn claude() -> Claude {
 /// `claude -p` with the extra arguments from Settings.
 fn command(c: &Claude) -> Command {
     let path = std::env::var("PATH").unwrap_or_default();
-    let home = std::env::var("HOME").unwrap_or_default();
+    let home = crate::platform::home_string();
     let mut cmd = Command::new(resolve_bin(&c.bin, &path, &home));
     cmd.arg("-p").args(&c.extra);
+    crate::platform::hide_window(&mut cmd);
     cmd
 }
 
@@ -221,36 +250,29 @@ pub fn send_args(c: &Claude, choice: &Choice, id: &str, prompt: &str, new: bool)
 }
 
 /// Stops a running prompt, like Ctrl+C in a terminal: SIGINT to claude and everything it
-/// started (its own process group), then SIGKILL if it is still there 2 s later.
+/// started (its own process group), then SIGKILL if it is still there 2 s later. On Windows,
+/// which has no Ctrl+C for a program without a console window, its whole tree is ended at once.
 #[derive(Clone, Default)]
 pub struct Stop(Arc<Mutex<Option<u32>>>);
 
 impl Stop {
     pub fn stop(&self) {
         let Some(pid) = *self.0.lock().unwrap() else { return };
-        let group = signal_target(pid);
-        unsafe { libc::kill(group, libc::SIGINT) };
         let me = self.clone();
-        std::thread::spawn(move || {
-            std::thread::sleep(std::time::Duration::from_secs(2));
-            if me.0.lock().unwrap().is_some() {
-                unsafe { libc::kill(group, libc::SIGKILL) };
-            }
-        });
+        let still = move || me.0.lock().unwrap().is_some();
+        crate::platform::stop_then_kill(pid, crate::platform::Stop::Interrupt, true, std::time::Duration::from_secs(2), still);
     }
-}
-
-/// Where a stop for `pid` goes: its process group when it leads one (runs scope starts do),
-/// else (one started in a terminal shares the shell's group) just it.
-fn signal_target(pid: u32) -> i32 {
-    if unsafe { libc::getpgid(pid as i32) } == pid as i32 { -(pid as i32) } else { pid as i32 }
 }
 
 /// Interrupts a `claude` scope doesn't follow (Claude Code in a terminal) like Ctrl+C there:
 /// one SIGINT, which stops what it is doing. Nothing harder: that would end the terminal's
-/// session too, which Ctrl+C doesn't.
+/// session too, which Ctrl+C doesn't. (Windows: those are `claude -p` runs, which end with it.)
 pub fn interrupt(pid: u32) {
-    unsafe { libc::kill(signal_target(pid), libc::SIGINT) };
+    if cfg!(windows) {
+        crate::platform::stop(pid, crate::platform::Stop::Kill, true);
+    } else {
+        crate::platform::stop(pid, crate::platform::Stop::Interrupt, true);
+    }
 }
 
 /// What a running `claude -p` reports, as it happens.
@@ -271,7 +293,7 @@ pub fn send(ctx: eframe::egui::Context, id: String, cwd: Option<PathBuf>, prompt
     let mut cmd = command(&c);
     // Claude can manage scope's sessions through its command, and knows which one it is.
     if let Ok(exe) = std::env::current_exe() {
-        cmd.args(["--append-system-prompt", &crate::control::system_prompt(&exe.to_string_lossy())]);
+        cmd.args(["--append-system-prompt", &crate::control::system_prompt(&crate::platform::shell_path(&exe))]);
     }
     cmd.env(crate::control::SESSION_VAR, &id);
     cmd.args(send_args(&c, &choice, &id, &prompt, new));
@@ -297,7 +319,8 @@ pub fn compose(ctx: eframe::egui::Context, id: String, root: PathBuf, prompt: St
 /// Runs `cmd` on a thread in its own process group (so Stop reaches its children too),
 /// streaming its events. With `input`, a prompt with images, it is written to claude's stdin.
 fn spawn_stream(ctx: eframe::egui::Context, mut cmd: Command, input: Option<String>) -> (Receiver<RunEvent>, Stop) {
-    cmd.stdin(if input.is_some() { Stdio::piped() } else { Stdio::null() }).stdout(Stdio::piped()).stderr(Stdio::piped()).process_group(0);
+    cmd.stdin(if input.is_some() { Stdio::piped() } else { Stdio::null() }).stdout(Stdio::piped()).stderr(Stdio::piped());
+    crate::platform::own_group(&mut cmd);
     let stop = Stop::default();
     let pid = stop.clone();
     let (tx, rx) = channel();
@@ -380,28 +403,56 @@ fn event(v: &Value) -> Option<RunEvent> {
 /// scope that has quit leaves its runs going (`claude` finishes and saves its reply without
 /// anyone reading it), and another scope or a terminal can start them too.
 fn foreign_runs() -> Vec<(String, u32)> {
-    let out = Command::new("ps").args(["-axww", "-o", "pid=,ppid=,args="]).stdin(Stdio::null()).output();
-    out.map(|o| parse_ps(&String::from_utf8_lossy(&o.stdout), std::process::id())).unwrap_or_default()
+    let procs: Vec<(u32, u32, String)> = crate::platform::processes().into_iter().map(|p| (p.pid, p.ppid, p.args)).collect();
+    foreign_in(&procs, std::process::id())
 }
 
-/// [`foreign_runs`] in `ps -o pid=,ppid=,args=` output; `me` is this scope (its own runs are
-/// its children). Side questions (`--fork-session`, nothing saved) don't count.
+/// [`foreign_runs`] in `ps -o pid=,ppid=,args=` output; `me` is this scope.
+#[cfg(test)]
 fn parse_ps(text: &str, me: u32) -> Vec<(String, u32)> {
-    let is_uuid = |s: &str| s.len() == 36 && s.chars().all(|c| c.is_ascii_hexdigit() || c == '-');
-    text.lines()
+    let procs: Vec<(u32, u32, String)> = text
+        .lines()
         .filter_map(|line| {
             let mut t = line.split_whitespace();
             let pid: u32 = t.next()?.parse().ok()?;
             let ppid: u32 = t.next()?.parse().ok()?;
-            let args: Vec<&str> = t.collect();
-            let claude = args.iter().take(2).any(|a| a.contains("claude"));
+            Some((pid, ppid, t.collect::<Vec<_>>().join(" ")))
+        })
+        .collect();
+    foreign_in(&procs, me)
+}
+
+/// [`foreign_runs`] among processes as (pid, parent pid, command line); `me` is this scope:
+/// its own runs, and what they start, descend from it. Side questions (`--fork-session`,
+/// nothing saved) don't count, nor does a Windows shell only passing a run on to `claude.cmd`
+/// (the `claude` under it is the run).
+fn foreign_in(procs: &[(u32, u32, String)], me: u32) -> Vec<(String, u32)> {
+    let is_uuid = |s: &str| s.len() == 36 && s.chars().all(|c| c.is_ascii_hexdigit() || c == '-');
+    let parent: std::collections::HashMap<u32, u32> = procs.iter().map(|(pid, ppid, _)| (*pid, *ppid)).collect();
+    let mine = |mut pid: u32| {
+        // Bounded: a pid reused as its own ancestor can't loop forever.
+        for _ in 0..64 {
+            match parent.get(&pid) {
+                Some(&p) if p == me => return true,
+                Some(&p) if p != 0 && p != pid => pid = p,
+                _ => return false,
+            }
+        }
+        false
+    };
+    procs
+        .iter()
+        .filter_map(|(pid, _, line)| {
+            let args: Vec<&str> = crate::platform::words(line).collect();
+            let shell = args.first().is_some_and(|a| matches!(crate::processes::program_name(a).as_str(), "cmd" | "powershell" | "pwsh"));
+            let claude = args.iter().take(2).any(|a| a.to_ascii_lowercase().contains("claude"));
             let print = args.iter().any(|a| matches!(*a, "-p" | "--print"));
             let side = args.iter().any(|a| matches!(*a, "--fork-session" | "--no-session-persistence"));
-            if ppid == me || !claude || !print || side {
+            if shell || !claude || !print || side || mine(*pid) {
                 return None;
             }
             let id = args.windows(2).find(|w| matches!(w[0], "--resume" | "-r" | "--session-id"))?[1];
-            is_uuid(id).then(|| (id.to_owned(), pid))
+            is_uuid(id).then(|| (id.to_owned(), *pid))
         })
         .collect()
 }
@@ -427,8 +478,7 @@ pub fn watch_runs(ctx: eframe::egui::Context) -> Receiver<Vec<(String, u32)>> {
 }
 
 fn alive(pid: u32) -> bool {
-    let ok = unsafe { libc::kill(pid as i32, 0) } == 0;
-    ok || std::io::Error::last_os_error().raw_os_error() == Some(libc::EPERM)
+    crate::platform::alive(pid)
 }
 
 /// Follows a run this scope did not start (see [`foreign_runs`]) through its session file,
@@ -607,7 +657,17 @@ pub fn pick_folder(start: Option<PathBuf>) -> Option<PathBuf> {
     panel.URL().and_then(|u| u.path()).map(|p| PathBuf::from(p.to_string()))
 }
 
-#[cfg(not(target_os = "macos"))]
+/// The Windows folder picker. Blocks until the user picks a folder or cancels (None).
+#[cfg(windows)]
+pub fn pick_folder(start: Option<PathBuf>) -> Option<PathBuf> {
+    let mut dialog = rfd::FileDialog::new().set_title("Folder for the new Claude session");
+    if let Some(dir) = start.filter(|d| d.is_dir()) {
+        dialog = dialog.set_directory(dir);
+    }
+    dialog.pick_folder()
+}
+
+#[cfg(not(any(target_os = "macos", windows)))]
 pub fn pick_folder(_start: Option<PathBuf>) -> Option<PathBuf> {
     None
 }
@@ -622,13 +682,21 @@ pub fn trash(path: &Path) -> Result<(), String> {
         .map_err(|e| e.localizedDescription().to_string())
 }
 
-#[cfg(not(target_os = "macos"))]
+/// Moves a file or folder to the Recycle Bin (its Restore puts it back).
+#[cfg(windows)]
+pub fn trash(path: &Path) -> Result<(), String> {
+    trash::delete(path).map_err(|e| e.to_string())
+}
+
+#[cfg(not(any(target_os = "macos", windows)))]
 pub fn trash(path: &Path) -> Result<(), String> {
     if path.is_dir() { std::fs::remove_dir_all(path) } else { std::fs::remove_file(path) }.map_err(|e| e.to_string())
 }
 
-/// A system notification (macOS) through `osascript`: Script Editor's icon (notify.rs posts
-/// scope's own where macOS allows it). An empty `subtitle` is left out.
+/// A system notification: on macOS through `osascript`, with Script Editor's icon (notify.rs
+/// posts scope's own where macOS allows it); on Windows a toast (notify.rs). An empty
+/// `subtitle` is left out.
+#[cfg(not(windows))]
 pub fn notify(title: &str, subtitle: &str, body: &str) {
     let quote = |s: &str| s.replace('\\', "\\\\").replace('"', "\\\"");
     let mut script = format!("display notification \"{}\" with title \"{}\"", quote(body), quote(title));
@@ -642,9 +710,19 @@ pub fn notify(title: &str, subtitle: &str, body: &str) {
 pub fn new_session_id() -> String {
     let mut b = [0u8; 16];
     if std::fs::File::open("/dev/urandom").and_then(|mut f| f.read_exact(&mut b)).is_err() {
-        // Fallback: time-based bytes; uniqueness is all we need.
+        // No /dev/urandom (Windows): std's hasher keys are random per process, mixed here with
+        // the time and a counter; uniqueness is all we need.
+        use std::hash::{BuildHasher, Hasher};
+        static COUNT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
         let t = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_nanos();
-        b = t.to_le_bytes();
+        let n = COUNT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        for (i, half) in b.chunks_mut(8).enumerate() {
+            let mut h = std::collections::hash_map::RandomState::new().build_hasher();
+            h.write_u128(t);
+            h.write_u64(n);
+            h.write_usize(i);
+            half.copy_from_slice(&h.finish().to_le_bytes());
+        }
     }
     b[6] = (b[6] & 0x0f) | 0x40;
     b[8] = (b[8] & 0x3f) | 0x80;
@@ -729,6 +807,22 @@ mod tests {
         assert_eq!(parse_ps(&ps, 50), [(id.to_owned(), 101), (id.to_owned(), 105)]);
     }
 
+    /// Windows: scope's own run goes through `cmd /c claude.cmd`, so the `node` doing it is a
+    /// grandchild; a terminal's run may have spaces in its paths (kept as no-break spaces).
+    #[test]
+    fn foreign_runs_on_windows_follow_the_tree_and_skip_the_shell() {
+        let id = "e2b80fff-329c-4904-92c2-9a3c6afe53c5";
+        let nb = |s: &str| s.replace(' ', "\u{a0}");
+        let procs = vec![
+            (200, 50, format!("C:\\Windows\\system32\\cmd.exe /c claude.cmd -p --resume {id} mine")),
+            (201, 200, format!("{} C:\\Users\\me\\npm\\node_modules\\@anthropic-ai\\claude-code\\cli.js -p --resume {id} mine", nb("C:\\Program Files\\nodejs\\node.exe"))),
+            (300, 7, format!("C:\\Windows\\system32\\cmd.exe /c claude.cmd -p --resume {id} theirs")),
+            (301, 300, format!("{} {} -p --resume {id} theirs", nb("C:\\Program Files\\nodejs\\node.exe"), nb("C:\\Users\\Jo Smith\\npm\\claude-code\\cli.js"))),
+            (400, 8, format!("C:\\Users\\me\\.local\\bin\\claude.exe -p --session-id {id} native")),
+        ];
+        assert_eq!(foreign_in(&procs, 50), [(id.to_owned(), 301), (id.to_owned(), 400)]);
+    }
+
     /// A run another scope started: its saved lines arrive, then Done when its process ends.
     #[test]
     fn follow_reads_a_foreign_run_until_its_process_ends() {
@@ -736,7 +830,7 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         let file = dir.join("s.jsonl");
         std::fs::write(&file, "{\"type\":\"user\",\"message\":{\"content\":\"before\"}}\n").unwrap();
-        let mut child = Command::new("sleep").arg("30").spawn().unwrap();
+        let mut child = long_running().spawn().unwrap();
         let (rx, stop) = follow(eframe::egui::Context::default(), child.id(), file.clone());
         std::thread::sleep(std::time::Duration::from_millis(300));
         let mut f = std::fs::OpenOptions::new().append(true).open(&file).unwrap();
@@ -751,11 +845,38 @@ mod tests {
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
+    /// A process that runs for 30 s and prints nothing.
+    fn long_running() -> Command {
+        let mut cmd = if cfg!(windows) {
+            let mut c = Command::new("ping");
+            c.args(["-n", "31", "127.0.0.1"]);
+            c
+        } else {
+            let mut c = Command::new("sleep");
+            c.arg("30");
+            c
+        };
+        cmd.stdout(Stdio::null());
+        cmd
+    }
+
     /// Regression: Ctrl+C must end a run at once, children included, not when it finishes.
     #[test]
     fn stop_ends_a_run_and_its_children_quickly() {
-        let mut cmd = Command::new("sh");
-        cmd.args(["-c", "sleep 30 & echo '{\"type\":\"assistant\",\"message\":{\"content\":[]}}'; wait"]);
+        #[cfg(not(windows))]
+        let cmd = {
+            let mut cmd = Command::new("sh");
+            cmd.args(["-c", "sleep 30 & echo '{\"type\":\"assistant\",\"message\":{\"content\":[]}}'; wait"]);
+            cmd
+        };
+        // cmd.exe reads its command line itself, so it is given as is.
+        #[cfg(windows)]
+        let cmd = {
+            use std::os::windows::process::CommandExt;
+            let mut cmd = Command::new("cmd");
+            cmd.raw_arg(r#"/c "echo {"type":"assistant","message":{"content":[]}}& ping -n 31 127.0.0.1 >nul""#);
+            cmd
+        };
         let ctx = eframe::egui::Context::default();
         let (rx, stop) = spawn_stream(ctx, cmd, None);
         let first = rx.recv_timeout(std::time::Duration::from_secs(5)).expect("first line");
@@ -776,6 +897,7 @@ mod tests {
 
     /// Regression: launched from Finder, PATH lacks ~/.local/bin, so spawning a bare `claude`
     /// failed with "No such file or directory (os error 2)".
+    #[cfg(not(windows))]
     #[test]
     fn merged_path_adds_user_dirs_to_a_finder_path() {
         let p = merged_path("/usr/bin:/bin:/usr/sbin:/sbin", "", "/Users/me");
@@ -790,6 +912,7 @@ mod tests {
         assert_eq!(dirs.iter().filter(|d| **d == "/opt/homebrew/bin").count(), 1);
     }
 
+    #[cfg(unix)]
     #[test]
     fn resolve_bin_finds_claude_outside_the_finder_path() {
         use std::os::unix::fs::PermissionsExt;
@@ -814,7 +937,38 @@ mod tests {
         std::fs::remove_dir_all(&home).unwrap();
     }
 
+    /// Windows: the installers' folders join PATH once (whatever their case), separated by `;`.
+    #[cfg(windows)]
+    #[test]
+    fn merged_path_adds_the_installers_folders_on_windows() {
+        let p = merged_path(r"C:\Windows\system32;C:\Users\me\.local\bin\", "", r"C:\Users\me");
+        let dirs: Vec<&str> = p.split(';').collect();
+        assert_eq!(dirs[..2], [r"C:\Windows\system32", r"C:\Users\me\.local\bin\"]);
+        assert!(dirs.contains(&r"C:\Users\me\AppData\Roaming\npm"));
+        assert_eq!(dirs.iter().filter(|d| d.to_ascii_lowercase().contains(r"\.local\bin")).count(), 1);
+    }
+
+    /// Windows: `claude` is found as `claude.exe` (native installer) or `claude.cmd` (npm).
+    #[cfg(windows)]
+    #[test]
+    fn resolve_bin_finds_claude_cmd_and_exe_on_windows() {
+        let home = std::env::temp_dir().join(format!("scope-resolve-{}", std::process::id()));
+        let npm = home.join("AppData").join("Roaming").join("npm");
+        std::fs::create_dir_all(&npm).unwrap();
+        let claude = npm.join("claude.cmd");
+        std::fs::write(&claude, "@echo off\r\n").unwrap();
+        std::fs::write(npm.join("claude"), "#!/bin/sh\n").unwrap();
+        let home_s = home.to_str().unwrap();
+        assert_eq!(resolve_bin("claude", r"C:\nowhere", home_s), PathBuf::from("claude"));
+        let path = merged_path(r"C:\nowhere", "", home_s);
+        assert_eq!(resolve_bin("claude", &path, home_s), claude, "the shell script npm also writes is skipped");
+        assert_eq!(resolve_bin(r"D:\tools\claude.exe", "", home_s), PathBuf::from(r"D:\tools\claude.exe"));
+        assert_eq!(resolve_bin("~/AppData/Roaming/npm/claude.cmd", "", home_s), claude);
+        std::fs::remove_dir_all(&home).unwrap();
+    }
+
     /// The bundled app gets this PATH; the real `claude` must be reachable through it.
+    #[cfg(not(windows))]
     #[test]
     fn login_shell_path_is_nonempty() {
         assert!(!login_shell_path().is_empty());

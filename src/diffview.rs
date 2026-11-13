@@ -324,7 +324,9 @@ pub fn uncommitted(files: &[String]) -> std::collections::HashSet<String> {
         .filter(|f| {
             let path = Path::new(f.as_str());
             let (Some(dir), Some(name)) = (path.parent(), path.file_name()) else { return true };
-            let out = std::process::Command::new("git")
+            let mut git = std::process::Command::new("git");
+            crate::platform::hide_window(&mut git);
+            let out = git
                 .arg("-C")
                 .arg(dir)
                 .args(["status", "--porcelain", "--untracked-files=all", "--"])

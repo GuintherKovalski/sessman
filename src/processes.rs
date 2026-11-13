@@ -1,7 +1,7 @@
 //! The orchestration page's **Processes** tab: everything the workspace's sessions have
 //! started that is still running, as a tree under each session's `claude`.
 //!
-//! Every 2 s while the page is open, `ps` lists all processes. A session's `claude` is one
+//! Every 2 s while the page is open, `ps` (on Windows, sysinfo: platform.rs) lists all processes. A session's `claude` is one
 //! with `--resume <id>` / `--session-id <id>` of a session in the workspace (scope's own runs,
 //! ones it adopted, or Claude Code in a terminal); side questions (`--fork-session`,
 //! `--no-session-persistence`) don't count. Below it come its descendants, plus processes
@@ -18,7 +18,6 @@ use serde_json::Value;
 use std::collections::{HashMap, HashSet};
 use std::io::{Read, Seek, SeekFrom};
 use std::path::PathBuf;
-use std::process::{Command, Stdio};
 use std::sync::mpsc::{Receiver, TryRecvError, channel};
 use std::time::{Duration, Instant};
 
@@ -150,20 +149,27 @@ pub fn parse_etime(s: &str) -> Option<u64> {
 
 /// The session a `claude` command line works on, unless it is a side question.
 pub fn session_of(args: &str) -> Option<&str> {
-    let words: Vec<&str> = args.split_whitespace().collect();
-    let program = words.first()?;
-    let claude = program.rsplit('/').next().is_some_and(|p| p.contains("claude"))
-        || (matches!(program.rsplit('/').next(), Some("node" | "bun")) && words.get(1).is_some_and(|w| w.contains("claude")));
+    let words: Vec<&str> = crate::platform::words(args).collect();
+    let program = program_name(words.first()?);
+    let claude = program.contains("claude")
+        || (matches!(program.as_str(), "node" | "bun") && words.get(1).is_some_and(|w| w.to_ascii_lowercase().contains("claude")));
     if !claude || words.iter().any(|w| matches!(*w, "--fork-session" | "--no-session-persistence")) {
         return None;
     }
     words.windows(2).find(|w| matches!(w[0], "--resume" | "-r" | "--session-id")).map(|w| w[1])
 }
 
+/// A program's name: the last part of its path, lowercase, without `.exe` (`/usr/bin/claude`
+/// → `claude`, `C:\\Program Files\\nodejs\\node.exe` → `node`).
+pub fn program_name(program: &str) -> String {
+    let name = program.rsplit(['/', '\\']).next().unwrap_or(program).to_ascii_lowercase();
+    name.strip_suffix(".exe").map(str::to_owned).unwrap_or(name)
+}
+
 /// The command Claude Code's Bash tool runs in this shell command line: what it `eval`s,
 /// after sourcing its shell snapshot.
 pub fn bash_command(args: &str) -> Option<String> {
-    if !args.contains("shell-snapshots/snapshot-") {
+    if !args.contains("shell-snapshots/snapshot-") && !args.contains("shell-snapshots\\snapshot-") {
         return None;
     }
     let at = args.find(" eval ")? + " eval ".len();
@@ -209,9 +215,10 @@ fn kind_of(p: &Proc, depth: usize, parent_is_claude: bool) -> Kind {
     if bash_command(&p.args).is_some() {
         return Kind::Bash;
     }
-    let program = p.args.split_whitespace().next().unwrap_or_default();
+    let program = crate::platform::words(&p.args).next().unwrap_or_default().replace('\\', "/");
     let name = program.rsplit('/').next().unwrap_or_default();
-    if name == "rg" || program.contains("/ripgrep/") {
+    let name = name.strip_suffix(".exe").unwrap_or(name);
+    if name.eq_ignore_ascii_case("rg") || program.contains("/ripgrep/") {
         return Kind::Search;
     }
     let lower = p.args.to_ascii_lowercase();
@@ -223,10 +230,7 @@ fn kind_of(p: &Proc, depth: usize, parent_is_claude: bool) -> Kind {
 
 /// A command line made short: each path down to its last part, at most 160 characters.
 pub fn short(args: &str) -> String {
-    let words: Vec<&str> = args
-        .split_whitespace()
-        .map(|w| if w.starts_with('/') && w.len() > 1 { w.trim_end_matches('/').rsplit('/').next().unwrap_or(w) } else { w })
-        .collect();
+    let words: Vec<&str> = crate::platform::words(args).map(last_part).collect();
     let s = words.join(" ");
     match s.char_indices().nth(160) {
         Some((i, _)) => format!("{}…", &s[..i]),
@@ -234,9 +238,21 @@ pub fn short(args: &str) -> String {
     }
 }
 
+/// A path down to its last part (`/a/b/server.js` → `server.js`, `C:\\a\\node.exe` →
+/// `node.exe`); anything else as it is.
+fn last_part(w: &str) -> &str {
+    let b = w.as_bytes();
+    let unix = w.starts_with('/') && w.len() > 1;
+    let windows = b.len() > 2 && b[0].is_ascii_alphabetic() && b[1] == b':' && matches!(b[2], b'\\' | b'/');
+    if !(unix || windows) {
+        return w;
+    }
+    w.trim_end_matches(['/', '\\']).rsplit(['/', '\\']).next().unwrap_or(w)
+}
+
 /// What `claude` itself is shown as: how it runs, and its model when given.
 fn claude_what(args: &str) -> String {
-    let words: Vec<&str> = args.split_whitespace().collect();
+    let words: Vec<&str> = crate::platform::words(args).collect();
     let print = words.iter().any(|w| matches!(*w, "-p" | "--print"));
     let mut s = if print { "claude -p".to_owned() } else { "claude (terminal)".to_owned() };
     if let Some(w) = words.windows(2).find(|w| w[0] == "--model") {
@@ -390,8 +406,7 @@ fn tail(path: &std::path::Path) -> String {
 
 /// One sample: `ps`, the trees of `sessions` (id, session file), their Bash calls matched.
 fn sample(sessions: &[(String, PathBuf)]) -> Vec<Group> {
-    let out = Command::new("ps").args(["-axww", "-o", "pid=,ppid=,pgid=,%cpu=,rss=,etime=,args="]).stdin(Stdio::null()).output();
-    let procs = out.map(|o| parse_ps(&String::from_utf8_lossy(&o.stdout))).unwrap_or_default();
+    let procs = crate::platform::processes();
     let ids: Vec<String> = sessions.iter().map(|(id, _)| id.clone()).collect();
     let mut groups = groups(&procs, &ids);
     for g in &mut groups {
@@ -412,19 +427,13 @@ pub fn subtree(rows: &[Row], i: usize) -> Vec<u32> {
     std::iter::once(rows[i].pid).chain(rows[i + 1..].iter().take_while(|r| r.depth > depth).map(|r| r.pid)).collect()
 }
 
-/// Ends processes: SIGTERM to each, then SIGKILL to those still there 2 s later.
+/// Ends processes: SIGTERM to each, then SIGKILL to those still there 2 s later (on Windows,
+/// which can't ask a console program to end, at once).
 pub fn terminate(pids: Vec<u32>) {
-    for &pid in &pids {
-        unsafe { libc::kill(pid as i32, libc::SIGTERM) };
+    use crate::platform::{Stop, stop_then_kill};
+    for pid in pids {
+        stop_then_kill(pid, Stop::Terminate, false, Duration::from_secs(2), || true);
     }
-    std::thread::spawn(move || {
-        std::thread::sleep(Duration::from_secs(2));
-        for pid in pids {
-            if unsafe { libc::kill(pid as i32, 0) } == 0 {
-                unsafe { libc::kill(pid as i32, libc::SIGKILL) };
-            }
-        }
-    });
 }
 
 /// What the developer did on the tab.

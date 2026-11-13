@@ -1,3 +1,7 @@
+// A windowed app on Windows: no console window behind scope. Its commands (`scope list`, the
+// status line) borrow the terminal's console or write to the pipe they are given.
+#![cfg_attr(windows, windows_subsystem = "windows")]
+
 mod app;
 mod control;
 mod diffview;
@@ -13,6 +17,7 @@ mod newinfo;
 mod notify;
 mod orchestration;
 mod overview;
+mod platform;
 mod processes;
 mod queue;
 mod refine;
@@ -33,13 +38,16 @@ mod workspaces;
 
 fn main() -> eframe::Result {
     if std::env::args().nth(1).as_deref() == Some("statusline") {
+        platform::attach_console();
         status::run();
         return Ok(());
     }
     let args: Vec<String> = std::env::args().skip(1).collect();
     if args.first().is_some_and(|a| control::is_command(a)) {
+        platform::attach_console();
         std::process::exit(control::cli(&args));
     }
+    update::clean_up_old();
     settings::adopt_old_config();
     runner::fix_path();
     images::watch_paste();
@@ -57,7 +65,8 @@ fn main() -> eframe::Result {
 }
 
 /// The window: content runs under a transparent title bar, so the app's own top bar holds the
-/// macOS window buttons instead of them covering the panels.
+/// macOS window buttons instead of them covering the panels. (Windows keeps its own title bar;
+/// these options are macOS's.)
 fn viewport() -> eframe::egui::ViewportBuilder {
     eframe::egui::ViewportBuilder::default()
         .with_inner_size([1400.0, 850.0])

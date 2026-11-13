@@ -49,7 +49,8 @@ pub struct Scope<'a> {
 
 fn tilde(p: &Path, home: &Path) -> String {
     match p.strip_prefix(home) {
-        Ok(rest) if !home.as_os_str().is_empty() => format!("~/{}", rest.display()),
+        // `/` on Windows too: `~/.claude/settings.json` reads the same everywhere.
+        Ok(rest) if !home.as_os_str().is_empty() => format!("~/{}", rest.to_string_lossy().replace('\\', "/")),
         _ => p.display().to_string(),
     }
 }
