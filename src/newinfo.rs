@@ -275,7 +275,7 @@ pub fn full_name(model: &str, known: &[String]) -> String {
 /// The model dropdown: full names, as Claude Code reports them. The button shows the pick, or
 /// what applies without one (`default`; `None` = Claude Code's own default); the default comes
 /// first in the menu and is not listed again under its name. The last item, "Look for model
-/// updates", asks the Claude API for newer models: true when clicked. `updates` is how the
+/// updates", asks Claude for newer models: true when clicked. `updates` is how the
 /// last look went, shown under it.
 pub fn model_picker(ui: &mut egui::Ui, id: &str, value: &mut String, default: Option<&str>, known: &[String], enabled: bool, updates: &str) -> bool {
     let default = default.map(|d| full_name(d, known));
@@ -297,7 +297,7 @@ pub fn model_picker(ui: &mut egui::Ui, id: &str, value: &mut String, default: Op
                     }
                 }
                 ui.separator();
-                look = ui.selectable_label(false, "🔄 Look for model updates").on_hover_text("Asks the Claude API which models there are now (needs ANTHROPIC_API_KEY or `ant auth login`)").clicked();
+                look = ui.selectable_label(false, "🔄 Look for model updates").on_hover_text("Asks Claude (the helper model, reading Anthropic's docs) which models there are now; uses a little of your usage").clicked();
                 if !updates.is_empty() {
                     ui.label(egui::RichText::new(updates).weak().small());
                 }
