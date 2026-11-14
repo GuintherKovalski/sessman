@@ -359,6 +359,9 @@ pub struct App {
     default_model: Option<((PathBuf, String, String), std::time::Instant, Option<crate::newinfo::Sourced>)>,
     /// The models the dropdowns offer, by full name: the newest known per family.
     model_ids: Vec<String>,
+    /// "Look for model updates": the lookup under way, and how the last one went.
+    model_check: Option<Receiver<Result<Vec<String>, String>>>,
+    model_check_note: String,
     seen_from: u64,
     /// Whether each session's work looks finished (verdict.rs), the checks under way, the
     /// checks that failed (id → the change they read; not retried until there is a newer one),
@@ -627,6 +630,8 @@ impl App {
             new_choice: runner::Choice::default(),
             default_model: None,
             model_ids: crate::newinfo::MODEL_IDS.map(String::from).to_vec(),
+            model_check: None,
+            model_check_note: String::new(),
             seen_from: 0,
             verdicts: Shared::load(Verdicts::path()),
             judging: Vec::new(),
@@ -651,6 +656,9 @@ impl App {
         let mut st = State::load(&state::path());
         app.seen = std::mem::take(&mut st.seen);
         app.choices = std::mem::take(&mut st.choices);
+        for m in std::mem::take(&mut st.model_ids) {
+            crate::newinfo::learn(&mut app.model_ids, &m);
+        }
         app.seen_from = match st.seen_from {
             0 => overview::secs(SystemTime::now()),
             t => t,
@@ -703,6 +711,7 @@ impl App {
             seen: self.seen.iter().filter(|(id, _)| self.sessions.iter().any(|s| s.id == **id)).map(|(k, v)| (k.clone(), *v)).collect(),
             seen_from: self.seen_from,
             choices: self.choices.clone(),
+            model_ids: self.model_ids.clone(),
         }
     }
 
@@ -1866,6 +1875,28 @@ impl App {
     }
 
     /// Every session's pending answers, so one asked before switching away still arrives.
+    /// "Look for model updates" in a model dropdown: asks the Claude API (models.rs).
+    fn look_for_models(&mut self) {
+        if self.model_check.is_none() {
+            self.model_check = Some(crate::models::check(self.ctx.clone()));
+            self.model_check_note = "Looking…".into();
+        }
+    }
+
+    fn poll_model_check(&mut self) {
+        let Some(rx) = &self.model_check else { return };
+        let Ok(result) = rx.try_recv() else { return };
+        self.model_check = None;
+        self.model_check_note = match result {
+            Ok(found) => match crate::models::apply(&mut self.model_ids, &found) {
+                new if new.is_empty() => "Up to date: no newer models".into(),
+                new => format!("New: {}", new.join(", ")),
+            },
+            Err(e) => e,
+        };
+        self.save_state();
+    }
+
     fn poll_btw(&mut self) {
         for b in self.btw.values_mut().flatten() {
             if let Some(Ok(result)) = b.rx.as_ref().map(|rx| rx.try_recv()) {
@@ -3607,7 +3638,9 @@ impl App {
             let running = self.open_running();
             let status = if running { "Starting…" } else { "Type your first prompt below." };
             if let Some((_, info)) = &self.new_info {
-                crate::newinfo::show(ui, &dir, info, &mut self.new_choice, &self.model_ids, !running, status);
+                if crate::newinfo::show(ui, &dir, info, &mut self.new_choice, &self.model_ids, &self.model_check_note, !running, status) {
+                    self.look_for_models();
+                }
             }
             return;
         }
@@ -3983,6 +4016,7 @@ impl App {
         }
         let mut model_pick = self.open_model_choice();
         let picked_before = model_pick.clone();
+        let mut look_for_models = false;
         let model_editable = !self.open_running();
         let Some(s) = &self.open else {
             ui.label("Select a session to see its info");
@@ -4138,7 +4172,7 @@ impl App {
             // resume the same session, so switching keeps the conversation.
             let default_model = default_model.flatten();
             ui.horizontal_wrapped(|ui| {
-                crate::newinfo::model_picker(ui, "info-model", &mut model_pick, default_model.as_ref().map(|m| m.value.as_str()), &self.model_ids, model_editable);
+                look_for_models = crate::newinfo::model_picker(ui, "info-model", &mut model_pick, default_model.as_ref().map(|m| m.value.as_str()), &self.model_ids, model_editable, &self.model_check_note);
                 let note = match &default_model {
                     _ if !model_pick.is_empty() => "(this session; later prompts keep it)".to_owned(),
                     Some(m) => format!("({})", m.from),
@@ -4213,6 +4247,9 @@ impl App {
         if let (true, Some(id)) = (start_summary, id) {
             let rx = runner::summarize_goal(ui.ctx().clone(), self.settings.goal_words.max(1), session::digest(&s.messages, 400, 12_000));
             self.summarizing.push((id, rx));
+        }
+        if look_for_models {
+            self.look_for_models();
         }
         if model_pick != picked_before {
             self.set_open_model(model_pick);
@@ -5223,6 +5260,7 @@ impl eframe::App for App {
         self.poll_orchestration();
         self.poll_control();
         self.poll_btw();
+        self.poll_model_check();
         self.poll_snapshots();
         self.poll_shared();
         self.poll_ai();

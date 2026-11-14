@@ -242,7 +242,7 @@ pub fn gather(dir: &Path, home: &Path, scope: &Scope, env: &dyn Fn(&str) -> Opti
 /// Model aliases, effort levels and permission modes offered on the new session page.
 /// Each model family's full name as Claude Code reports it (the `model` of its replies), the
 /// newest known when scope was built; [`learn`] moves a family on when a reply shows a newer one.
-pub const MODEL_IDS: [&str; 4] = ["claude-opus-5-5", "claude-sonnet-5-5", "claude-haiku-5-5", "claude-fable-5-1"];
+pub const MODEL_IDS: [&str; 4] = ["claude-opus-5-5", "claude-sonnet-5-5", "claude-haiku-5-5", "claude-fable-5-2"];
 
 /// The family of a full model name ("opus" in `claude-opus-5-5[1m]`) and its version numbers.
 fn family_version(id: &str) -> Option<(&str, Vec<u64>)> {
@@ -274,10 +274,13 @@ pub fn full_name(model: &str, known: &[String]) -> String {
 
 /// The model dropdown: full names, as Claude Code reports them. The button shows the pick, or
 /// what applies without one (`default`; `None` = Claude Code's own default); the default comes
-/// first in the menu and is not listed again under its name.
-pub fn model_picker(ui: &mut egui::Ui, id: &str, value: &mut String, default: Option<&str>, known: &[String], enabled: bool) {
+/// first in the menu and is not listed again under its name. The last item, "Look for model
+/// updates", asks the Claude API for newer models: true when clicked. `updates` is how the
+/// last look went, shown under it.
+pub fn model_picker(ui: &mut egui::Ui, id: &str, value: &mut String, default: Option<&str>, known: &[String], enabled: bool, updates: &str) -> bool {
     let default = default.map(|d| full_name(d, known));
     let shown = if value.is_empty() { default.clone().unwrap_or_else(|| "default".to_owned()) } else { full_name(value, known) };
+    let mut look = false;
     ui.add_enabled_ui(enabled, |ui| {
         ui.push_id(id, |ui| {
             ui.menu_button(egui::RichText::new(format!("{shown} ⏷")).monospace(), |ui| {
@@ -293,9 +296,15 @@ pub fn model_picker(ui: &mut egui::Ui, id: &str, value: &mut String, default: Op
                         ui.close();
                     }
                 }
+                ui.separator();
+                look = ui.selectable_label(false, "🔄 Look for model updates").on_hover_text("Asks the Claude API which models there are now (needs ANTHROPIC_API_KEY or `ant auth login`)").clicked();
+                if !updates.is_empty() {
+                    ui.label(egui::RichText::new(updates).weak().small());
+                }
             });
         });
     });
+    look
 }
 pub const EFFORTS: [&str; 5] = ["low", "medium", "high", "xhigh", "max"];
 pub const PERMISSIONS: [&str; 4] = ["default", "acceptEdits", "plan", "bypassPermissions"];
@@ -331,7 +340,9 @@ fn count(n: usize, one: &str, many: &str) -> String {
 
 /// Shows `info` for a new session in `dir`, centred, with `status` under it. What can be
 /// changed for this session has a dropdown (`choice`), usable while `editable`.
-pub fn show(ui: &mut egui::Ui, dir: &Path, info: &NewInfo, choice: &mut crate::runner::Choice, models: &[String], editable: bool, status: &str) {
+/// True when "Look for model updates" was clicked (see [`model_picker`]).
+pub fn show(ui: &mut egui::Ui, dir: &Path, info: &NewInfo, choice: &mut crate::runner::Choice, models: &[String], updates: &str, editable: bool, status: &str) -> bool {
+    let mut look = false;
     use egui::RichText;
     let default = |o: &Option<Sourced>, d: &str| match o {
         Some(s) => (s.value.clone(), s.from.clone()),
@@ -378,7 +389,7 @@ pub fn show(ui: &mut egui::Ui, dir: &Path, info: &NewInfo, choice: &mut crate::r
                         };
                         ui.label(RichText::new("Model").weak());
                         ui.horizontal_wrapped(|ui| {
-                            model_picker(ui, "Model", &mut choice.model, info.model.as_ref().map(|m| m.value.as_str()), models, editable);
+                            look = model_picker(ui, "Model", &mut choice.model, info.model.as_ref().map(|m| m.value.as_str()), models, editable, updates);
                             let note = if choice.model.is_empty() { sourced(&info.model, "default").1 } else { "(this session; later prompts keep it)".to_owned() };
                             ui.label(RichText::new(note).weak().small());
                         });
@@ -436,6 +447,7 @@ pub fn show(ui: &mut egui::Ui, dir: &Path, info: &NewInfo, choice: &mut crate::r
             ui.label(RichText::new("Read from the folder's and your Claude Code settings; plugins and managed policies may add more.").weak().small());
         });
     });
+    look
 }
 
 #[cfg(test)]
