@@ -277,6 +277,8 @@ pub struct App {
     btw: HashMap<String, Vec<Btw>>,
     /// Text in the Info tab's "ask about this goal" field.
     goal_question: String,
+    /// Questions asked in that field, for Up/Down to bring back.
+    goal_history: History,
     /// Heights measured last frame: the Info sections, and the question field. The questions
     /// area grows upwards until it meets the sections.
     info_height: f32,
@@ -581,6 +583,7 @@ impl App {
             first_goals: Vec::new(),
             btw: HashMap::new(),
             goal_question: String::new(),
+            goal_history: History::default(),
             info_height: 0.0,
             goal_field_height: 0.0,
             changes_filter: None,
@@ -4035,7 +4038,21 @@ impl App {
             let pal = theme::palette(ui.visuals());
             let field_id = Id::new("goal-question-input");
             // Enter sends, Shift+Enter adds a line: taken before the TextEdit sees it.
-            if ui.memory(|m| m.has_focus(field_id)) && !self.goal_question.trim().is_empty() {
+            let focused = ui.memory(|m| m.has_focus(field_id));
+            // Up/Down bring back earlier questions, as in the prompt, while it is one line.
+            if focused && !self.goal_question.contains('\n') {
+                if ui.input_mut(|i| i.consume_key(Modifiers::NONE, Key::ArrowUp))
+                    && let Some(q) = self.goal_history.up(&self.goal_question)
+                {
+                    self.goal_question = q;
+                }
+                if ui.input_mut(|i| i.consume_key(Modifiers::NONE, Key::ArrowDown))
+                    && let Some(q) = self.goal_history.down()
+                {
+                    self.goal_question = q;
+                }
+            }
+            if focused && !self.goal_question.trim().is_empty() {
                 ask = ui.input_mut(|i| {
                     let send = i.key_pressed(Key::Enter) && !i.modifiers.shift;
                     if send {
@@ -4240,6 +4257,7 @@ impl App {
         }
         if let (true, Some(id)) = (ask, &id) {
             let question = std::mem::take(&mut self.goal_question).trim().to_owned();
+            self.goal_history.push(&question);
             let harness = Settings::harness(&self.settings.question_harness, goal::QUESTION_HARNESS);
             let rx = runner::btw(ui.ctx().clone(), id.clone(), s.cwd.clone(), goal::question_prompt(harness, self.goals.get(id), &question));
             self.btw.entry(id.clone()).or_default().push(Btw { question, answer: None, rx: Some(rx) });
