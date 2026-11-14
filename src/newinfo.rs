@@ -49,8 +49,9 @@ pub struct Scope<'a> {
 
 fn tilde(p: &Path, home: &Path) -> String {
     match p.strip_prefix(home) {
-        Ok(rest) if !home.as_os_str().is_empty() => format!("~/{}", rest.display()),
-        _ => p.display().to_string(),
+        // `/` on Windows too: `~/.claude/settings.json` reads the same everywhere.
+        Ok(rest) if !home.as_os_str().is_empty() => format!("~/{}", rest.to_string_lossy().replace('\\', "/")),
+        _ => crate::platform::shell_path(p),
     }
 }
 
@@ -191,7 +192,9 @@ pub fn gather(dir: &Path, home: &Path, scope: &Scope, env: &dyn Fn(&str) -> Opti
         }
     };
     let state = read_json(&home.join(".claude.json"));
-    let project_state = state.as_ref().and_then(|s| s.get("projects")).and_then(|p| p.get(root.to_string_lossy().as_ref()));
+    // Claude Code on Windows keys projects with `/` (`C:/Users/me/app`); look for either.
+    let keys = [root.to_string_lossy().into_owned(), root.to_string_lossy().replace('\\', "/")];
+    let project_state = state.as_ref().and_then(|s| s.get("projects")).and_then(|p| keys.iter().find_map(|k| p.get(k.as_str())));
     add(project_state.and_then(|p| p.get("mcpServers")), "local");
     add(read_json(&root.join(".mcp.json")).as_ref().and_then(|v| v.get("mcpServers")), "project");
     add(state.as_ref().and_then(|s| s.get("mcpServers")), "user");
@@ -497,7 +500,9 @@ mod tests {
         write(&home.join(".claude/CLAUDE.md"), "me");
         write(&proj.join("CLAUDE.md"), "proj");
         write(&proj.join(".mcp.json"), r#"{"mcpServers":{"db":{}}}"#);
-        write(&home.join(".claude.json"), &format!(r#"{{"mcpServers":{{"web":{{}}}},"projects":{{"{}":{{"mcpServers":{{"mine":{{}}}}}}}}}}"#, proj.display()));
+        // Keyed as Claude Code writes it: with `/` on Windows too.
+        let key = proj.to_string_lossy().replace('\\', "/");
+        write(&home.join(".claude.json"), &serde_json::json!({"mcpServers": {"web": {}}, "projects": {key: {"mcpServers": {"mine": {}}}}}).to_string());
         write(&proj.join(".claude/skills/deploy/SKILL.md"), "");
         write(&home.join(".claude/skills/notes/SKILL.md"), "");
         write(&proj.join(".claude/agents/reviewer.md"), "");

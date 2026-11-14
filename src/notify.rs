@@ -7,6 +7,10 @@
 //! allows that to apps signed with an Apple-issued certificate (Developer ID): an ad-hoc or
 //! self-signed scope.app, a test instance or a bare `cargo run` binary falls back to
 //! `osascript`, whose banners carry Script Editor's icon.
+//!
+//! On Windows they are toasts, posted through PowerShell (which every Windows has and which
+//! may post them without scope being registered as an app); clicking one doesn't open the
+//! session.
 
 use std::sync::Mutex;
 
@@ -37,8 +41,45 @@ pub fn post(id: &str, title: &str, subtitle: &str, body: &str) {
 }
 
 /// Through `osascript`: Script Editor's icon, no click to open.
+#[cfg(not(windows))]
 fn fallback(title: &str, subtitle: &str, body: &str) {
     crate::runner::notify(title, subtitle, body);
+}
+
+/// A Windows toast, through PowerShell; no click to open.
+#[cfg(windows)]
+fn fallback(title: &str, subtitle: &str, body: &str) {
+    let mut cmd = std::process::Command::new("powershell");
+    cmd.args(["-NoProfile", "-NonInteractive", "-WindowStyle", "Hidden", "-EncodedCommand", &toast_command(title, subtitle, body)]);
+    crate::platform::hide_window(&mut cmd);
+    let _ = cmd.stdin(std::process::Stdio::null()).stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null()).spawn();
+}
+
+/// The toast's XML: the title, then the subtitle and body when there are any.
+#[cfg(any(windows, test))]
+pub fn toast_xml(title: &str, subtitle: &str, body: &str) -> String {
+    let esc = |s: &str| s.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;").replace('"', "&quot;").replace('\'', "&apos;");
+    let lines: String = [title, subtitle, body].iter().filter(|t| !t.trim().is_empty()).map(|t| format!("<text>{}</text>", esc(t))).collect();
+    format!("<toast><visual><binding template=\"ToastGeneric\">{lines}</binding></visual></toast>")
+}
+
+/// The PowerShell that shows the toast, encoded as `-EncodedCommand` takes it (UTF-16LE,
+/// base64), so no text in it needs quoting for a command line. It posts as PowerShell, which
+/// Windows lets show toasts without an app registration.
+#[cfg(any(windows, test))]
+pub fn toast_command(title: &str, subtitle: &str, body: &str) -> String {
+    use base64::Engine;
+    let xml = toast_xml(title, subtitle, body).replace('\'', "''");
+    let script = format!(
+        "[Windows.UI.Notifications.ToastNotificationManager, Windows.UI.Notifications, ContentType = WindowsRuntime] > $null\n\
+         [Windows.Data.Xml.Dom.XmlDocument, Windows.Data.Xml.Dom.XmlDocument, ContentType = WindowsRuntime] > $null\n\
+         $x = New-Object Windows.Data.Xml.Dom.XmlDocument\n\
+         $x.LoadXml('{xml}')\n\
+         $app = '{{1AC14E77-02E7-4E5D-B744-2EB1AE5198B7}}\\WindowsPowerShell\\v1.0\\powershell.exe'\n\
+         [Windows.UI.Notifications.ToastNotificationManager]::CreateToastNotifier($app).Show([Windows.UI.Notifications.ToastNotification]::new($x))\n"
+    );
+    let utf16: Vec<u8> = script.encode_utf16().flat_map(u16::to_le_bytes).collect();
+    base64::engine::general_purpose::STANDARD.encode(utf16)
 }
 
 /// The sessions whose notification was clicked since the last call.
@@ -147,5 +188,28 @@ mod mac {
         let request = UNNotificationRequest::requestWithIdentifier_content_trigger(&key, &content, None);
         center.addNotificationRequest_withCompletionHandler(&request, None);
         true
+    }
+}
+
+#[cfg(test)]
+mod toast_tests {
+    use super::*;
+
+    #[test]
+    fn toasts_escape_their_text_and_skip_empty_lines() {
+        assert_eq!(
+            toast_xml("Done", "", "fix <a> & 'b'"),
+            "<toast><visual><binding template=\"ToastGeneric\"><text>Done</text><text>fix &lt;a&gt; &amp; &apos;b&apos;</text></binding></visual></toast>"
+        );
+    }
+
+    #[test]
+    fn the_toast_command_is_utf16_base64() {
+        use base64::Engine;
+        let bytes = base64::engine::general_purpose::STANDARD.decode(toast_command("scope", "s", "it's done")).unwrap();
+        let units: Vec<u16> = bytes.chunks(2).map(|c| u16::from_le_bytes([c[0], c[1]])).collect();
+        let script = String::from_utf16(&units).unwrap();
+        assert!(script.contains("<text>it&apos;s done</text>"), "{script}");
+        assert!(script.contains("CreateToastNotifier($app)"));
     }
 }

@@ -3077,7 +3077,7 @@ impl App {
                     ui.label(RichText::new(format!("and {} more", titles.len() - 8)).weak());
                 }
             }
-            ui.label("Their files go to the Trash; Finder's Put Back restores them.");
+            ui.label(if cfg!(windows) { "Their files go to the Recycle Bin; its Restore brings them back." } else { "Their files go to the Trash; Finder's Put Back restores them." });
             ui.add_space(8.0);
             ui.horizontal(|ui| {
                 delete = ui.button("Move to Trash").clicked();
@@ -3139,7 +3139,7 @@ impl App {
                 }
                 ModelPrompt::Done => {
                     ui.label(RichText::new("Speech model installed").strong());
-                    ui.label("Dictation is ready: click the mic (or Cmd+D) to start, click again or press Enter to stop.");
+                    ui.label(format!("Dictation is ready: click the mic (or {}+D) to start, click again or press Enter to stop.", crate::platform::CMD));
                     ui.add_space(8.0);
                     ui.horizontal(|ui| {
                         dictate = ui.button("Start dictating").clicked();
@@ -3598,7 +3598,7 @@ impl App {
         };
         if let Some(dir) = self.new_session.clone().filter(|_| s.messages.is_empty()) {
             if self.new_info.as_ref().is_none_or(|(d, _)| *d != dir) {
-                let home = PathBuf::from(std::env::var("HOME").unwrap_or_default());
+                let home = crate::platform::home();
                 let extra: Vec<String> = self.settings.extra_args.split_whitespace().map(str::to_owned).collect();
                 let scope = crate::newinfo::Scope { model: &self.settings.model, extra: &extra };
                 let info = crate::newinfo::gather(&dir, &home, &scope, &|k| std::env::var(k).ok());
@@ -3944,7 +3944,7 @@ impl App {
         {
             return m.clone();
         }
-        let home = PathBuf::from(std::env::var("HOME").unwrap_or_default());
+        let home = crate::platform::home();
         let extra: Vec<String> = key.2.split_whitespace().map(str::to_owned).collect();
         let scope = crate::newinfo::Scope { model: &key.1, extra: &extra };
         let m = crate::newinfo::default_model(dir, &home, &scope, &|k| std::env::var(k).ok());
@@ -5141,9 +5141,16 @@ fn dropped_order(ids: &[String], moving: &[String], slot: usize) -> Vec<String> 
 pub(crate) fn row_time(t: SystemTime, now: SystemTime) -> String {
     fn local(t: SystemTime) -> (i32, u32, u32, u32, u32) {
         let secs = t.duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs()) as libc::time_t;
-        // SAFETY: localtime_r only writes the tm it is given.
+        // SAFETY: localtime_r / localtime_s only write the tm they are given.
         let mut tm: libc::tm = unsafe { std::mem::zeroed() };
-        unsafe { libc::localtime_r(&secs, &mut tm) };
+        #[cfg(unix)]
+        unsafe {
+            libc::localtime_r(&secs, &mut tm)
+        };
+        #[cfg(windows)]
+        unsafe {
+            libc::localtime_s(&mut tm, &secs)
+        };
         (tm.tm_year + 1900, tm.tm_mon as u32, tm.tm_mday as u32, tm.tm_hour as u32, tm.tm_min as u32)
     }
     format_row_time(local(t), local(now))
@@ -5199,7 +5206,7 @@ fn rgb([r, g, b]: [u8; 3]) -> Color32 {
 
 /// "-Users-me-Desktop-foo-bar" → "Desktop-foo-bar"
 fn short_project(p: &str) -> String {
-    let home = std::env::var("HOME").unwrap_or_default().replace(['/', '.'], "-");
+    let home = crate::platform::project_key(&crate::platform::home_string());
     p.strip_prefix(&home).map(|s| s.trim_start_matches('-')).unwrap_or(p).to_owned()
 }
 

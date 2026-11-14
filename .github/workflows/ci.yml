@@ -59,8 +59,34 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - run: cargo test
 
+  # The same suite on Windows (the tests that need sh, pgrep or pkill are macOS's only), and
+  # the release build, so a change that breaks the Windows app shows up before it ships.
+  test-windows:
+    if: github.ref != 'refs/heads/main'
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo test
+      - run: cargo build --release
+      # The build, as a release ships it, for trying a change on Windows before it is released:
+      # SCOPE_FROM=<unzipped artifact folder> packaging/install.ps1 installs it.
+      - name: Zip the build
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force dist | Out-Null
+          Compress-Archive -Path target/release/scope.exe -DestinationPath dist/scope-windows-x64.zip
+          $sum = (Get-FileHash -Algorithm SHA256 dist/scope-windows-x64.zip).Hash.ToLower()
+          "$sum  scope-windows-x64.zip" | Out-File -Encoding ascii dist/SHA256SUMS
+          Copy-Item packaging/install.ps1 dist/
+      - uses: actions/upload-artifact@v4
+        with:
+          name: scope-windows-x64
+          path: dist/
+
   promote:
-    needs: test
+    needs: [test, test-windows]
     if: github.event_name == 'push' && github.ref == 'refs/heads/stage'
     runs-on: ubuntu-latest
     permissions:
