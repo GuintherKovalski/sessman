@@ -73,7 +73,7 @@ impl Env {
     }
 
     pub fn projects(&self) -> PathBuf {
-        self.home.join(".claude/projects")
+        self.home.join(".claude").join("projects")
     }
 
     /// A folder for sessions, made if missing.

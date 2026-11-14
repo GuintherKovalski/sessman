@@ -90,6 +90,12 @@ fn rule_path_of(p: &str, windows: bool) -> String {
     }
 }
 
+/// `base` joined with a relative path written with `/` (`.claude/skills`), a part at a time,
+/// so the result has the platform's separators throughout (Windows: no `C:\\p\\.claude/skills`).
+pub fn join(base: &Path, rel: &str) -> PathBuf {
+    rel.split('/').filter(|p| !p.is_empty()).fold(base.to_path_buf(), |p, part| p.join(part))
+}
+
 /// The separator between PATH entries.
 pub const PATH_SEP: char = if cfg!(windows) { ';' } else { ':' };
 
@@ -408,6 +414,13 @@ mod tests {
         assert_eq!(rule_path_of(r"C:\Users\me\proj\.gitignore", true), "/c/Users/me/proj/.gitignore");
         assert_eq!(format!("Edit(/{}/**)", rule_path_of(r"D:\w\.scope\templates", true)), "Edit(//d/w/.scope/templates/**)");
         assert_eq!(rule_path_of("/w/proj", false), "/w/proj");
+    }
+
+    #[test]
+    fn joins_have_one_kind_of_separator() {
+        let sep = std::path::MAIN_SEPARATOR;
+        assert_eq!(join(Path::new("r"), ".claude/skills").to_string_lossy(), format!("r{sep}.claude{sep}skills"));
+        assert_eq!(join(Path::new("r"), "a//b/"), Path::new("r").join("a").join("b"));
     }
 
     #[test]

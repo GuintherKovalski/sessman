@@ -49,7 +49,7 @@ fn clicking_one_shows_it_in_the_main_area() {
     s.click("Release notes");
     s.wait_to_see("Write notes for version {{version}}.");
     assert!(s.sees("📝 Release notes"), "in a tab of its own");
-    assert!(s.sees(&root.join(".scope/templates/release-notes.md").display().to_string()));
+    assert!(s.sees(&root.join(".scope").join("templates").join("release-notes.md").display().to_string()));
     s.click("Source");
     assert!(s.sees("name: Release notes"), "the source has its front matter");
     s.click("Main");
@@ -80,14 +80,15 @@ fn create_template_has_claude_write_it_only_in_the_templates_folder() {
     s.wait_to_see("Do the fake thing to {{target}}");
     assert!(s.sees("Echo: TEMPLATE notes for a release"), "Claude's reply shows under it");
     assert!(s.sees("✨ Fake template"), "the tab is named after it");
-    let dir = root.join(".scope/templates");
+    let dir = root.join(".scope").join("templates");
     assert!(dir.join("fake-template.md").is_file());
     let (args, cwd) = composer_call(&s);
     assert_eq!(cwd, root.display().to_string(), "it runs in the scope's root");
     assert_eq!(after(&args, "--tools"), Some("Read,Grep,Glob,Write,Edit"));
     assert_eq!(after(&args, "--permission-mode"), Some("dontAsk"));
     let allowed = after(&args, "--allowedTools").unwrap();
-    assert!(allowed.contains(&format!("Edit(/{}/**)", dir.display())) && allowed.contains(&format!("Edit(/{})", root.join(".gitignore").display())), "{allowed}");
+    let rule = |p: &std::path::Path| crate::platform::rule_path(p);
+    assert!(allowed.contains(&format!("Edit(/{}/**)", rule(&dir))) && allowed.contains(&format!("Edit(/{})", rule(&root.join(".gitignore")))), "{allowed}");
     let system = after(&args, "--append-system-prompt").unwrap();
     assert!(system.contains("add the line `/.scope/templates/`") && !system.contains("scope list"), "its own instructions, not scope's commands");
     let id = after(&args, "--session-id").expect("a new session").to_owned();

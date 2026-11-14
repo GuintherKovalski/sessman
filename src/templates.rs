@@ -58,7 +58,8 @@ pub struct Item {
 pub fn folder_in(root: &Path, folder: &str) -> PathBuf {
     let folder = folder.trim();
     let folder = if folder.is_empty() { DEFAULT_FOLDER } else { folder };
-    root.join(folder)
+    // `/` in the setting as given, the platform's separators in the path.
+    if Path::new(folder).is_absolute() { PathBuf::from(folder) } else { crate::platform::join(root, folder) }
 }
 
 /// Everything the Templates tab lists for `root`, in the order it shows them: its templates,
@@ -68,13 +69,13 @@ pub fn scan(root: &Path, folder: &str, home: &Path) -> Vec<Item> {
     let mut out = Vec::new();
     md_files(&folder_in(root, folder), Vec::new(), "", Kind::Template, &mut out, false);
     for (dir, at) in projects(root) {
-        skills(&dir.join(".claude/skills"), at.clone(), Kind::Skill, &mut out, 0);
-        md_files(&dir.join(".claude/commands"), at, "", Kind::Command, &mut out, true);
+        skills(&crate::platform::join(&dir, ".claude/skills"), at.clone(), Kind::Skill, &mut out, 0);
+        md_files(&crate::platform::join(&dir, ".claude/commands"), at, "", Kind::Command, &mut out, true);
     }
     // A root that is the home folder has no separate personal ones.
     if home != root {
-        skills(&home.join(".claude/skills"), Vec::new(), Kind::PersonalSkill, &mut out, 0);
-        md_files(&home.join(".claude/commands"), Vec::new(), "", Kind::PersonalCommand, &mut out, true);
+        skills(&crate::platform::join(home, ".claude/skills"), Vec::new(), Kind::PersonalSkill, &mut out, 0);
+        md_files(&crate::platform::join(home, ".claude/commands"), Vec::new(), "", Kind::PersonalCommand, &mut out, true);
     }
     // A skill or command found in several subprojects (copies of the repo, worktrees) is
     // listed once: where it is nearest the root.
@@ -622,7 +623,8 @@ mod tests {
         assert!(!run_args(root, Path::new("/elsewhere/t"), true, None).iter().any(|a| a.contains(".gitignore")), "a folder outside the root isn't ignored there");
         let no_ignore = run_args(root, dir, false, Some(&dir.join("x.md")));
         assert!(!no_ignore.iter().any(|a| a.contains(".gitignore")));
-        assert!(no_ignore.iter().any(|a| a.contains("You are working on the template /w/proj/.scope/templates/x.md")));
+        let working = format!("You are working on the template {}", dir.join("x.md").display());
+        assert!(no_ignore.iter().any(|a| a.contains(&working)));
     }
 
     #[test]
