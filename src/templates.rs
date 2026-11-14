@@ -405,7 +405,8 @@ pub fn typed(prompt: &str) -> &str {
 /// is the template it works on, once there is one.
 pub fn system_prompt(root: &Path, dir: &Path, gitignore: bool, editing: Option<&Path>) -> String {
     let ignore = if gitignore {
-        let rel = dir.strip_prefix(root).map(|r| r.display().to_string()).unwrap_or_else(|_| dir.display().to_string());
+        // A .gitignore line takes `/` on Windows too.
+        let rel = dir.strip_prefix(root).map(crate::platform::shell_path).unwrap_or_else(|_| dir.display().to_string());
         format!(
             "\n- If `{}/.gitignore` doesn't ignore the templates folder yet, add the line `/{}/` to it \
              (create the file if there is none). That is the only other file you may touch.",
