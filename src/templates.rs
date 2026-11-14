@@ -456,9 +456,9 @@ pub fn run_args(root: &Path, dir: &Path, gitignore: bool, editing: Option<&Path>
     let gitignore = gitignore && dir.starts_with(root);
     // `//` starts an absolute path in a permission rule; an Edit rule covers every tool that
     // writes files (Write ones aren't checked against paths).
-    let mut allowed = vec!["Read".to_owned(), "Grep".to_owned(), "Glob".to_owned(), format!("Edit(/{}/**)", dir.display())];
+    let mut allowed = vec!["Read".to_owned(), "Grep".to_owned(), "Glob".to_owned(), format!("Edit(/{}/**)", crate::platform::rule_path(dir))];
     if gitignore {
-        allowed.push(format!("Edit(/{})", root.join(".gitignore").display()));
+        allowed.push(format!("Edit(/{})", crate::platform::rule_path(&root.join(".gitignore"))));
     }
     vec![
         "--append-system-prompt".into(),

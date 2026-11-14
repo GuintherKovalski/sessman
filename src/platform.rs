@@ -70,6 +70,26 @@ pub fn shell_path(p: &Path) -> String {
     if cfg!(windows) { s.replace('\\', "/") } else { s.into_owned() }
 }
 
+/// A path as Claude Code's permission rules match it: as is on Unix; on Windows in POSIX form,
+/// as Claude Code turns them before matching (`C:\\Users\\me` → `/c/Users/me`). `Edit(/{})`
+/// of it is the absolute-path rule `Edit(//c/Users/me)`.
+pub fn rule_path(p: &Path) -> String {
+    rule_path_of(&p.to_string_lossy(), cfg!(windows))
+}
+
+fn rule_path_of(p: &str, windows: bool) -> String {
+    if !windows {
+        return p.to_owned();
+    }
+    let p = p.replace('\\', "/");
+    let b = p.as_bytes();
+    if b.len() >= 2 && b[0].is_ascii_alphabetic() && b[1] == b':' {
+        format!("/{}{}", (b[0] as char).to_ascii_lowercase(), &p[2..])
+    } else {
+        p
+    }
+}
+
 /// The separator between PATH entries.
 pub const PATH_SEP: char = if cfg!(windows) { ';' } else { ':' };
 
@@ -381,6 +401,13 @@ mod tests {
             assert_eq!(home_from(env(&[("HOME", "/Users/me"), ("USERPROFILE", "x")])), PathBuf::from("/Users/me"));
         }
         assert_eq!(home_from(env(&[])), PathBuf::new());
+    }
+
+    #[test]
+    fn permission_rules_get_posix_paths_on_windows() {
+        assert_eq!(rule_path_of(r"C:\Users\me\proj\.gitignore", true), "/c/Users/me/proj/.gitignore");
+        assert_eq!(format!("Edit(/{}/**)", rule_path_of(r"D:\w\.scope\templates", true)), "Edit(//d/w/.scope/templates/**)");
+        assert_eq!(rule_path_of("/w/proj", false), "/w/proj");
     }
 
     #[test]

@@ -204,7 +204,7 @@ impl SessionFile {
     /// Writes the file now (for sessions that appear while the app runs).
     pub fn write_to(&self, env: &Env) -> PathBuf {
         let cwd = if self.cwd.as_os_str().is_empty() { env.proj.clone() } else { self.cwd.clone() };
-        let dir = env.projects().join(cwd.display().to_string().replace(['/', '.'], "-"));
+        let dir = env.projects().join(crate::platform::project_key(&cwd.to_string_lossy()));
         std::fs::create_dir_all(&dir).unwrap();
         let mut lines = Vec::new();
         let cwd_s = cwd.display().to_string();

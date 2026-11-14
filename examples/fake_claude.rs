@@ -87,9 +87,10 @@ fn wait_while(path: &Path) {
     }
 }
 
-/// Claude Code's folder name for a project: its path with `/` and `.` as `-`.
+/// Claude Code's folder name for a project: its path with everything but letters and digits as
+/// `-` (`/w/my.app` → `-w-my-app`, `C:\\w\\app` → `C--w-app`), as platform.rs has it.
 fn project_key(dir: &Path) -> String {
-    dir.display().to_string().replace(['/', '.'], "-")
+    dir.display().to_string().chars().map(|c| if c.is_ascii_alphanumeric() { c } else { '-' }).collect()
 }
 
 fn emit(v: Value) {
