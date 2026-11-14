@@ -50,7 +50,13 @@ impl Env {
     fn new() -> Self {
         static COUNT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
         let n = COUNT.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        // The real path (macOS: /private/var, not /var), as a run's folder reports it. Windows
+        // writes one as `\\?\C:\…`, which no program reports its folder as: dropped.
         let tmp = std::fs::canonicalize(std::env::temp_dir()).unwrap();
+        let tmp = match tmp.to_str().and_then(|t| t.strip_prefix(r"\\?\")) {
+            Some(plain) if cfg!(windows) && plain.as_bytes().get(1) == Some(&b':') => PathBuf::from(plain),
+            _ => tmp,
+        };
         let root = tmp.join(format!("scope-e2e-{}-{n}", std::process::id()));
         let _ = std::fs::remove_dir_all(&root);
         let env = Env {

@@ -125,7 +125,8 @@ fn projects(root: &Path) -> Projects {
             }
             let p = e.path();
             if p.join(".claude").is_dir() {
-                let rel = p.strip_prefix(root).map(|r| r.display().to_string()).unwrap_or_default();
+                // `a/b` on Windows too: shown, and counted by its `/` for depth.
+                let rel = p.strip_prefix(root).map(crate::platform::shell_path).unwrap_or_default();
                 out.push((p.clone(), vec![rel]));
             }
             queue.push_back((p, depth + 1));

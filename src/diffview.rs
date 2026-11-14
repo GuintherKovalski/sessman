@@ -77,9 +77,10 @@ pub fn lines(c: &Change) -> Vec<Line> {
     out
 }
 
-/// (file name, parent folder) for display.
+/// (file name, parent folder) for display. On Windows Claude Code gives paths with `\\`.
 pub fn split_path(file: &str) -> (&str, &str) {
-    match file.rfind('/') {
+    let found = if cfg!(windows) { file.rfind(['/', '\\']) } else { file.rfind('/') };
+    match found {
         Some(i) => (&file[i + 1..], &file[..i]),
         None => (file, ""),
     }
@@ -91,7 +92,7 @@ pub fn folder_in(file: &str, cwd: Option<&Path>) -> String {
     let (_, dir) = split_path(file);
     match cwd.and_then(|c| Path::new(dir).strip_prefix(c).ok()) {
         Some(rel) if rel.as_os_str().is_empty() => "./".to_owned(),
-        Some(rel) => rel.display().to_string(),
+        Some(rel) => crate::platform::shell_path(rel),
         None => dir.to_owned(),
     }
 }
