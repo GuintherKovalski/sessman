@@ -3651,6 +3651,7 @@ impl App {
         // Pinned "You": the prompt of the turn at the top of the viewport (computed last frame),
         // hidden while a "You" prompt is on screen in the conversation so it never shows twice.
         let pinned = self.pinned.or_else(|| s.messages.iter().position(|m| pinned_text(m).is_some()));
+        let above = ui.cursor().top();
         if let Some(text) = pinned.filter(|_| !self.inline_you).and_then(|i| s.messages.get(i)).and_then(pinned_text) {
             egui::Frame::new().fill(ui.visuals().faint_bg_color).inner_margin(6.0).corner_radius(4.0).show(ui, |ui| {
                 ui.set_width(ui.available_width());
@@ -3662,6 +3663,8 @@ impl App {
             });
             ui.add_space(4.0);
         }
+        // The height the pinned box takes from the conversation this frame (0 when hidden).
+        let reserved = ui.cursor().top() - above;
         // Heights are measured at one width; a resize measures again.
         let width = ui.available_width();
         if (width - self.heights_width).abs() > 0.5 {
@@ -3669,8 +3672,8 @@ impl App {
             self.heights_width = width;
         }
         self.heights.resize(s.messages.len(), 0.0);
-        let mut top_prompt = None;
-        let mut inline_you = false;
+        // Every "You" prompt's top and height in the conversation, to pick what to pin.
+        let mut prompts: Vec<(usize, f32, f32)> = Vec::new();
         let mut delete = None;
         // Deleting rewrites the session file: not while a run writes to it, nor before it exists.
         let deletable = !self.open_running() && self.new_session.is_none() && self.selected.is_some();
@@ -3711,9 +3714,6 @@ impl App {
             let near = viewport.expand2(egui::vec2(0.0, 400.0));
             for (i, m) in s.messages.iter().enumerate() {
                 let y = ui.cursor().top() - origin;
-                if pinned_text(m).is_some() && y <= viewport.min.y + 1.0 {
-                    top_prompt = Some(i);
-                }
                 if pickable(m) && y <= viewport.min.y + 1.0 {
                     top_message = Some(i);
                 }
@@ -3754,8 +3754,8 @@ impl App {
                     }
                     scroll_to_match(ui, f, i, rect, m.text.len(), exact, !skip);
                 }
-                if pinned_text(m).is_some() && y < viewport.max.y && y + self.heights[i] > viewport.min.y {
-                    inline_you = true;
+                if pinned_text(m).is_some() {
+                    prompts.push((i, y, self.heights[i]));
                 }
             }
             if let Some(run) = open_id.as_ref().and_then(|id| self.runs.get(id)) {
@@ -3784,6 +3784,7 @@ impl App {
         });
         self.conversation_rect = Some(out.inner_rect);
         self.top_message = top_message;
+        let (top_prompt, inline_you) = pin_choice(&prompts, out.state.offset.y, out.content_size.y, out.inner_rect.height(), reserved);
         if top_prompt != self.pinned || inline_you != self.inline_you {
             self.pinned = top_prompt;
             self.inline_you = inline_you;
@@ -4644,6 +4645,26 @@ fn is_interrupt_marker(text: &str) -> bool {
 
 /// What the pinned "You" shows for a message: a prompt the user typed, without Claude's stop
 /// marker; None for Claude's messages and for a marker on its own.
+/// Which prompt the conversation pins (the last one starting above the top of what's read),
+/// and whether a prompt is on screen, which hides the pin. `prompts` are (index, top, height)
+/// in the conversation; `offset`, `content` and `inner` are its scroll offset, content height
+/// and viewport height; `reserved` is the height the pin took above it this frame.
+///
+/// Both are worked out on the area the pin and the conversation share, the same whether the pin
+/// shows or not. Measured on the conversation alone, showing the pin shrinks it, which can hide
+/// the prompt that hid the pin (or, at the bottom, scroll another prompt to the top), and the
+/// pin came and went every frame: the conversation jumped up and down until a resize.
+fn pin_choice(prompts: &[(usize, f32, f32)], offset: f32, content: f32, inner: f32, reserved: f32) -> (Option<usize>, bool) {
+    let height = inner + reserved;
+    // At the bottom, the conversation keeps its end in view, so the area's top is the end's
+    // distance up; elsewhere the scroll offset stays put and so does the top.
+    let at_bottom = offset >= content - inner - 1.0;
+    let top = if at_bottom { (content - height).max(0.0) } else { offset };
+    let top_prompt = prompts.iter().filter(|&&(_, y, _)| y <= top + 1.0).map(|&(i, ..)| i).last();
+    let on_screen = prompts.iter().any(|&(_, y, h)| y < top + height && y + h > top);
+    (top_prompt, on_screen)
+}
+
 fn pinned_text(m: &session::Message) -> Option<String> {
     if m.role != Role::User {
         return None;
