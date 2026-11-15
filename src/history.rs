@@ -11,6 +11,16 @@ impl History {
         Self { entries, ..Default::default() }
     }
 
+    /// Adds what was just sent (unless it repeats the last entry) and stops walking.
+    pub fn push(&mut self, entry: &str) {
+        let entry = entry.trim();
+        if !entry.is_empty() && self.entries.last().map(String::as_str) != Some(entry) {
+            self.entries.push(entry.to_owned());
+        }
+        self.pos = None;
+        self.draft.clear();
+    }
+
     pub fn up(&mut self, current: &str) -> Option<String> {
         let pos = match self.pos {
             None if self.entries.is_empty() => return None,
@@ -53,6 +63,19 @@ mod tests {
         assert_eq!(h.down().as_deref(), Some("C"));
         assert_eq!(h.down().as_deref(), Some("typing"));
         assert_eq!(h.down(), None);
+    }
+
+    #[test]
+    fn push_adds_and_restarts_the_walk() {
+        let mut h = History::default();
+        h.push("A");
+        h.push("A");
+        h.push(" ");
+        assert_eq!(h.up("").as_deref(), Some("A"));
+        h.push("B");
+        assert_eq!(h.up("").as_deref(), Some("B"));
+        assert_eq!(h.up("").as_deref(), Some("A"));
+        assert_eq!(h.up(""), None);
     }
 
     #[test]

@@ -567,6 +567,16 @@ pub fn ask_model(ctx: eframe::egui::Context, model: &str, prompt: String) -> Rec
     run(ctx, cmd)
 }
 
+/// Like [`ask_model`] with the helper model, allowed to search and read the web (for
+/// questions about what is out there now, like the newest models).
+pub fn ask_with_web(ctx: eframe::egui::Context, prompt: String) -> Receiver<Result<String, String>> {
+    let c = claude();
+    let mut cmd = command(&c);
+    cmd.args(["--model", &c.helper, "--no-session-persistence", "--allowedTools", "WebFetch,WebSearch", "--", &prompt])
+        .current_dir(std::env::temp_dir());
+    run(ctx, cmd)
+}
+
 /// Runs `cmd` on a thread; yields Ok(trimmed stdout) or Err(message), then repaints.
 fn run(ctx: eframe::egui::Context, mut cmd: Command) -> Receiver<Result<String, String>> {
     // Without this, `claude -p` waits 3 s for piped stdin before starting.

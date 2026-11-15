@@ -73,6 +73,9 @@ pub struct State {
     pub seen_from: u64,
     /// Session id → the model and effort picked for it when it was made.
     pub choices: HashMap<String, crate::runner::Choice>,
+    /// Models learned since scope was built (from replies or "Look for model updates"), by
+    /// full name, so the dropdowns keep offering them after a restart.
+    pub model_ids: Vec<String>,
 }
 
 pub fn path() -> PathBuf {

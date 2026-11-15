@@ -19,6 +19,7 @@ mod refine;
 mod runner;
 mod search;
 mod markdown;
+mod models;
 mod session;
 mod settings;
 mod shared;
