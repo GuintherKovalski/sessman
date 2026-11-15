@@ -3991,7 +3991,7 @@ impl App {
         let id = self.selected.map(|i| self.sessions[i].id.clone());
         let mut start_summary = false;
         let mut toggled = None;
-        let (mut ask, mut close) = (false, None);
+        let (mut ask, mut close, mut rerun) = (false, None, None);
         // Questions about the goal sit at the very bottom, answered with the session's context
         // but not added to it; the answers stack above the field. Text wraps to the panel's
         // width, so field and answers grow upwards until they meet the sections, then scroll.
@@ -4026,21 +4026,20 @@ impl App {
                             .show(ui, |ui| {
                                 for (i, b) in list.iter().enumerate() {
                                     ui.push_id(i, |ui| {
-                                        egui::Frame::new()
-                                            .fill(ui.visuals().faint_bg_color)
+                                        let fill = ui.visuals().faint_bg_color;
+                                        let card = egui::Frame::new()
+                                            .fill(fill)
                                             .stroke(Stroke::new(1.0, pal.note))
                                             .inner_margin(8.0)
                                             .corner_radius(4.0)
                                             .show(ui, |ui| {
                                                 ui.set_width(ui.available_width());
                                                 ui.horizontal_top(|ui| {
-                                                    let text = (ui.available_width() - 24.0).max(0.0);
+                                                    // Room on the right for Copy and × (placed below).
+                                                    let text = (ui.available_width() - CARD_BUTTONS.x - 4.0).max(0.0);
                                                     ui.allocate_ui_with_layout(egui::vec2(text, 0.0), egui::Layout::top_down(egui::Align::Min), |ui| {
                                                         ui.add(egui::Label::new(RichText::new(&b.question).italics()).wrap());
                                                     });
-                                                    if ui.small_button("×").on_hover_text("Close").clicked() {
-                                                        close = Some(i);
-                                                    }
                                                 });
                                                 match &b.answer {
                                                     None => {
@@ -4055,6 +4054,31 @@ impl App {
                                                     }
                                                 }
                                             });
+                                        // Copy, ↻ and × stay at the top right of the card's visible
+                                        // part, so they are in reach however far it is scrolled.
+                                        let at = card_buttons_rect(card.response.rect, ui.clip_rect());
+                                        ui.painter().rect_filled(at.expand(2.0), 4.0, fill);
+                                        ui.scope_builder(egui::UiBuilder::new().max_rect(at).layout(egui::Layout::right_to_left(egui::Align::Center)), |ui| {
+                                            ui.spacing_mut().item_spacing.x = 2.0;
+                                            let button = |text| egui::Button::new(text).small().min_size(egui::vec2(18.0, 18.0));
+                                            if ui.add(button("×")).on_hover_text("Close").clicked() {
+                                                close = Some(i);
+                                            }
+                                            let rerun_it = ui
+                                                .add_enabled(b.answer.is_some(), button("↻"))
+                                                .on_hover_text("Ask this question again")
+                                                .on_disabled_hover_text("Still answering")
+                                                .clicked();
+                                            if rerun_it {
+                                                rerun = Some(i);
+                                            }
+                                            let copy = || match &b.answer {
+                                                Some(Ok(a)) => a.clone(),
+                                                _ => b.question.clone(),
+                                            };
+                                            let hover = if matches!(b.answer, Some(Ok(_))) { "Copy the answer" } else { "Copy the question" };
+                                            copy_button(ui, copy, hover, fill);
+                                        });
                                     });
                                     ui.add_space(4.0);
                                 }
@@ -4204,10 +4228,20 @@ impl App {
                 self.btw.remove(id);
             }
         }
+        let harness = Settings::harness(&self.settings.question_harness, goal::QUESTION_HARNESS);
+        let side = |question: &str| runner::btw(ui.ctx().clone(), id.clone().unwrap_or_default(), s.cwd.clone(), goal::question_prompt(harness, id.as_deref().and_then(|id| self.goals.get(id)), question));
+        // Rerun asks the same question again; the new answer takes the old one's place.
+        if let (Some(i), Some(id)) = (rerun, &id)
+            && let Some(question) = self.btw.get(id).and_then(|l| l.get(i)).map(|b| b.question.clone())
+        {
+            let rx = side(&question);
+            if let Some(b) = self.btw.get_mut(id).and_then(|l| l.get_mut(i)) {
+                (b.answer, b.rx) = (None, Some(rx));
+            }
+        }
         if let (true, Some(id)) = (ask, &id) {
             let question = std::mem::take(&mut self.goal_question).trim().to_owned();
-            let harness = Settings::harness(&self.settings.question_harness, goal::QUESTION_HARNESS);
-            let rx = runner::btw(ui.ctx().clone(), id.clone(), s.cwd.clone(), goal::question_prompt(harness, self.goals.get(id), &question));
+            let rx = side(&question);
             self.btw.entry(id.clone()).or_default().push(Btw { question, answer: None, rx: Some(rx) });
         }
         if let (true, Some(id)) = (start_summary, id) {
@@ -4818,7 +4852,7 @@ fn message(ui: &mut egui::Ui, cache: &mut CommonMarkCache, m: &session::Message,
             ui.horizontal(|ui| {
                 ui.label(RichText::new(who).strong().color(accent));
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    copy_button(ui, m, fill);
+                    copy_button(ui, || copy_text(m), "Copy the message", fill);
                     if let Some(can_delete) = delete {
                         clicked = delete_button(ui, can_delete);
                     }
@@ -4866,18 +4900,32 @@ fn next_pick(messages: &[session::Message], picked: Option<usize>, top: Option<u
     }
 }
 
-/// Copy at the right end of a message's label row: two overlapping rounded squares, drawn
-/// (no font has them), then a check mark for a moment after copying. `fill` is the card's
-/// background, which the front square is filled with so it covers the back one.
-fn copy_button(ui: &mut egui::Ui, m: &session::Message, fill: Color32) {
+/// Size of the Copy, ↻ (rerun) and × row on a side question's card.
+const CARD_BUTTONS: egui::Vec2 = egui::vec2(60.0, 18.0);
+
+/// Where a side question's Copy, ↻ and × go: the top right of the card's part inside `clip` (the
+/// answers' viewport), kept inside the card, so scrolling never takes them out of view while
+/// any of the card shows.
+fn card_buttons_rect(card: egui::Rect, clip: egui::Rect) -> egui::Rect {
+    let pad = 6.0;
+    let lowest = card.bottom() - pad - CARD_BUTTONS.y;
+    let top = (card.top() + pad).max(clip.top() + pad).min(lowest).max(card.top() + pad);
+    egui::Rect::from_min_size(egui::pos2(card.right() - pad - CARD_BUTTONS.x, top), CARD_BUTTONS)
+}
+
+/// Copy at the right end of a message's label row (and on side questions): two overlapping
+/// rounded squares, drawn (no font has them), then a check mark for a moment after copying.
+/// `text` is what goes on the clipboard. `fill` is the card's background, which the front
+/// square is filled with so it covers the back one.
+fn copy_button(ui: &mut egui::Ui, text: impl FnOnce() -> String, hover: &str, fill: Color32) {
     let copied_id = ui.id().with("copied");
     let now = ui.input(|i| i.time);
     let copied = ui.data(|d| d.get_temp::<f64>(copied_id)).is_some_and(|t| now - t < 1.5);
     let (rect, resp) = ui.allocate_exact_size(egui::vec2(20.0, 18.0), egui::Sense::click());
     resp.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, "Copy"));
-    let resp = resp.on_hover_text("Copy the message").on_hover_cursor(egui::CursorIcon::PointingHand);
+    let resp = resp.on_hover_text(hover).on_hover_cursor(egui::CursorIcon::PointingHand);
     if resp.clicked() {
-        ui.ctx().copy_text(copy_text(m));
+        ui.ctx().copy_text(text());
         ui.data_mut(|d| d.insert_temp(copied_id, now));
     }
     let v = ui.visuals();
@@ -5339,6 +5387,19 @@ impl eframe::App for App {
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn card_buttons_follow_the_visible_top() {
+        let r = |t: f32, b: f32| egui::Rect::from_min_max(egui::pos2(0.0, t), egui::pos2(200.0, b));
+        // Card fully in view: at its own top.
+        assert_eq!(card_buttons_rect(r(100.0, 400.0), r(0.0, 500.0)).top(), 106.0);
+        // Card's top scrolled away: at the viewport's top.
+        assert_eq!(card_buttons_rect(r(-300.0, 400.0), r(0.0, 500.0)).top(), 6.0);
+        // Nearly scrolled out: stays inside the card, at its bottom.
+        assert_eq!(card_buttons_rect(r(-300.0, 20.0), r(0.0, 500.0)).bottom(), 14.0);
+        // At the right edge.
+        assert_eq!(card_buttons_rect(r(0.0, 400.0), r(0.0, 500.0)).right(), 194.0);
+    }
     use super::*;
 
     #[test]
