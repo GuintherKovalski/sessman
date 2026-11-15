@@ -108,3 +108,38 @@ fn the_model_of_a_session_can_be_switched_between_runs() {
     s.click("claude-opus-5-5 (default)");
     assert!(s.env.config_json("state.json")["choices"].get("s-a").is_none());
 }
+
+#[test]
+fn a_side_answer_keeps_copy_and_close_in_view_while_scrolled() {
+    let mut s = info_of_one();
+    let long: String = (1..=80).map(|n| format!("answer line {n}\n\n")).collect();
+    std::fs::write(s.env.fake.join("btw"), &long).unwrap();
+    s.type_in("goal-question-input", "tell me everything");
+    s.press(Key::Enter);
+    s.wait_to_see("answer line 80");
+    // The answers stick to the bottom, so the question (the card's top) is scrolled out above.
+    s.frames(30); // the answers settle at their bottom
+    let question = s.top_of("tell me everything");
+    let close = s.top_of("×");
+    assert!(close > question + 100.0, "× follows the scroll: question at {question}, × at {close}");
+    assert!(close < s.top_of("answer line 80"), "above the end of the answer, in view");
+    s.click_first("Copy");
+    assert_eq!(s.copied.as_deref(), Some(long.trim()), "the side answer's Copy (Info is drawn before the messages)");
+    s.click("×");
+    assert!(!s.sees("answer line 80"));
+}
+
+#[test]
+fn a_side_question_can_be_asked_again() {
+    let mut s = info_of_one();
+    s.type_in("goal-question-input", "what is left?");
+    s.press(Key::Enter);
+    s.wait_to_see("Fake side answer");
+    std::fs::write(s.env.fake.join("btw"), "A fresher answer").unwrap();
+    s.click("↻");
+    s.wait_to_see("A fresher answer");
+    assert!(!s.sees("Fake side answer"), "the new answer takes the old one's place");
+    assert!(s.sees("what is left?"));
+    let asked = s.env.calls().into_iter().filter(|c| c["args"].as_array().unwrap().iter().any(|a| a == "--fork-session")).count();
+    assert_eq!(asked, 2);
+}
