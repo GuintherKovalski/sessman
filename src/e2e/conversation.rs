@@ -123,3 +123,21 @@ fn typing_with_the_conversation_clicked_goes_to_the_input() {
     s.type_here("i");
     assert_eq!(s.prompt(), "hi", "the first key moved the keyboard to the input, the next typed there");
 }
+
+/// At the bottom of a conversation whose last prompt sits just above the top, showing the
+/// pinned prompt used to scroll that prompt back into view, which hid the pin again, every
+/// frame: the conversation jumped up and down until the window changed size (a zoom).
+#[test]
+fn the_pinned_prompt_does_not_flicker_at_the_edge() {
+    let prompt = |n: usize| (1..=4).map(|k| format!("p{n} line {k}")).collect::<Vec<_>>().join("\n\n");
+    let reply = |n: usize, l: usize| (1..=l).map(|k| format!("line {k} of r{n}")).collect::<Vec<_>>().join("\n\n");
+    let f = session("s-x", &prompt(1), 100).reply(&reply(1, 30)).turn(&prompt(2), &reply(2, 3)).turn(&prompt(3), &reply(3, 23));
+    let mut s = setup().session(f).launch();
+    s.click_first("p1 line 1");
+    s.settle();
+    let screen = s.screen();
+    for _ in 0..12 {
+        s.frames(1);
+        assert_eq!(s.screen(), screen, "the conversation changed with nothing happening");
+    }
+}
