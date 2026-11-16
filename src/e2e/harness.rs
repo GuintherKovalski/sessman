@@ -50,7 +50,13 @@ impl Env {
     fn new() -> Self {
         static COUNT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
         let n = COUNT.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        // The real path (macOS: /private/var, not /var), as a run's folder reports it. Windows
+        // writes one as `\\?\C:\…`, which no program reports its folder as: dropped.
         let tmp = std::fs::canonicalize(std::env::temp_dir()).unwrap();
+        let tmp = match tmp.to_str().and_then(|t| t.strip_prefix(r"\\?\")) {
+            Some(plain) if cfg!(windows) && plain.as_bytes().get(1) == Some(&b':') => PathBuf::from(plain),
+            _ => tmp,
+        };
         let root = tmp.join(format!("scope-e2e-{}-{n}", std::process::id()));
         let _ = std::fs::remove_dir_all(&root);
         let env = Env {
@@ -67,7 +73,7 @@ impl Env {
     }
 
     pub fn projects(&self) -> PathBuf {
-        self.home.join(".claude/projects")
+        self.home.join(".claude").join("projects")
     }
 
     /// A folder for sessions, made if missing.
@@ -123,9 +129,9 @@ impl Env {
         std::fs::write(self.config.join(name), serde_json::to_string_pretty(v).unwrap()).unwrap();
     }
 
-    /// The session file of `id`, wherever its project is.
     /// Starts a prompt run on session `id` the way a scope that has since quit left it: not a
     /// child of the app (`sh` starts it and exits), so the app finds it like any other run.
+    #[cfg(unix)]
     pub fn run_outside(&self, id: &str, prompt: &str) {
         let script = r#""$0" -p --resume "$1" --output-format stream-json --verbose "$2" >/dev/null 2>&1 &"#;
         let status = std::process::Command::new("sh")
@@ -139,6 +145,7 @@ impl Env {
         assert!(status.success());
     }
 
+    /// The session file of `id`, wherever its project is.
     pub fn session_file(&self, id: &str) -> Option<PathBuf> {
         std::fs::read_dir(self.projects()).ok()?.flatten().map(|p| p.path().join(format!("{id}.jsonl"))).find(|p| p.exists())
     }
@@ -203,7 +210,7 @@ impl SessionFile {
     /// Writes the file now (for sessions that appear while the app runs).
     pub fn write_to(&self, env: &Env) -> PathBuf {
         let cwd = if self.cwd.as_os_str().is_empty() { env.proj.clone() } else { self.cwd.clone() };
-        let dir = env.projects().join(cwd.display().to_string().replace(['/', '.'], "-"));
+        let dir = env.projects().join(crate::platform::project_key(&cwd.to_string_lossy()));
         std::fs::create_dir_all(&dir).unwrap();
         let mut lines = Vec::new();
         let cwd_s = cwd.display().to_string();
@@ -381,6 +388,10 @@ impl Scope {
         // SAFETY: app tests hold ONE_AT_A_TIME, and no other test reads these variables.
         unsafe {
             std::env::set_var("HOME", &env.home);
+            // Windows takes the home folder from USERPROFILE first (platform.rs), and anyone
+            // may point Claude Code elsewhere: neither may reach the developer's own.
+            std::env::set_var("USERPROFILE", &env.home);
+            std::env::remove_var("CLAUDE_CONFIG_DIR");
             std::env::set_var("SCOPE_CONFIG", &env.config);
         }
         let h = Harness::builder()

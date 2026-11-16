@@ -52,7 +52,7 @@ pub struct Session {
 }
 
 pub fn projects_dir() -> PathBuf {
-    PathBuf::from(std::env::var("HOME").unwrap_or_default()).join(".claude/projects")
+    crate::platform::claude_dir().join("projects")
 }
 
 /// All top-level session transcripts, newest first.

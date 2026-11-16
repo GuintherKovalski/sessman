@@ -3,7 +3,13 @@
 //!
 //! Releases are made by `.github/workflows/release.yml` from a `v*` tag. Each has
 //! `scope-macos.zip` (the signed, notarized app, which this downloads) and
-//! `scope-<version>.dmg` (for people installing by hand).
+//! `scope-<version>.dmg` (for people installing by hand), and for Windows
+//! `scope-windows-x64.zip` (`scope.exe`) with its checksum in `SHA256SUMS`.
+//!
+//! On Windows the installed scope is the `scope.exe` that install.ps1 put in
+//! `%LOCALAPPDATA%\Programs\scope`. A running program can't be overwritten there but can be
+//! renamed: the update moves it aside to `scope.exe.old` (removed at the next start) and puts
+//! the new one in its place.
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{Receiver, channel};
 use std::time::{Duration, Instant};
@@ -25,6 +31,9 @@ pub struct Release {
     pub version: String,
     /// The `.zip` asset with the app in it.
     pub zip_url: String,
+    /// The release's `SHA256SUMS` asset, when it has one: Windows builds aren't signed, so the
+    /// download is checked against it.
+    pub sums_url: Option<String>,
     /// The release's page, for its notes.
     pub page: String,
 }
@@ -49,27 +58,51 @@ pub fn is_newer(latest: &str, current: &str) -> bool {
     }
 }
 
-/// The release in GitHub's `releases/latest` reply, if it has the macOS zip.
+/// The end of the name of the zip this platform installs from.
+pub const ASSET: &str = if cfg!(windows) { "-windows-x64.zip" } else { "-macos.zip" };
+
+/// The release in GitHub's `releases/latest` reply, if it has this platform's zip ([`ASSET`]).
 pub fn parse_release(json: &str) -> Option<Release> {
+    parse_release_for(json, ASSET)
+}
+
+fn parse_release_for(json: &str, asset: &str) -> Option<Release> {
     let v: serde_json::Value = serde_json::from_str(json).ok()?;
     if v["draft"].as_bool() == Some(true) || v["prerelease"].as_bool() == Some(true) {
         return None;
     }
     let version = v["tag_name"].as_str()?.trim_start_matches('v').to_owned();
-    let zip_url = v["assets"]
-        .as_array()?
-        .iter()
-        .filter_map(|a| Some((a["name"].as_str()?, a["browser_download_url"].as_str()?)))
-        .find(|(name, _)| name.ends_with("-macos.zip"))?
-        .1
-        .to_owned();
+    let assets: Vec<(&str, &str)> = v["assets"].as_array()?.iter().filter_map(|a| Some((a["name"].as_str()?, a["browser_download_url"].as_str()?))).collect();
+    let zip_url = assets.iter().find(|(name, _)| name.ends_with(asset))?.1.to_owned();
+    let sums_url = assets.iter().find(|(name, _)| *name == "SHA256SUMS").map(|(_, url)| (*url).to_owned());
     let page = v["html_url"].as_str().unwrap_or_default().to_owned();
-    Some(Release { version, zip_url, page })
+    Some(Release { version, zip_url, sums_url, page })
 }
 
-/// The scope.app this process runs from (`…/scope.app/Contents/MacOS/scope`), if any.
+/// The scope.app this process runs from (`…/scope.app/Contents/MacOS/scope`), if any; on
+/// Windows the installed `scope.exe` (not one under a cargo `target` folder).
 pub fn running_bundle() -> Option<PathBuf> {
-    bundle_of(&std::env::current_exe().ok()?.canonicalize().ok()?)
+    let exe = std::env::current_exe().ok()?;
+    if cfg!(windows) { installed_exe(&exe) } else { bundle_of(&exe.canonicalize().ok()?) }
+}
+
+/// `exe` when it is an installed `scope.exe`: one cargo built (under `target\`) can't update.
+fn installed_exe(exe: &Path) -> Option<PathBuf> {
+    let named = exe.file_name()?.to_string_lossy().eq_ignore_ascii_case("scope.exe");
+    let built = exe.components().any(|c| c.as_os_str().eq_ignore_ascii_case("target"));
+    (named && !built).then(|| exe.to_path_buf())
+}
+
+/// Removes the `scope.exe.old` a Windows update left beside the new one (it was still running
+/// then). Call at start.
+pub fn clean_up_old() {
+    if let Some(exe) = running_bundle().filter(|_| cfg!(windows)) {
+        let _ = std::fs::remove_file(old_exe(&exe));
+    }
+}
+
+fn old_exe(exe: &Path) -> PathBuf {
+    exe.with_extension("exe.old")
 }
 
 fn bundle_of(exe: &Path) -> Option<PathBuf> {
@@ -82,6 +115,7 @@ fn bundle_of(exe: &Path) -> Option<PathBuf> {
 
 fn curl() -> std::process::Command {
     let mut c = std::process::Command::new("curl");
+    crate::platform::hide_window(&mut c);
     c.args(["--location", "--fail", "--silent", "--show-error", "--max-time", "600"]);
     c.arg("--user-agent").arg(format!("scope/{CURRENT}"));
     c.stdin(std::process::Stdio::null());
@@ -108,6 +142,7 @@ fn fetch_latest() -> Result<Option<Release>, String> {
 }
 
 /// The Team ID a bundle is signed with, if it has one (ad-hoc signatures don't).
+#[cfg(not(windows))]
 fn team_id(app: &Path) -> Option<String> {
     let out = std::process::Command::new("codesign").arg("-dv").arg(app).output().ok()?;
     // codesign -d writes its report to stderr.
@@ -128,8 +163,69 @@ fn run(cmd: &mut std::process::Command, what: &str) -> Result<(), String> {
     }
 }
 
+/// The SHA-256 of `bytes`, in hex.
+#[cfg(any(windows, test))]
+fn sha256_hex(bytes: &[u8]) -> String {
+    use sha2::Digest;
+    sha2::Sha256::digest(bytes).iter().map(|b| format!("{b:02x}")).collect()
+}
+
+/// The checksum `SHA256SUMS` (`<hex>  <name>` lines) gives for `name`.
+#[cfg(any(windows, test))]
+fn checksum_for(sums: &str, name: &str) -> Option<String> {
+    sums.lines().find_map(|l| {
+        let mut parts = l.split_whitespace();
+        let (sum, file) = (parts.next()?, parts.next()?.trim_start_matches('*'));
+        (file == name).then(|| sum.to_ascii_lowercase())
+    })
+}
+
+/// Downloads `release` and, once its checksum matches the release's `SHA256SUMS`, puts its
+/// `scope.exe` in place of `exe`, the running one moved aside to `scope.exe.old`.
+#[cfg(windows)]
+fn install(release: &Release, exe: &Path) -> Result<(), String> {
+    let parent = exe.parent().ok_or("scope has no folder")?;
+    let work = parent.join(format!(".scope-update-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&work);
+    std::fs::create_dir_all(&work).map_err(|e| {
+        format!("can't write to {} ({e}); download the update from the release page instead", parent.display())
+    })?;
+    let result = (|| {
+        let zip = work.join("scope.zip");
+        run(curl().arg("--output").arg(&zip).arg(&release.zip_url), "download the update")?;
+        let sums_url = release.sums_url.as_deref().ok_or("the release has no SHA256SUMS to check the download against")?;
+        let sums = work.join("SHA256SUMS");
+        run(curl().arg("--output").arg(&sums).arg(sums_url), "download the checksums")?;
+        let name = release.zip_url.rsplit('/').next().unwrap_or_default();
+        let want = checksum_for(&std::fs::read_to_string(&sums).unwrap_or_default(), name).ok_or("the checksums don't list the download")?;
+        let have = sha256_hex(&std::fs::read(&zip).map_err(|e| e.to_string())?);
+        if want != have {
+            return Err("the download doesn't match its checksum; not installed".into());
+        }
+        // Windows 10 and later have bsdtar, which unpacks zips.
+        let mut tar = std::process::Command::new("tar");
+        crate::platform::hide_window(&mut tar);
+        run(tar.arg("-xf").arg(&zip).arg("-C").arg(&work), "unpack the update")?;
+        let new = work.join("scope.exe");
+        if !new.is_file() {
+            return Err("the download has no scope.exe in it".into());
+        }
+        let old = old_exe(exe);
+        let _ = std::fs::remove_file(&old);
+        std::fs::rename(exe, &old).map_err(|e| format!("can't move the old scope aside: {e}"))?;
+        if let Err(e) = std::fs::rename(&new, exe) {
+            let _ = std::fs::rename(&old, exe);
+            return Err(format!("can't put the new scope in place: {e}"));
+        }
+        Ok(())
+    })();
+    let _ = std::fs::remove_dir_all(&work);
+    result
+}
+
 /// Downloads `release`, checks its signature and puts it in place of `app`. The running process
 /// goes on from the old files (they stay open) until it restarts.
+#[cfg(not(windows))]
 fn install(release: &Release, app: &Path) -> Result<(), String> {
     let parent = app.parent().ok_or("the app has no folder")?;
     // Next to the app, so the final move is a rename on the same volume.
@@ -168,7 +264,22 @@ fn install(release: &Release, app: &Path) -> Result<(), String> {
     result
 }
 
+/// Starts `exe` once this process has exited (so two scopes never run at once).
+#[cfg(windows)]
+pub fn relaunch_after_exit(exe: &Path) {
+    let script = format!(
+        "Wait-Process -Id {} -ErrorAction SilentlyContinue; Start-Process -FilePath '{}'",
+        std::process::id(),
+        exe.display().to_string().replace('\'', "''")
+    );
+    let mut cmd = std::process::Command::new("powershell");
+    cmd.args(["-NoProfile", "-NonInteractive", "-WindowStyle", "Hidden", "-Command", &script]);
+    crate::platform::detach(&mut cmd);
+    let _ = cmd.stdin(std::process::Stdio::null()).stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null()).spawn();
+}
+
 /// Opens `app` once this process has exited (so two scopes never run at once).
+#[cfg(not(windows))]
 pub fn relaunch_after_exit(app: &Path) {
     let script = format!("while kill -0 {} 2>/dev/null; do sleep 0.2; done; open \"$0\"", std::process::id());
     let _ = std::process::Command::new("/bin/sh")
@@ -235,7 +346,8 @@ impl Updater {
     pub fn install(&mut self, ctx: &eframe::egui::Context) {
         let State::Available(release) = &self.state else { return };
         let Some(app) = running_bundle() else {
-            self.state = State::Failed("scope isn't running from scope.app; download the update from the release page".into());
+            let from = if cfg!(windows) { "an installed scope.exe" } else { "scope.app" };
+            self.state = State::Failed(format!("scope isn't running from {from}; download the update from the release page"));
             return;
         };
         let release = release.clone();
@@ -308,13 +420,46 @@ mod tests {
                 {"name": "scope-0.2.0-macos.zip", "browser_download_url": "https://x/scope-0.2.0-macos.zip"}
             ]
         }"#;
-        let r = parse_release(json).unwrap();
+        let r = parse_release_for(json, "-macos.zip").unwrap();
         assert_eq!(r.version, "0.2.0");
         assert_eq!(r.zip_url, "https://x/scope-0.2.0-macos.zip");
         assert_eq!(r.page, "https://github.com/o/r/releases/tag/v0.2.0");
-        assert_eq!(parse_release(&json.replace("-macos.zip", ".tar.gz")), None);
-        assert_eq!(parse_release(&json.replace(r#""prerelease": false"#, r#""prerelease": true"#)), None);
+        assert_eq!(parse_release_for(&json.replace("-macos.zip", ".tar.gz"), "-macos.zip"), None);
+        assert_eq!(parse_release_for(&json.replace(r#""prerelease": false"#, r#""prerelease": true"#), "-macos.zip"), None);
         assert_eq!(parse_release("not json"), None);
+    }
+
+    #[test]
+    fn windows_takes_its_zip_and_the_checksums() {
+        let json = r#"{
+            "tag_name": "v0.3.0", "draft": false, "prerelease": false, "html_url": "p",
+            "assets": [
+                {"name": "scope-macos.zip", "browser_download_url": "https://x/scope-macos.zip"},
+                {"name": "scope-windows-x64.zip", "browser_download_url": "https://x/scope-windows-x64.zip"},
+                {"name": "SHA256SUMS", "browser_download_url": "https://x/SHA256SUMS"}
+            ]
+        }"#;
+        let r = parse_release_for(json, "-windows-x64.zip").unwrap();
+        assert_eq!(r.zip_url, "https://x/scope-windows-x64.zip");
+        assert_eq!(r.sums_url.as_deref(), Some("https://x/SHA256SUMS"));
+        assert_eq!(parse_release_for(&json.replace("windows-x64", "linux"), "-windows-x64.zip"), None);
+    }
+
+    #[test]
+    fn downloads_are_checked_against_sha256sums() {
+        assert_eq!(sha256_hex(b"abc"), "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad");
+        let sums = "ba7816BF  scope-macos.zip\n0123abcd *scope-windows-x64.zip\n";
+        assert_eq!(checksum_for(sums, "scope-windows-x64.zip").as_deref(), Some("0123abcd"));
+        assert_eq!(checksum_for(sums, "scope-macos.zip").as_deref(), Some("ba7816bf"));
+        assert_eq!(checksum_for(sums, "other.zip"), None);
+    }
+
+    #[test]
+    fn only_an_installed_scope_exe_updates_itself() {
+        assert_eq!(installed_exe(Path::new("C:/Users/me/AppData/Local/Programs/scope/scope.exe")).is_some(), true);
+        assert_eq!(installed_exe(Path::new("C:/src/sessman/target/release/scope.exe")), None);
+        assert_eq!(installed_exe(Path::new("C:/tools/other.exe")), None);
+        assert_eq!(old_exe(Path::new("C:/x/scope.exe")), PathBuf::from("C:/x/scope.exe.old"));
     }
 
     #[test]
@@ -345,7 +490,7 @@ mod tests {
         run(std::process::Command::new("codesign").args(["--force", "--sign", "-"]).arg(&new), "sign").unwrap();
         let zip = root.join("scope-9.9.9-macos.zip");
         run(std::process::Command::new("ditto").args(["-c", "-k", "--keepParent"]).arg(&new).arg(&zip), "zip").unwrap();
-        let release = Release { version: "9.9.9".into(), zip_url: format!("file://{}", zip.display()), page: String::new() };
+        let release = Release { version: "9.9.9".into(), zip_url: format!("file://{}", zip.display()), sums_url: None, page: String::new() };
 
         install(&release, &installed).unwrap();
         let exe = std::fs::read_to_string(installed.join("Contents/MacOS/scope")).unwrap();

@@ -64,7 +64,7 @@ impl App {
         };
         let stale = self.template_items.as_ref().is_none_or(|(r, at, _)| *r != root || at.elapsed() > RESCAN);
         if stale {
-            let home = PathBuf::from(std::env::var("HOME").unwrap_or_default());
+            let home = crate::platform::home();
             let items = templates::scan(&root, &self.settings.templates_folder, &home);
             self.template_items = Some((root.clone(), std::time::Instant::now(), items));
             ui.ctx().request_repaint_after(RESCAN);
@@ -423,7 +423,7 @@ impl App {
             self.page = None;
             self.focus_prompt = true;
         } else if open {
-            let home = PathBuf::from(std::env::var("HOME").unwrap_or_default());
+            let home = crate::platform::home();
             let found = templates::scan(&root, &self.settings.templates_folder, &home).into_iter().find(|i| i.path == path);
             let item = found.unwrap_or(Item { kind: Kind::Template, name: "Template".into(), description: String::new(), folders: Vec::new(), path });
             self.open_template(item, root);

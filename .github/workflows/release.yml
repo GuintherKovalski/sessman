@@ -1,5 +1,6 @@
-# Publishes a release: a universal scope.app, signed and notarized, as a .dmg and a .zip, on a
-# GitHub release tagged v<version>, and (with a tap token) the Homebrew cask for it.
+# Publishes a release: a universal scope.app, signed and notarized, as a .dmg and a .zip, and
+# scope.exe for Windows (x64) as scope-windows-x64.zip, on a GitHub release tagged v<version>,
+# with install.sh and install.ps1, and (with a tap token) the Homebrew cask for it.
 #
 # It runs by itself when a version bump reaches main (ci.yml calls it after promoting stage;
 # make one with `scripts/flow.sh release <version>`), or by hand from the Actions tab.
@@ -36,7 +37,34 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
+  # scope.exe, built on Windows and handed to the release job below.
+  windows:
+    runs-on: windows-latest
+    env:
+      RELEASE_REPO: ${{ vars.RELEASE_REPO || github.repository }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.ref || 'main' }}
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Build scope.exe
+        env:
+          SCOPE_RELEASE_REPO: ${{ env.RELEASE_REPO }}
+        run: cargo build --release
+      - name: Zip it
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force dist | Out-Null
+          Compress-Archive -Path target/release/scope.exe -DestinationPath dist/scope-windows-x64.zip
+      - uses: actions/upload-artifact@v4
+        with:
+          name: scope-windows
+          path: dist/scope-windows-x64.zip
+          if-no-files-found: error
+
   release:
+    needs: windows
     runs-on: macos-latest
     permissions:
       contents: write
@@ -111,8 +139,17 @@ jobs:
           fi
           scripts/release.sh
 
-      - name: Add the installer script
-        run: sed "s#GuintherKovalski/sessman#$RELEASE_REPO#g" packaging/install.sh > dist/install.sh
+      - name: Add the Windows build
+        uses: actions/download-artifact@v4
+        with:
+          name: scope-windows
+          path: dist
+
+      - name: Add the installer scripts and the Windows checksum
+        run: |
+          sed "s#GuintherKovalski/sessman#$RELEASE_REPO#g" packaging/install.sh > dist/install.sh
+          sed "s#GuintherKovalski/sessman#$RELEASE_REPO#g" packaging/install.ps1 > dist/install.ps1
+          (cd dist && shasum -a 256 scope-windows-x64.zip >> SHA256SUMS)
 
       - name: Publish the GitHub release
         env:
@@ -126,9 +163,10 @@ jobs:
             echo "- **One line**: \`curl -fsSL https://github.com/$RELEASE_REPO/releases/latest/download/install.sh | sh\`"
             echo "- **Download** [scope-$VERSION.dmg](https://github.com/$RELEASE_REPO/releases/download/$tag/scope-$VERSION.dmg), open it and drag scope to Applications."
             echo "- **Homebrew**: \`brew install --cask $(echo "$HOMEBREW_TAP" | sed 's#/homebrew-#/#')/scope\`"
+            echo "- **Windows**: \`irm https://github.com/$RELEASE_REPO/releases/latest/download/install.ps1 | iex\` in PowerShell, or unzip [scope-windows-x64.zip](https://github.com/$RELEASE_REPO/releases/download/$tag/scope-windows-x64.zip)."
             echo "- **Already have scope?** It offers the update itself (Settings → About)."
             echo
-            echo "Needs macOS 11 or later (Apple Silicon or Intel) and [Claude Code](https://docs.claude.com/en/docs/claude-code)."
+            echo "Needs macOS 11 or later (Apple Silicon or Intel) or Windows 10 or later (x64), and [Claude Code](https://docs.claude.com/en/docs/claude-code)."
             echo
             echo "## Changes"
             echo
@@ -142,7 +180,7 @@ jobs:
           if [ "$RELEASE_REPO" = "$GITHUB_REPOSITORY" ]; then target=(--verify-tag); else target=(); fi
           gh release create "$tag" --repo "$RELEASE_REPO" "${target[@]}" \
             --title "scope $VERSION" --notes-file "$RUNNER_TEMP/notes.md" \
-            dist/scope-$VERSION.dmg dist/scope-macos.zip dist/SHA256SUMS dist/install.sh
+            dist/scope-$VERSION.dmg dist/scope-macos.zip dist/scope-windows-x64.zip dist/SHA256SUMS dist/install.sh dist/install.ps1
         shell: bash
 
       - name: Update the Homebrew cask

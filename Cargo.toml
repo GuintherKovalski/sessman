@@ -24,5 +24,20 @@ objc2-foundation = { version = "0.3", features = ["NSString", "NSDictionary", "N
 objc2-user-notifications = { version = "0.3", features = ["UNUserNotificationCenter", "UNNotification", "UNNotificationContent", "UNNotificationRequest", "UNNotificationResponse", "UNNotificationSound", "UNNotificationTrigger", "block2"] }
 objc2-app-kit = { version = "0.3", features = ["NSOpenPanel", "NSSavePanel", "NSPanel", "NSWindow", "NSResponder", "NSApplication", "NSPasteboard", "NSPasteboardItem", "NSEvent", "block2"] }
 
+# Windows: processes (no ps), the Recycle Bin, the folder picker, the clipboard's images, a
+# console for `scope list` from a terminal, checksums for updates, and dictation on the CPU.
+[target.'cfg(windows)'.dependencies]
+sysinfo = { version = "0.37", default-features = false, features = ["system"] }
+trash = "5"
+rfd = "0.15"
+arboard = { version = "3", default-features = false, features = ["image-data"] }
+sha2 = "0.10"
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_System_Console", "Win32_UI_Input_KeyboardAndMouse", "Win32_UI_WindowsAndMessaging", "Win32_System_Threading"] }
+cpal = "0.16"
+whisper-rs = "0.15"
+
 [dev-dependencies]
 egui_kittest = { version = "0.36", features = ["eframe"] }
+# The Windows process list and update checksums are tested on every platform.
+sysinfo = { version = "0.37", default-features = false, features = ["system"] }
+sha2 = "0.10"

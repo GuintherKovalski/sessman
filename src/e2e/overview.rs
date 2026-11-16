@@ -153,6 +153,8 @@ fn the_idle_hours_come_from_settings() {
 /// Runs are found by their `--resume <id>`, which has to look like a real session id.
 const ID: &str = "7a1d2c3e-8a43-4f7e-9a59-0d2b8c1f7a10";
 
+/// Starts a run outside the app with `sh`.
+#[cfg(unix)]
 #[test]
 fn a_session_whose_run_finished_unseen_is_highlighted_until_opened() {
     let mut s = setup()

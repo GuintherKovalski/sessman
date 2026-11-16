@@ -20,11 +20,14 @@ mod copy;
 mod find;
 mod images;
 mod message_actions;
+// These start runs outside the app and stop processes with `sh`, `pgrep` and `pkill`.
+#[cfg(unix)]
 mod foreign_runs;
 mod info;
 mod new_session;
 mod orchestration_page;
 mod overview;
+#[cfg(unix)]
 mod processes;
 mod prompt;
 mod refine;

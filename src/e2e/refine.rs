@@ -123,5 +123,6 @@ fn hovering_the_refine_button_explains_it_and_shows_its_shortcut() {
     s.hover("✨");
     assert!(s.sees("Refine: a helper model rewrites the prompt clearly, asking questions if it is ambiguous"));
     assert!(s.sees("Type a prompt first"), "disabled, it says why");
-    assert!(s.sees("Cmd+R, or Cmd+Enter in the input"));
+    let c = crate::platform::CMD;
+    assert!(s.sees(&format!("{c}+R, or {c}+Enter in the input")));
 }

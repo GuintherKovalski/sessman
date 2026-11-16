@@ -71,6 +71,7 @@ fn someone_elses_status_line_is_left_alone() {
 }
 
 #[test]
+#[cfg_attr(not(any(target_os = "macos", windows)), ignore = "no dictation on this platform")]
 fn the_mic_offers_to_download_the_speech_model_first() {
     let mut s = setup().session(session("s-a", "alpha prompt", 100)).launch();
     s.click("alpha prompt");

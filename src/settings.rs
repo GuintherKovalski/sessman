@@ -7,15 +7,19 @@ use std::path::PathBuf;
 pub fn config_dir() -> PathBuf {
     match std::env::var_os("SCOPE_CONFIG") {
         Some(dir) => PathBuf::from(dir),
-        None => PathBuf::from(std::env::var("HOME").unwrap_or_default()).join(".config/scope"),
+        None => crate::platform::home().join(".config").join("scope"),
     }
 }
 
 /// Before the app was renamed scope its folder was `~/.config/sessman`: copied over (not moved,
 /// so a sessman still running keeps its own) the first time scope starts without one.
 pub fn adopt_old_config() {
+    // sessman only ever ran on macOS.
+    if cfg!(windows) {
+        return;
+    }
     let new = config_dir();
-    let old = PathBuf::from(std::env::var("HOME").unwrap_or_default()).join(".config/sessman");
+    let old = crate::platform::home().join(".config/sessman");
     if std::env::var_os("SCOPE_CONFIG").is_none() && !new.exists() && old.is_dir() {
         let _ = std::process::Command::new("cp").arg("-R").arg(&old).arg(&new).status();
     }
@@ -282,7 +286,7 @@ pub fn ui(ui: &mut egui::Ui, s: &mut Settings, filter: &mut String, about: &mut 
                     ui.label(RichText::new(list.join(", ")).monospace().small());
                 });
             }
-            page.row("Zoom", "Also Cmd+Plus, Cmd+Minus and Cmd+0", (s.zoom - defaults.zoom).abs() > 0.001, |ui, reset| {
+            page.row("Zoom", &format!("Also {c}+Plus, {c}+Minus and {c}+0", c = crate::platform::CMD), (s.zoom - defaults.zoom).abs() > 0.001, |ui, reset| {
                 if reset {
                     s.zoom = defaults.zoom;
                 }
@@ -524,7 +528,7 @@ pub fn ui(ui: &mut egui::Ui, s: &mut Settings, filter: &mut String, about: &mut 
                     ("Names a new session", "after its first reply", preview::name()),
                     ("Goal and checklist", "Info → Summarize again", preview::goal(s.goal_words)),
                     ("Tags a finished session", "after a run ends, with Tag finished sessions on", preview::tag()),
-                    ("Refine", "Cmd+Enter in the prompt input", preview::refine()),
+                    ("Refine", if cfg!(target_os = "macos") { "Cmd+Enter in the prompt input" } else { "Ctrl+Enter in the prompt input" }, preview::refine()),
                     ("Scopes overview cards", "All sessions, when a scope has new activity", preview::overview()),
                 ];
                 for (what, when, text) in fixed {
@@ -556,8 +560,8 @@ pub fn ui(ui: &mut egui::Ui, s: &mut Settings, filter: &mut String, about: &mut 
             page.row("Config folder", "", false, |ui, _| {
                 let dir = config_dir();
                 ui.label(RichText::new(dir.display().to_string()).monospace());
-                if ui.small_button("Open in Finder").clicked() {
-                    let _ = std::process::Command::new("open").arg(&dir).spawn();
+                if ui.small_button(format!("Open in {}", crate::platform::FILE_MANAGER)).clicked() {
+                    crate::platform::open(&dir);
                 }
             });
             page.row("Status line (usage limits)", "", false, |ui, _| {
@@ -658,7 +662,7 @@ fn update_status(ui: &mut egui::Ui, u: &mut crate::update::Updater) {
     let ctx = ui.ctx().clone();
     let page = |ui: &mut egui::Ui, url: &str| {
         if !url.is_empty() && ui.small_button("What's new").clicked() {
-            let _ = std::process::Command::new("open").arg(url).spawn();
+            crate::platform::open(url);
         }
     };
     match &u.state {

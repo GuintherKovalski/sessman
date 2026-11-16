@@ -156,6 +156,12 @@ pub fn add_file(path: &Path) -> Result<String, String> {
     add(&bytes)
 }
 
+#[cfg(not(target_os = "macos"))]
+fn heic_to_png(_path: &Path) -> Result<Vec<u8>, String> {
+    Err("HEIC images can only be added on macOS; save it as PNG or JPEG first".into())
+}
+
+#[cfg(target_os = "macos")]
 fn heic_to_png(path: &Path) -> Result<Vec<u8>, String> {
     let out = std::env::temp_dir().join(format!("scope-heic-{}.png", std::process::id()));
     let ok = std::process::Command::new("sips")
@@ -273,9 +279,9 @@ pub fn join(pieces: &[String]) -> String {
     out
 }
 
-/// Opens an image in the default viewer (Preview).
+/// Opens an image in the default viewer (Preview, Photos).
 pub fn open(name: &str) {
-    let _ = std::process::Command::new("open").arg(path(name)).spawn();
+    crate::platform::open(path(name));
 }
 
 /// The text with its markers as chips, for the prompt input's layouter.
@@ -297,8 +303,27 @@ pub fn layout(text: &str, font: eframe::egui::FontId, color: eframe::egui::Color
 static PASTE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
 /// Whether Cmd+V was pressed since the last call.
+#[cfg(not(windows))]
 pub fn paste_pressed() -> bool {
     PASTE.swap(false, std::sync::atomic::Ordering::Relaxed)
+}
+
+/// Whether Ctrl+V went down (in scope's window) since the last call. egui-winit swallows a
+/// Ctrl+V with no text on the clipboard, so the keys themselves are asked.
+#[cfg(windows)]
+pub fn paste_pressed() -> bool {
+    use std::sync::atomic::Ordering;
+    use windows_sys::Win32::UI::Input::KeyboardAndMouse::{GetAsyncKeyState, VK_CONTROL, VK_V};
+    use windows_sys::Win32::UI::WindowsAndMessaging::{GetForegroundWindow, GetWindowThreadProcessId};
+    // SAFETY: plain queries of the keyboard and the foreground window.
+    let down = unsafe { GetAsyncKeyState(VK_CONTROL as i32) < 0 && GetAsyncKeyState(VK_V as i32) < 0 };
+    let was = PASTE.swap(down, Ordering::Relaxed);
+    let mine = unsafe {
+        let mut pid = 0u32;
+        GetWindowThreadProcessId(GetForegroundWindow(), &mut pid);
+        pid == std::process::id()
+    };
+    down && !was && mine
 }
 
 /// Starts watching for Cmd+V. Call on the main thread, before the window opens.
@@ -349,7 +374,33 @@ pub fn from_clipboard() -> Option<Vec<Result<String, String>>> {
     })
 }
 
-#[cfg(not(target_os = "macos"))]
+/// What a paste carries, when it is images: copied image files (Explorer), or image data
+/// (screenshots, Copy image) unless there is text too. Each saved; their markers.
+/// None: nothing image-like, the paste is text.
+#[cfg(windows)]
+pub fn from_clipboard() -> Option<Vec<Result<String, String>>> {
+    let mut clipboard = arboard::Clipboard::new().ok()?;
+    let files: Vec<PathBuf> = clipboard.get().file_list().unwrap_or_default().into_iter().filter(|p| is_image_file(p)).collect();
+    if !files.is_empty() {
+        return Some(files.iter().map(|f| add_file(f)).collect());
+    }
+    if clipboard.get_text().is_ok_and(|t| !t.trim().is_empty()) {
+        return None;
+    }
+    let image = clipboard.get_image().ok()?;
+    Some(vec![rgba_to_png(image.width, image.height, &image.bytes).and_then(|png| add(&png))])
+}
+
+/// Raw RGBA pixels (as the Windows clipboard gives them) as a PNG.
+#[cfg_attr(not(windows), allow(dead_code))]
+fn rgba_to_png(width: usize, height: usize, rgba: &[u8]) -> Result<Vec<u8>, String> {
+    let image = image::RgbaImage::from_raw(width as u32, height as u32, rgba.to_vec()).ok_or("the clipboard's image is incomplete")?;
+    let mut png = std::io::Cursor::new(Vec::new());
+    image.write_to(&mut png, image::ImageFormat::Png).map_err(|e| format!("can't encode the clipboard's image: {e}"))?;
+    Ok(png.into_inner())
+}
+
+#[cfg(not(any(target_os = "macos", windows)))]
 pub fn from_clipboard() -> Option<Vec<Result<String, String>>> {
     None
 }
@@ -421,3 +472,14 @@ mod tests {
     }
 }
 
+#[cfg(test)]
+mod clipboard_tests {
+    #[test]
+    fn clipboard_pixels_become_a_png() {
+        let png = super::rgba_to_png(2, 1, &[255, 0, 0, 255, 0, 255, 0, 255]).unwrap();
+        let back = image::load_from_memory(&png).unwrap().to_rgba8();
+        assert_eq!((back.width(), back.height()), (2, 1));
+        assert_eq!(back.get_pixel(1, 0).0, [0, 255, 0, 255]);
+        assert!(super::rgba_to_png(2, 2, &[0; 4]).is_err(), "too few bytes");
+    }
+}

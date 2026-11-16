@@ -53,7 +53,7 @@ Use your terminal one last time. Open Claude Code and paste:
 Install this IDE and open it: https://github.com/GuintherKovalski/sessman
 ```
 
-Needs macOS 11 or later and [Claude Code](https://docs.claude.com/en/docs/claude-code).
+Needs macOS 11 or later or Windows 10 or later (x64), and [Claude Code](https://docs.claude.com/en/docs/claude-code).
 
 <details>
 <summary>Other ways to install</summary>
@@ -72,7 +72,20 @@ Run it again any time to update. Or:
 - **By hand**: download `scope-<version>.dmg` from the [latest release](https://github.com/GuintherKovalski/sessman/releases/latest),
   open it and drag scope to Applications.
 
-That's all: nothing to compile, no Rust or cmake. scope updates itself: when a new version is
+On **Windows**, in PowerShell:
+
+```powershell
+irm https://github.com/GuintherKovalski/sessman/releases/latest/download/install.ps1 | iex
+```
+
+It does the same: downloads `scope-windows-x64.zip` (checking its checksum), puts `scope.exe` in
+`%LOCALAPPDATA%\Programs\scope`, adds it to your PATH and the Start menu, downloads the speech
+model, installs Claude Code if it's missing, and opens scope. Or unzip `scope-windows-x64.zip`
+from the [latest release](https://github.com/GuintherKovalski/sessman/releases/latest) anywhere
+and run `scope.exe`. It isn't code-signed yet, so SmartScreen may ask you to confirm the first
+run (**More info → Run anyway**).
+
+That's all: nothing to compile, no Rust or cmake. scope updates itself (both platforms): when a new version is
 out, the top bar says so, and **Settings → About** installs it and restarts (your sessions keep
 running). Installed another way, dictation (🎤) offers to download its speech model (about
 150 MB) the first time you use it; the first recording asks for microphone access.
@@ -156,6 +169,14 @@ scripts/release.sh    # the release files (universal .dmg and .zip) into dist/
 Pin `~/Applications/scope.app` in the Dock, not `target/release/scope`: a bare binary shows
 the generic executable icon whenever the app isn't running.
 
+**On Windows**: [Rust](https://rustup.rs) with the MSVC toolchain (Visual Studio Build Tools,
+"Desktop development with C++"), [CMake](https://cmake.org/download/) and
+[LLVM](https://github.com/llvm/llvm-project/releases) (whisper.cpp's bindings need libclang),
+then `cargo run --release` or `cargo build --release` for `target\release\scope.exe`. The
+e2e tests that start runs outside the app or stop processes use `sh`, `pgrep` and `pkill`, so
+they run on macOS only; CI runs the rest of the suite on Windows too. The scripts in `scripts/`
+are POSIX shell (Git Bash runs most of them; `bundle.sh` and `release.sh` are macOS's).
+
 **Testing changes**: always in a new instance of scope, never the one running your sessions
 (restarting it ends them): `scripts/test-instance.sh start`, then `stop`. See
 [CLAUDE.md](CLAUDE.md). Several features at once, each with its own worktree, build and test
@@ -165,7 +186,10 @@ window: `scripts/feature.sh`, see [WORKTREES.md](WORKTREES.md). Taking changes l
 **Releasing**: `scripts/flow.sh release 0.2.0`; CI builds, signs, notarizes and publishes it.
 The one-time setup (Developer ID certificate, secrets, Homebrew tap) is in [RELEASING.md](RELEASING.md).
 
-Linux is not supported yet.
+Linux is not supported yet. Everything that differs between macOS and Windows is in
+`src/platform.rs` (home folder, opening files, finding `claude`, listing and stopping
+processes), plus a few `cfg(windows)` blocks next to their macOS counterparts (folder picker,
+Recycle Bin, notifications, clipboard images, updates).
 
 Specs, plan, and tasks are in `specs/001-session-manager-ui/` (Spec Kit). The open questions to
 settle by using the app are in `research.md`.
@@ -173,6 +197,20 @@ settle by using the app are in `research.md`.
 ## Gaps
 
 Known shortcomings of what's already built, to pick up as Spec Kit features later.
+
+### Windows
+
+- **Stop ends a run instead of interrupting it.** Windows has no Ctrl+C for a program without a
+  console window, so ⏹ and Ctrl+C end `claude` and everything it started at once. Claude Code
+  saves each step as it goes, so nothing finished is lost, but the session gets no
+  "Interrupted" marker. The same goes for the Processes tab's stop buttons.
+- **Clicking a notification doesn't open its session.** They are toasts posted through
+  PowerShell, which can't call back into scope.
+- **HEIC images** (iPhone photos) can't be pasted or dropped; macOS converts them with `sips`.
+- **Pasting images** checks Ctrl+V itself (egui ignores a paste with no text in it), so pasting
+  with Shift+Insert only takes text.
+- **Not code-signed**: SmartScreen may warn on first run; updates are checked against the
+  release's `SHA256SUMS` instead of a signature.
 
 ### Markdown rendering (`specs/010-markdown-rendering-themes/`)
 

@@ -12,16 +12,12 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{Receiver, channel};
 use std::time::{Duration, Instant, SystemTime};
 
-fn home() -> PathBuf {
-    PathBuf::from(std::env::var("HOME").unwrap_or_default())
-}
-
 pub fn dir() -> PathBuf {
     crate::settings::config_dir().join("status")
 }
 
 fn settings_path() -> PathBuf {
-    home().join(".claude/settings.json")
+    crate::platform::claude_dir().join("settings.json")
 }
 
 /// Entry point for `scope statusline`, run by Claude Code.
@@ -119,18 +115,23 @@ fn unix_time(s: &str) -> Option<u64> {
     u64::try_from(days * 86400 + h * 3600 + mi * 60 + sec - offset).ok()
 }
 
-/// Claude Code's OAuth token: in the login keychain on macOS, else in ~/.claude/.credentials.json.
+/// Claude Code's OAuth token: in the login keychain on macOS, else (Windows, Linux) in
+/// ~/.claude/.credentials.json.
 fn access_token() -> Result<String, String> {
-    let keychain = std::process::Command::new("security")
+    let keychain = if !cfg!(target_os = "macos") {
+        None
+    } else {
+        std::process::Command::new("security")
         .args(["find-generic-password", "-s", "Claude Code-credentials", "-w"])
         .stdin(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
         .output()
         .ok()
         .filter(|o| o.status.success())
-        .map(|o| String::from_utf8_lossy(&o.stdout).into_owned());
+        .map(|o| String::from_utf8_lossy(&o.stdout).into_owned())
+    };
     let text = keychain
-        .or_else(|| std::fs::read_to_string(home().join(".claude/.credentials.json")).ok())
+        .or_else(|| std::fs::read_to_string(crate::platform::claude_dir().join(".credentials.json")).ok())
         .ok_or("not signed in to Claude Code with a Claude account")?;
     let v: Value = serde_json::from_str(text.trim()).map_err(|_| "can't read Claude Code's credentials")?;
     v["claudeAiOauth"]["accessToken"].as_str().map(str::to_owned).ok_or_else(|| "not signed in to Claude Code with a Claude account".to_owned())
@@ -139,7 +140,9 @@ fn access_token() -> Result<String, String> {
 /// Asks the usage endpoint once (with curl, so the token stays out of the process list).
 fn fetch_usage() -> Result<Vec<Window>, String> {
     let token = access_token()?;
-    let mut child = std::process::Command::new("curl")
+    let mut curl = std::process::Command::new("curl");
+    crate::platform::hide_window(&mut curl);
+    let mut child = curl
         .args(["-sS", "--max-time", "15", "-K", "-", "https://api.anthropic.com/api/oauth/usage"])
         .stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::piped())
@@ -222,7 +225,8 @@ pub fn enable() -> Result<(), String> {
         Err(_) => json!({}),
     };
     let exe = std::env::current_exe().map_err(|e| e.to_string())?;
-    let command = format!("'{}' statusline", exe.display());
+    // Windows: Claude Code may run it with Git Bash or cmd, which share double quotes and `/`.
+    let command = if cfg!(windows) { format!("\"{}\" statusline", crate::platform::shell_path(&exe)) } else { format!("'{}' statusline", exe.display()) };
     settings["statusLine"] = json!({ "type": "command", "command": command });
     let text = serde_json::to_string_pretty(&settings).map_err(|e| e.to_string())?;
     std::fs::write(&path, text + "\n").map_err(|e| e.to_string())
