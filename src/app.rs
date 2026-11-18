@@ -1,6 +1,7 @@
 use crate::control::{self, Command};
 use crate::diffview::{self, CardEvent};
 use crate::dictation;
+use crate::dragscroll;
 use crate::find::{self, Find};
 use crate::goal;
 use crate::history::History;
@@ -3708,10 +3709,16 @@ impl App {
         let click = ui.input(|i| i.pointer.primary_clicked().then_some(i.pointer.interact_pos()).flatten());
         let pick_stroke = Stroke::new(1.5, ui.visuals().selection.bg_fill);
         let mut top_message = None;
+        let mut selecting = false;
         let out = egui::ScrollArea::vertical().id_salt(("conversation", &key)).auto_shrink(false).stick_to_bottom(true).show_viewport(ui, |ui, viewport| {
             let origin = ui.cursor().top();
+            let drag = dragscroll::begin(ui);
             // Render only messages near the viewport; the rest just take their remembered height.
-            let near = viewport.expand2(egui::vec2(0.0, 400.0));
+            // A selection's ends are drawn too, even out of view, or egui would drop it.
+            let mut near = viewport.expand2(egui::vec2(0.0, 400.0));
+            if let Some((lo, hi)) = drag.keep() {
+                near = near.union(egui::Rect::from_x_y_ranges(near.x_range(), lo..=hi));
+            }
             for (i, m) in s.messages.iter().enumerate() {
                 let y = ui.cursor().top() - origin;
                 if pickable(m) && y <= viewport.min.y + 1.0 {
@@ -3781,11 +3788,14 @@ impl App {
                 }
                 ui.label(RichText::new("⏹ Interrupted").color(pal.note).monospace());
             }
+            selecting = drag.selecting();
+            drag.end(ui);
         });
         self.conversation_rect = Some(out.inner_rect);
         self.top_message = top_message;
         let (top_prompt, inline_you) = pin_choice(&prompts, out.state.offset.y, out.content_size.y, out.inner_rect.height(), reserved);
-        if top_prompt != self.pinned || inline_you != self.inline_you {
+        // Not while there is a selection: the layout would move under it and egui would drop it.
+        if !selecting && (top_prompt != self.pinned || inline_you != self.inline_you) {
             self.pinned = top_prompt;
             self.inline_you = inline_you;
             ui.ctx().request_repaint();
@@ -3915,12 +3925,14 @@ impl App {
             return diffview::file_view(ui, &tab.path, &tab.contents, &opts, scroll_id, find);
         }
         egui::ScrollArea::vertical().id_salt(("md", scroll_id)).auto_shrink(false).show(ui, |ui| {
+            let drag = dragscroll::begin(ui);
             let from = find::next_shape(ui);
             let rect = egui::Frame::new().inner_margin(egui::Margin::symmetric(12, 4)).show(ui, |ui| markdown::show(ui, &mut self.md_cache, text)).response.rect;
             if let Some(f) = find {
                 let exact = find::highlight_painted(ui, from, &f.query, f.in_item(0).1, theme::palette(ui.visuals()).find);
                 scroll_to_match(ui, f, 0, rect, text.len(), exact, true);
             }
+            drag.end(ui);
         });
     }
 
@@ -4076,6 +4088,7 @@ impl App {
                             .max_height(max_height)
                             .stick_to_bottom(true)
                             .show(ui, |ui| {
+                                let drag = dragscroll::begin(ui);
                                 for (i, b) in list.iter().enumerate() {
                                     ui.push_id(i, |ui| {
                                         let fill = ui.visuals().faint_bg_color;
@@ -4108,7 +4121,7 @@ impl App {
                                             });
                                         // Copy, ↻ and × stay at the top right of the card's visible
                                         // part, so they are in reach however far it is scrolled.
-                                        let at = card_buttons_rect(card.response.rect, ui.clip_rect());
+                                        let at = card_buttons_rect(card.response.rect, drag.view());
                                         ui.painter().rect_filled(at.expand(2.0), 4.0, fill);
                                         ui.scope_builder(egui::UiBuilder::new().max_rect(at).layout(egui::Layout::right_to_left(egui::Align::Center)), |ui| {
                                             ui.spacing_mut().item_spacing.x = 2.0;
@@ -4129,11 +4142,12 @@ impl App {
                                                 _ => b.question.clone(),
                                             };
                                             let hover = if matches!(b.answer, Some(Ok(_))) { "Copy the answer" } else { "Copy the question" };
-                                            copy_button(ui, copy, hover, fill);
+                                            markdown::copy_button(ui, copy, hover, fill);
                                         });
                                     });
                                     ui.add_space(4.0);
                                 }
+                                drag.end(ui);
                             });
                     }
                     let field_max = if list.is_empty() { max_total } else { (max_total - 80.0).max(40.0) };
@@ -4168,6 +4182,7 @@ impl App {
                 });
         }
         let sections = egui::ScrollArea::vertical().auto_shrink(false).show(ui, |ui| {
+            let drag = dragscroll::begin(ui);
             section(ui, "Goal");
             let goal = id.as_deref().and_then(|id| self.goals.get(id));
             let busy = id.as_ref().is_some_and(|id| self.summarizing.iter().chain(&self.first_goals).any(|(sid, _)| sid == id));
@@ -4262,6 +4277,7 @@ impl App {
                     Err(e) => self.error = Some(format!("could not enable status line: {e}")),
                 }
             }
+            drag.end(ui);
         });
         if (sections.content_size.y - self.info_height).abs() > 0.5 {
             self.info_height = sections.content_size.y;
@@ -4928,7 +4944,7 @@ fn message(ui: &mut egui::Ui, cache: &mut CommonMarkCache, m: &session::Message,
             ui.horizontal(|ui| {
                 ui.label(RichText::new(who).strong().color(accent));
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    copy_button(ui, || copy_text(m), "Copy the message", fill);
+                    markdown::copy_button(ui, || copy_text(m), "Copy the message", fill);
                     if let Some(can_delete) = delete {
                         clicked = delete_button(ui, can_delete);
                     }
@@ -4987,44 +5003,6 @@ fn card_buttons_rect(card: egui::Rect, clip: egui::Rect) -> egui::Rect {
     let lowest = card.bottom() - pad - CARD_BUTTONS.y;
     let top = (card.top() + pad).max(clip.top() + pad).min(lowest).max(card.top() + pad);
     egui::Rect::from_min_size(egui::pos2(card.right() - pad - CARD_BUTTONS.x, top), CARD_BUTTONS)
-}
-
-/// Copy at the right end of a message's label row (and on side questions): two overlapping
-/// rounded squares, drawn (no font has them), then a check mark for a moment after copying.
-/// `text` is what goes on the clipboard. `fill` is the card's background, which the front
-/// square is filled with so it covers the back one.
-fn copy_button(ui: &mut egui::Ui, text: impl FnOnce() -> String, hover: &str, fill: Color32) {
-    let copied_id = ui.id().with("copied");
-    let now = ui.input(|i| i.time);
-    let copied = ui.data(|d| d.get_temp::<f64>(copied_id)).is_some_and(|t| now - t < 1.5);
-    let (rect, resp) = ui.allocate_exact_size(egui::vec2(20.0, 18.0), egui::Sense::click());
-    resp.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, "Copy"));
-    let resp = resp.on_hover_text(hover).on_hover_cursor(egui::CursorIcon::PointingHand);
-    if resp.clicked() {
-        ui.ctx().copy_text(text());
-        ui.data_mut(|d| d.insert_temp(copied_id, now));
-    }
-    let v = ui.visuals();
-    let bg = if resp.hovered() { v.widgets.hovered.weak_bg_fill } else { fill };
-    let color = if resp.hovered() { v.strong_text_color() } else { v.weak_text_color() };
-    let stroke = Stroke::new(1.3, color);
-    let p = ui.painter();
-    if resp.hovered() {
-        p.rect_filled(rect, 4.0, bg);
-    }
-    let c = rect.center();
-    if copied {
-        let pts = vec![c + egui::vec2(-4.5, 0.0), c + egui::vec2(-1.5, 3.0), c + egui::vec2(4.5, -3.5)];
-        p.add(egui::Shape::line(pts, stroke));
-        ui.ctx().request_repaint_after(std::time::Duration::from_millis(300));
-    } else {
-        let (side, shift) = (9.0, 3.5);
-        let back = egui::Rect::from_min_size(c + egui::vec2(-side / 2.0 - shift / 2.0 + shift, -side / 2.0 - shift / 2.0), egui::vec2(side, side));
-        let front = back.translate(egui::vec2(-shift, shift));
-        p.rect_stroke(back, 1.5, stroke, egui::StrokeKind::Middle);
-        p.rect_filled(front, 1.5, bg);
-        p.rect_stroke(front, 1.5, stroke, egui::StrokeKind::Middle);
-    }
 }
 
 /// Delete, left of Copy in a message's label row: small and without a frame until hovered.

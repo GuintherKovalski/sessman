@@ -4,6 +4,7 @@ mod diffview;
 #[cfg(test)]
 mod e2e;
 mod dictation;
+mod dragscroll;
 mod find;
 mod goal;
 mod history;
