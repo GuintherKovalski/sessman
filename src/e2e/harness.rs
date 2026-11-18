@@ -689,6 +689,32 @@ impl Scope {
         self.frames(4);
     }
 
+    /// Selects text by dragging from the left edge of the widget labelled `from` to `to`
+    /// (anywhere, even outside the area it is in), holding there for `hold` frames.
+    #[track_caller]
+    pub fn select_from(&mut self, from: &str, to: egui::Pos2, hold: usize) {
+        self.steady();
+        let r = self.node(from).rect();
+        let a = egui::pos2(r.left() + 1.0, r.center().y);
+        self.h.hover_at(a);
+        self.frames(1);
+        self.h.drag_at(a);
+        self.frames(2);
+        for k in 1..=6 {
+            self.h.event(egui::Event::PointerMoved(a + (to - a) * (k as f32 / 6.0)));
+            self.frames(1);
+        }
+        self.frames(hold);
+        self.h.drop_at(to);
+        self.frames(2);
+    }
+
+    /// Copies what is selected (Cmd+C) into [`Scope::copied`].
+    pub fn copy(&mut self) {
+        self.h.event(egui::Event::Copy);
+        self.frames(2);
+    }
+
     /// Where the top of the widget labelled `label` is, from the window's top.
     #[track_caller]
     pub fn top_of(&self, label: &str) -> f32 {

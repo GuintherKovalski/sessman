@@ -703,6 +703,7 @@ pub fn ui(ui: &mut egui::Ui, page: &Page, question: &mut String, renaming: &mut 
     }
 
     egui::ScrollArea::vertical().id_salt(("orchestration", page.name)).auto_shrink(false).show(ui, |ui| {
+        let drag = crate::dragscroll::begin(ui);
         // The report, in a card like a scope's on the overview: the summary, progress, what
         // needs the developer and what comes next, then the sessions as tiles, then how fresh.
         let shown = overview::card_frame(ui.visuals()).show(ui, |ui| {
@@ -830,6 +831,7 @@ pub fn ui(ui: &mut egui::Ui, page: &Page, question: &mut String, renaming: &mut 
             });
             overview::stripe(ui, shown.response.rect, accent);
         }
+        drag.end(ui);
     });
     event
 }

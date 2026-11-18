@@ -29,6 +29,7 @@ mod processes;
 mod prompt;
 mod refine;
 mod search;
+mod select;
 mod sessions;
 mod settings_page;
 mod startup;

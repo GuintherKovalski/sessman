@@ -106,7 +106,18 @@ pub fn show(ui: &mut egui::Ui, cache: &mut CommonMarkCache, text: &str) {
             }
             Block::Table(t) => {
                 ui.add_space(4.0);
-                egui::ScrollArea::horizontal().auto_shrink([false, true]).show(ui, |ui| table(ui, &t));
+                let out = egui::ScrollArea::horizontal().auto_shrink([false, true]).show(ui, |ui| table(ui, &t));
+                let (outline, rows) = out.inner;
+                // Copy, at the top right of the table's visible part while the pointer is on it.
+                let visible = outline.intersect(out.inner_rect);
+                if visible.width() > 30.0 && ui.rect_contains_pointer(visible) {
+                    let at = egui::Rect::from_min_size(visible.right_top() + egui::vec2(-24.0, 3.0), egui::vec2(20.0, 18.0));
+                    let fill = ui.visuals().code_bg_color;
+                    ui.painter().rect_filled(at.expand(1.0), 4.0, fill);
+                    ui.scope_builder(egui::UiBuilder::new().max_rect(at), |ui| {
+                        copy_button(ui, || tsv(&rows), "Copy the table (tab-separated, to paste into a spreadsheet)", fill);
+                    });
+                }
                 ui.add_space(4.0);
             }
             Block::Tools(_) if !SHOW_TOOLS.load(Ordering::Relaxed) => {}
@@ -115,6 +126,45 @@ pub fn show(ui: &mut egui::Ui, cache: &mut CommonMarkCache, text: &str) {
                 ui.label(egui::RichText::new(text).monospace().small().weak());
             }
         });
+    }
+}
+
+/// Copy at the right end of a message's label row (and on side questions, and tables): two
+/// overlapping rounded squares, drawn (no font has them), then a check mark for a moment after
+/// copying.
+/// `text` is what goes on the clipboard. `fill` is the card's background, which the front
+/// square is filled with so it covers the back one.
+pub fn copy_button(ui: &mut egui::Ui, text: impl FnOnce() -> String, hover: &str, fill: egui::Color32) {
+    let copied_id = ui.id().with("copied");
+    let now = ui.input(|i| i.time);
+    let copied = ui.data(|d| d.get_temp::<f64>(copied_id)).is_some_and(|t| now - t < 1.5);
+    let (rect, resp) = ui.allocate_exact_size(egui::vec2(20.0, 18.0), egui::Sense::click());
+    resp.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, "Copy"));
+    let resp = resp.on_hover_text(hover).on_hover_cursor(egui::CursorIcon::PointingHand);
+    if resp.clicked() {
+        ui.ctx().copy_text(text());
+        ui.data_mut(|d| d.insert_temp(copied_id, now));
+    }
+    let v = ui.visuals();
+    let bg = if resp.hovered() { v.widgets.hovered.weak_bg_fill } else { fill };
+    let color = if resp.hovered() { v.strong_text_color() } else { v.weak_text_color() };
+    let stroke = egui::Stroke::new(1.3, color);
+    let p = ui.painter();
+    if resp.hovered() {
+        p.rect_filled(rect, 4.0, bg);
+    }
+    let c = rect.center();
+    if copied {
+        let pts = vec![c + egui::vec2(-4.5, 0.0), c + egui::vec2(-1.5, 3.0), c + egui::vec2(4.5, -3.5)];
+        p.add(egui::Shape::line(pts, stroke));
+        ui.ctx().request_repaint_after(std::time::Duration::from_millis(300));
+    } else {
+        let (side, shift) = (9.0, 3.5);
+        let back = egui::Rect::from_min_size(c + egui::vec2(-side / 2.0 - shift / 2.0 + shift, -side / 2.0 - shift / 2.0), egui::vec2(side, side));
+        let front = back.translate(egui::vec2(-shift, shift));
+        p.rect_stroke(back, 1.5, stroke, egui::StrokeKind::Middle);
+        p.rect_filled(front, 1.5, bg);
+        p.rect_stroke(front, 1.5, stroke, egui::StrokeKind::Middle);
     }
 }
 
@@ -152,9 +202,10 @@ const MAX_COL_WIDTH: f32 = 380.0;
 
 /// A bordered table with a bold header, striped rows and aligned columns, drawn by hand so
 /// columns size to their content and wide tables scroll instead of squeezing. Cell text is
-/// selectable (drag across cells, Cmd+C), and a cell's right-click menu copies it or the table.
-fn table(ui: &mut egui::Ui, t: &Table) {
-    let rows: Vec<Vec<(std::sync::Arc<egui::Galley>, Option<String>)>> = std::iter::once(&t.header)
+/// selectable (drag across cells, Cmd+C), a cell's right-click menu copies it or the table, and
+/// so does Copy at its top right on hover. Returns its outline and cells, for that button.
+fn table(ui: &mut egui::Ui, t: &Table) -> (egui::Rect, Cells) {
+    let rows: Cells = std::iter::once(&t.header)
         .chain(&t.rows)
         .enumerate()
         .map(|(r, row)| row.iter().map(|c| inline(ui, c, r == 0)).collect())
@@ -223,10 +274,14 @@ fn table(ui: &mut egui::Ui, t: &Table) {
     }
     let outline = egui::Rect::from_min_max(egui::pos2(left, top), egui::pos2(left + total, ui.cursor().top()));
     ui.painter().rect_stroke(outline, 2.0, border, egui::StrokeKind::Inside);
+    (outline, rows)
 }
 
+/// A table's cells, header row first: laid out text and the first link.
+type Cells = Vec<Vec<(std::sync::Arc<egui::Galley>, Option<String>)>>;
+
 /// The table's text as tab-separated rows, header first.
-fn tsv(rows: &[Vec<(std::sync::Arc<egui::Galley>, Option<String>)>]) -> String {
+fn tsv(rows: &Cells) -> String {
     let line = |row: &Vec<(std::sync::Arc<egui::Galley>, Option<String>)>| {
         row.iter().map(|(g, _)| g.text().trim().replace(['\t', '\n'], " ")).collect::<Vec<_>>().join("\t")
     };
@@ -501,6 +556,49 @@ mod drag_tests {
         for word in ["Before", "Name", "alpha", "2", "After"] {
             assert!(all.contains(word), "missing {word} in {all:?}");
         }
+    }
+}
+
+#[cfg(test)]
+mod copy_tests {
+    use super::*;
+
+    /// Hovering a table shows Copy at its top right; clicking it copies the table as TSV.
+    #[test]
+    fn copy_button_copies_the_table() {
+        let ctx = egui::Context::default();
+        let mut cache = CommonMarkCache::default();
+        let text = "| Name | Value |\n|---|---|\n| alpha | 1 |\n| **beta** | 2 |\n";
+        let mut frame = |events: Vec<egui::Event>| {
+            let input = egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(800.0, 600.0))),
+                events,
+                ..Default::default()
+            };
+            let mut out = ctx.run_ui(input, |ui| show(ui, &mut cache, text));
+            out.textures_delta.clear();
+            out
+        };
+        frame(vec![]);
+        let out = frame(vec![]);
+        // The table's outline: the bounding box of its cells' text, plus padding.
+        let texts: Vec<egui::Rect> = out.shapes.iter().filter_map(|c| match &c.shape {
+            egui::Shape::Text(t) => Some(egui::Rect::from_min_size(t.pos, t.galley.size())),
+            _ => None,
+        }).collect();
+        let right = texts.iter().map(|r| r.right()).fold(0.0, f32::max) + CELL_PAD.x;
+        let top = texts.iter().map(|r| r.top()).fold(f32::INFINITY, f32::min) - CELL_PAD.y;
+        let button = egui::pos2(right - 14.0, top + 12.0);
+        let press = |pressed| egui::Event::PointerButton { pos: button, button: egui::PointerButton::Primary, pressed, modifiers: Default::default() };
+        frame(vec![egui::Event::PointerMoved(button)]);
+        frame(vec![]);
+        frame(vec![press(true)]);
+        let out = frame(vec![press(false)]);
+        let copied: Vec<_> = out.platform_output.commands.iter().filter_map(|c| match c {
+            egui::OutputCommand::CopyText(t) => Some(t.clone()),
+            _ => None,
+        }).collect();
+        assert_eq!(copied, vec!["Name\tValue\nalpha\t1\nbeta\t2".to_owned()]);
     }
 }
 
